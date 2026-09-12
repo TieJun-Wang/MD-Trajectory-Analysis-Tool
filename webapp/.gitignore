@@ -1,0 +1,11 @@
+# 构建缓存与临时产物
+.npm-cache/
+node_modules/
+_ssr_build/
+__pycache__/
+
+# 运行时生成的导出结果
+outputs/
+
+# 浏览器布局探针的临时产物（_test_layout.mjs 每次运行会自动重建）
+_probe/

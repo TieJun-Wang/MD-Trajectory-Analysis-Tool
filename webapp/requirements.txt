@@ -1,0 +1,11 @@
+# Web 后端依赖
+#
+# 分析引擎本身只需要 MDAnalysis / NumPy / Pandas / Matplotlib（见项目根 README），
+# 这里只是 Web 服务额外需要的部分。
+#
+# 注意：本机 pip 的默认源曾出现 SSL 不可达，若 `pip install` 失败，可以：
+#   node webapp\_getwheel.mjs webapp\_wheels fastapi
+#   python -m pip install --no-deps --no-index --find-links webapp\_wheels fastapi
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2.9
