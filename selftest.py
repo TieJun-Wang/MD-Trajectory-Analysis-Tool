@@ -64,6 +64,7 @@ from mdta.analysis.base import positions_for                # noqa: E402
 from mdta.io import MDTrajectory, load_trajectory           # noqa: E402
 from mdta.preprocess import select_frames                   # noqa: E402
 from mdta.pipeline import Analyzer, sort_by_estimate         # noqa: E402
+from mdta.qc import derive_checks                            # noqa: E402
 from mdta.selection import classify_residues, select        # noqa: E402
 from mdta.systeminfo import describe_system                 # noqa: E402
 
@@ -1849,6 +1850,347 @@ def test_shortest_first_scheduling():
     assert seen == ["rdf", "msd", "rg"], seen
     assert az_.run_order == ["rdf", "msd", "rg"], az_.run_order
     return f"排序 {got}；实际执行顺序 {seen}（run_order 一致）"
+
+
+def test_peg_chain_type_merges_all_chains():
+    """PEG 数据集：链类型含多条链时，「全部链」必须等于组分本身。
+
+    回归目标：`list_chains` 按 segid+resname 归并出**链类型**（PEG 体系实测
+    `SYSTEM:PEG` = 200 条 × 30 原子），界面上显示成"200 条"。选中它就必须真的
+    把 200 条并成一个对象 —— 1.0.1 之前 web 层只取 `got[0]`，于是一个标着
+    "200 条链"的选项实际只分析了 30 个原子，数值（7.54 Å vs 26.99 Å）与耗时
+    （4 s vs 99 s）全对不上。
+
+    这里在 mdta 层做等价校验：合并 200 条链 == polymer 组分（同一批原子），
+    并用独立公式复核 Rg。
+    """
+    peg = os.environ.get("MDTA_PEG_DIR", r"C:\temp\dataset\PEG_parametrization")
+    top = os.path.join(peg, "eqpbc.gro")
+    xtc = os.path.join(peg, "trajpbc.xtc")
+    if not (os.path.isfile(top) and os.path.isfile(xtc)):
+        return f"跳过：找不到 PEG 数据集 {peg}（可用 MDTA_PEG_DIR 指定）"
+    mdt = load_trajectory(top, xtc)
+    u = mdt.universe
+    from mdta.selection import chains as _chains
+    from mdta.selection import list_chains
+
+    multi = [c for c in list_chains(u) if int(c.count) > 1]
+    assert multi, "PEG 体系应当有含多条链的链类型"
+    ct = max(multi, key=lambda c: int(c.count))
+    assert int(ct.count) == 200 and int(ct.n_atoms) == 30, (ct.count, ct.n_atoms)
+
+    got = _chains(u, segid=str(ct.segid), resname=str(ct.resname),
+                  min_atoms=int(ct.n_atoms))
+    assert len(got) == 200, len(got)
+    merged = u.atoms[np.sort(np.concatenate([np.asarray(g.indices) for g in got]))]
+    assert merged.n_atoms == 6000, merged.n_atoms
+    assert np.array_equal(np.sort(np.asarray(merged.indices)),
+                          np.sort(np.asarray(u.atoms.indices))), \
+        "合并 200 条链应当覆盖整个体系（该体系只有一个组分）"
+
+    sel = select_frames(mdt.times_ps, max_frames=2)
+    res = conf.analyze_rg(mdt, merged, sel, per_molecule=False, label="PEG 全部链")
+    assert int(res.summary["分子数"]) == 200, res.summary["分子数"]
+    # 独立复核**第 0 个选中帧**：质量加权 Rg 的解析式
+    # （注意：analyze_rg 跑完后 universe 停在最后一帧，必须先回到 sel.indices[0]，
+    #  否则拿的是另一帧的坐标，会差出一两埃）
+    u.trajectory[int(sel.indices[0])]
+    pos = positions_for(merged, unwrap=True)
+    m = np.asarray(merged.masses, dtype=float)
+    com = (pos * m[:, None]).sum(0) / m.sum()
+    rg_ref = float(np.sqrt((m * ((pos - com) ** 2).sum(1)).sum() / m.sum()))
+    assert abs(res.curves[0].y[0] - rg_ref) < 1e-9, (res.curves[0].y[0], rg_ref)
+    # 单条链与整组必须差得明显（否则就是没合并）
+    one = conf.analyze_rg(mdt, got[0], sel, per_molecule=False, label="第 1 条")
+    assert res.summary["Rg mean"] - one.summary["Rg mean"] > 5.0, (
+        res.summary["Rg mean"], one.summary["Rg mean"])
+    return (f"{ct.label}: {ct.count} 条 × {ct.n_atoms} 原子 → 合并 {merged.n_atoms} 原子；"
+            f"第 0 帧 Rg={res.curves[0].y[0]:.3f} Å 与独立公式 {rg_ref:.3f} Å 一致"
+            f"（2 帧均值 {res.summary['Rg mean']:.3f} Å）；单条链 "
+            f"{one.summary['Rg mean']:.3f} Å，差 "
+            f"{res.summary['Rg mean'] - one.summary['Rg mean']:.1f} Å")
+
+
+def test_qc_checks_are_derived_and_structured():
+    """科研 QC：判据要变成**结构化检查项**，并给出整体结论。
+
+    这里用合成结果把规则钉死：饱和概率、不显著第一峰、PBC 追踪失效、
+    偏离扩散标度、样本偏少、量被拒绝 —— 各自应导出预期级别的检查项。
+    """
+    from mdta.core import AnalysisResult
+    from mdta.qc import checks_digest, worst_level
+
+    # (a) 干净的曲线：整体 ok
+    r = AnalysisResult(name="rg", title="Rg")
+    r.summary.update({"分子数": 3, "统计口径": "整组 Rg + 逐分子 Rg", "Rg n": 500})
+    checks = derive_checks(r)
+    assert checks and worst_level(checks) == "ok", checks
+    assert any(c["名称"] == "分析对象" for c in checks)
+
+    # (b) 各种问题：级别必须对
+    r2 = AnalysisResult(name="contact", title="接触")
+    r2.summary.update({"接触概率是否饱和": "是（恒为 1，无区分度）", "配对模式": "inter"})
+    derive_checks(r2)
+    assert any(c["名称"] == "指标区分度" and c["级别"] == "warn" for c in r2.checks)
+
+    r3 = AnalysisResult(name="rdf", title="RDF")
+    r3.summary.update({"W-W 第一峰是否显著": "否", "W-W 第一峰高度 g_max": 1.12,
+                       "W-W 第一峰位置 (Å)": 4.95})
+    derive_checks(r3)
+    c3 = [c for c in r3.checks if c["名称"] == "结构峰显著性"][0]
+    assert c3["级别"] == "warn" and "不给配位数" in c3["依据"], c3
+    assert "1.120" in c3["结论"] and "4.95" in c3["结论"], c3["结论"]
+
+    r4 = AnalysisResult(name="msd", title="MSD")
+    r4.summary.update({"polymer 最小镜像失效比例": 0.24,
+                       "polymer α (log-log 斜率)": 0.75,
+                       "polymer D 标准误 (m²/s)": 1e-12,
+                       "polymer 标准误来源": "拟合协方差 × 实测 AR(1) 修正（分块不足 3 块，误差偏乐观）"})
+    derive_checks(r4)
+    by = {c["名称"]: c for c in r4.checks}
+    assert by["PBC 追踪"]["级别"] == "bad", by["PBC 追踪"]
+    assert by["扩散标度"]["级别"] == "warn", by["扩散标度"]
+    assert by["误差棒可信度"]["级别"] == "warn", by["误差棒可信度"]
+    assert worst_level(r4.checks) == "bad"
+
+    # 容差边界：|α-1| ≤ 0.15 判 ok，超过才 warn
+    r4b = AnalysisResult(name="msd", title="MSD")
+    r4b.summary["polymer α (log-log 斜率)"] = 0.88
+    derive_checks(r4b)
+    assert [c for c in r4b.checks if c["名称"] == "扩散标度"][0]["级别"] == "ok"
+    r4c = AnalysisResult(name="msd", title="MSD")
+    r4c.summary["polymer α (log-log 斜率)"] = 0.80
+    derive_checks(r4c)
+    assert [c for c in r4c.checks if c["名称"] == "扩散标度"][0]["级别"] == "warn"
+
+    r5 = AnalysisResult(name="ree", title="R_ee")
+    r5.summary.update({"R_ee 是否可定义": "否", "R_ee 说明": "该组是环状分子，没有端基"})
+    derive_checks(r5)
+    assert any(c["级别"] == "bad" and "拒绝" in c["结论"] for c in r5.checks), r5.checks
+
+    r6 = AnalysisResult(name="x", title="x")            # 无产出 → bad
+    derive_checks(r6)
+    assert worst_level(r6.checks) == "bad", r6.checks
+
+    r7 = AnalysisResult(name="rg", title="Rg")          # 样本偏少 → warn
+    r7.summary.update({"Rg n": 5})
+    derive_checks(r7)
+    assert any(c["名称"] == "样本数" and c["级别"] == "warn" for c in r7.checks)
+
+    d = checks_digest(r4.checks)
+    assert d["bad"] >= 1 and d["warn"] >= 2, d
+
+    # (c) 真实体系上每个分析都要有检查项
+    top, xtc = _CLI_ARGS[0] or TOP_DEFAULT, _CLI_ARGS[1] or XTRAJ_DEFAULT
+    az_ = Analyzer(top, xtc)
+    az_.auto_setup()
+    az_.frames = az_.require_frames().head(4)
+    n_checked = 0
+    for nm in ("rg", "ree", "msd", "contact", "rdf"):
+        r = az_.run(nm)
+        if r is None:
+            continue
+        assert r.checks, f"{nm} 没有导出任何 QC 检查项"
+        assert all({"名称", "级别", "结论", "依据"} <= set(c) for c in r.checks)
+        n_checked += 1
+    return (f"合成规则 7 组全对（含 bad/warn 分级与整体结论）；真实体系 "
+            f"{n_checked} 个分析各自导出检查项")
+
+
+def test_trans_threshold_is_shared_between_dihedral_and_order():
+    """trans/gauche 阈值必须**两个模块共用**（改一处两处都变）。
+
+    回归目标：`analyze_structural_order` 早先把 120° 写死，界面上改阈值只影响
+    「二面角分析」，「结构有序度」里的 trans 构象比例仍是旧阈值算的 —— 同一条
+    轨迹上两个模块会报出互相矛盾的"trans 比例"。
+    """
+    top, xtc = _CLI_ARGS[0] or TOP_DEFAULT, _CLI_ARGS[1] or XTRAJ_DEFAULT
+    az_ = Analyzer(top, xtc)
+    az_.auto_setup()
+    az_.frames = az_.require_frames().head(4)
+    label = az_.primary_label
+    out = {}
+    for edge in (120.0, 100.0):
+        d = az_.run("dihedral", params={"gauche_edge": edge, "mode": "chain"})
+        o = az_.run("order", params={"gauche_edge": edge})
+        out[edge] = (d.summary["dihedral trans 比例"],
+                     o.summary["反式构象比例 平均"])
+    # 收紧阈值（120°→100°）后，两个模块的 trans 比例都必须**上升**
+    assert out[100.0][0] > out[120.0][0], out
+    assert out[100.0][1] > out[120.0][1], out
+    # 两者统计的二面角集合不同（几何骨架 vs 化学重复单元），数值不必相等，
+    # 但都必须随阈值单调变化 —— 这才是"共用判据"的可验证含义
+    assert any("trans 判据" in n for n in
+               az_.run("order").notes), "order 没写明 trans 判据"
+    return (f"{label}：阈值 120°→100° 时 dihedral trans 比例 "
+            f"{out[120.0][0]:.3f}→{out[100.0][0]:.3f}、order "
+            f"{out[120.0][1]:.3f}→{out[100.0][1]:.3f}，两者同步变化")
+
+
+def test_boo_matches_analytic_lattice_values():
+    """BOO：对**理想晶格**必须复现 Steinhardt 解析值（fcc/hcp/bcc/sc）。
+
+    两条独立路径：
+
+    1. 方向集直接算 —— 把 12/8/6 个最近邻方向喂给模块内部同一个球谐实现，
+       检查归一化常数 4π/(2l+1) 与 l=4/6 都对；
+    2. 完整流程 —— 造**真实晶格 Universe**（含 PBC、邻居搜索、逐原子平均），
+       检查 q4/q6 的平均值与解析值一致；再与"同密度的随机液体"对比，
+       确认判据能区分固-液（液相 q6 必须显著更低）。
+    """
+    from mdta.analysis import boo as BOO
+
+    # ---- 1) 方向集（解析最近邻方向）
+    fcc_dirs = []
+    for a in (0, 1, -1):
+        for b in (0, 1, -1):
+            for c in (0, 1, -1):
+                v = np.array([a, b, c], float)
+                if np.count_nonzero(v) == 2:
+                    fcc_dirs.append(v / np.linalg.norm(v))
+    fcc_dirs = np.unique(np.round(np.array(fcc_dirs), 9), axis=0)
+    assert len(fcc_dirs) == 12
+    # 理想 hcp（c/a=√(8/3)）的 12 个最近邻：6 个面内 + 上下各 3 个**方位角与上方重合**
+    # （anticuboctahedron，重叠）。⚠️ 若把上下三角错开 60° 就变成 fcc 的
+    # cuboctahedron，q4 会得到 fcc 的 0.19094 —— 这个坑我第一次就踩了。
+    hcp_dirs = np.array([
+        [1, 0, 0], [-1, 0, 0],
+        [0.5, 0.8660254, 0], [-0.5, 0.8660254, 0],
+        [0.5, -0.8660254, 0], [-0.5, -0.8660254, 0],
+        [0.5, 0.2886751, 0.8164966], [-0.5, 0.2886751, 0.8164966],
+        [0, -0.5773503, 0.8164966],
+        [0.5, 0.2886751, -0.8164966], [-0.5, 0.2886751, -0.8164966],
+        [0, -0.5773503, -0.8164966]], float)
+    hcp_dirs /= np.linalg.norm(hcp_dirs, axis=1)[:, None]
+    sc_dirs = np.array([[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]], float)
+    # ⚠️ 文献里 bcc 的 q4=0.03637 / q6=0.51069 用的是 **14 邻居**（8 个 <111> + 6 个 <100>）；
+    #    只取 8 个 <111> 会得到 0.50918 / 0.62854（那是立方体角方向的值）。
+    bcc_dirs = np.array([[a, b, c] for a in (1, -1) for b in (1, -1) for c in (1, -1)]
+                        + [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
+                           [0, 0, 1], [0, 0, -1]], float)
+    bcc_dirs /= np.linalg.norm(bcc_dirs, axis=1)[:, None]
+    got = {}
+    for name, dirs in (("fcc", fcc_dirs), ("hcp", hcp_dirs), ("sc", sc_dirs), ("bcc", bcc_dirs)):
+        got[name] = (BOO.ql_from_directions(dirs, 4), BOO.ql_from_directions(dirs, 6))
+        ref = BOO.REFERENCE_QL[name]
+        assert abs(got[name][0] - ref[0]) < 5e-4, (name, got[name][0], ref[0])
+        assert abs(got[name][1] - ref[1]) < 5e-4, (name, got[name][1], ref[1])
+
+    # ---- 2) 完整流程：晶格 Universe + PBC 邻居搜索
+    def lattice_universe(kind, n=3, a=5.0):
+        bases = {"sc": [(0, 0, 0)],
+                 "bcc": [(0, 0, 0), (.5, .5, .5)],
+                 "fcc": [(0, 0, 0), (.5, .5, 0), (.5, 0, .5), (0, .5, .5)],
+                 "diamond": [(0, 0, 0), (.25, .25, .25), (.5, .5, 0), (.75, .75, .25),
+                             (.5, 0, .5), (.75, .25, .75), (0, .5, .5), (.25, .75, .75)]}
+        pts = []
+        for i in range(n):
+            for j in range(n):
+                for k in range(n):
+                    for b in bases[kind]:
+                        pts.append((np.array([i, j, k]) + np.array(b)) * a)
+        pos = np.array(pts, dtype=np.float32)
+        u = mda.Universe.empty(len(pos), n_residues=len(pos),
+                               atom_resindex=np.arange(len(pos)), trajectory=True)
+        u.add_TopologyAttr("masses", np.ones(len(pos)))
+        u.dimensions = np.array([n * a, n * a, n * a, 90, 90, 90], dtype=np.float32)
+        u.trajectory = mda.coordinates.memory.MemoryReader(pos[None], order="fac",
+                                                           dimensions=u.dimensions)
+        return u
+
+    mdt = MDTrajectory.from_universe(lattice_universe("fcc", n=3, a=5.0))
+    sel = select_frames(np.array([0.0]))
+    # 装了 freud 就自动一并用解析值校它：**不重复造轮子**，有库就用库
+    # 默认只跑自带实现（零依赖）；**若环境里恰好有 freud**，顺带用它交叉核对
+    backends = ["numpy"] + (["freud"] if BOO._freud_available() else [])
+    r_fcc = None
+    for be in backends:
+        rb = BOO.analyze_boo(mdt, mdt.universe.atoms, sel, cutoff=3.7,
+                             averaged=False, backend=be)
+        assert rb.summary["计算后端"] == be, rb.summary["计算后端"]
+        assert abs(rb.summary["q4 平均"] - 0.19094) < 2e-3, (be, rb.summary["q4 平均"])
+        assert abs(rb.summary["q6 平均"] - 0.57452) < 2e-3, (be, rb.summary["q6 平均"])
+        assert abs(rb.summary["平均邻居数"] - 12.0) < 1e-6, rb.summary["平均邻居数"]
+        r_fcc = rb
+
+    for kind, a, cut, q4, q6 in (("sc", 5.0, 5.6, 0.76376, 0.35355),
+                                 # bcc 的参考文献值需要**两个壳层**：第一壳 8 个 <111>
+                                 # 在 a√3/2=4.33 Å、第二壳 6 个 <100> 在 a=5.0 Å，
+                                 # 所以 cutoff 必须 > 5.0（4.5 只会圈到 8 个，得到 0.50918）
+                                 ("bcc", 5.0, 5.6, 0.03637, 0.51069)):
+        mdt_k = MDTrajectory.from_universe(lattice_universe(kind, n=3, a=a))
+        r_k = BOO.analyze_boo(mdt_k, mdt_k.universe.atoms, sel, cutoff=cut, averaged=False)
+        assert abs(r_k.summary["q4 平均"] - q4) < 3e-3, (kind, r_k.summary["q4 平均"], q4)
+        assert abs(r_k.summary["q6 平均"] - q6) < 3e-3, (kind, r_k.summary["q6 平均"], q6)
+
+    # ---- 3) 固-液区分：同密度的随机坐标（每个原子仍有 ~12 个邻居，但方向随机）
+    rng = np.random.default_rng(7)
+    n_side = 3
+    L = n_side * 5.0
+    n_at = 4 * n_side ** 3
+    pos = rng.random((n_at, 3)) * L
+    u_liq = mda.Universe.empty(n_at, n_residues=n_at,
+                               atom_resindex=np.arange(n_at), trajectory=True)
+    u_liq.add_TopologyAttr("masses", np.ones(n_at))
+    u_liq.dimensions = np.array([L, L, L, 90, 90, 90], dtype=np.float32)
+    u_liq.trajectory = mda.coordinates.memory.MemoryReader(
+        pos.astype(np.float32)[None], order="fac", dimensions=u_liq.dimensions)
+    mdt_liq = MDTrajectory.from_universe(u_liq)
+    r_liq = BOO.analyze_boo(mdt_liq, u_liq.atoms, sel, cutoff=3.7, averaged=False)
+    q6_liq = r_liq.summary["q6 平均"]
+    assert r_liq.summary["平均邻居数"] > 5, r_liq.summary["平均邻居数"]
+    assert q6_liq < 0.4 < r_fcc.summary["q6 平均"], (q6_liq, r_fcc.summary["q6 平均"])
+
+    return (f"解析值复核：fcc q4={got['fcc'][0]:.5f}/q6={got['fcc'][1]:.5f}、"
+            f"hcp {got['hcp'][0]:.5f}/{got['hcp'][1]:.5f}、"
+            f"sc {got['sc'][0]:.5f}/{got['sc'][1]:.5f}、bcc {got['bcc'][0]:.5f}/{got['bcc'][1]:.5f}"
+            f"；晶格 Universe 复核 fcc q6={r_fcc.summary['q6 平均']:.5f}（邻居 "
+            f"{r_fcc.summary['平均邻居数']:.0f}，后端 {'/'.join(backends)}）；"
+            f"随机液体 q6={q6_liq:.3f} 显著更低")
+
+
+def test_crystal_identification_separates_solid_from_liquid():
+    """晶体/非晶识别：理想 fcc 应几乎全部落入晶区，随机液体 φ_c≈0，
+
+    且 **Avrami 参数必须被拒绝**（没有结晶过程就不该给出 n、k）。
+    """
+    from mdta.analysis import boo as BOO
+
+    def make(kind, n=3, a=5.0, seed=None):
+        rng = np.random.default_rng(seed)
+        if kind == "fcc":
+            bases = [(0, 0, 0), (.5, .5, 0), (.5, 0, .5), (0, .5, .5)]
+            pts = [((np.array([i, j, k]) + np.array(b)) * a)
+                   for i in range(n) for j in range(n) for k in range(n) for b in bases]
+            pos = np.array(pts, dtype=np.float32)
+        else:
+            pos = (rng.random((4 * n ** 3, 3)) * (n * a)).astype(np.float32)
+        u = mda.Universe.empty(len(pos), n_residues=len(pos),
+                               atom_resindex=np.arange(len(pos)), trajectory=True)
+        u.add_TopologyAttr("masses", np.ones(len(pos)))
+        u.dimensions = np.array([n * a] * 3 + [90, 90, 90], dtype=np.float32)
+        u.trajectory = mda.coordinates.memory.MemoryReader(pos[None], order="fac",
+                                                           dimensions=u.dimensions)
+        return u
+
+    # 合成体系只写入了 1 帧，选帧时必须只选这一帧
+    sel = select_frames(np.array([0.0]))
+    mdt_solid = MDTrajectory.from_universe(make("fcc", 3, 5.0))
+    r_solid = BOO.analyze_crystal_regions(mdt_solid, mdt_solid.universe.atoms, sel,
+                                          cutoff=3.7, q6_solid=0.5, min_cluster=10)
+    assert r_solid.summary["结晶分数 平均"] > 0.95, r_solid.summary["结晶分数 平均"]
+    assert r_solid.summary["Avrami 是否可拟合"] is False or \
+        r_solid.summary["Avrami 是否可拟合"] == "否", r_solid.summary
+    assert any("未给出 Avrami" in n for n in r_solid.notes), "应说明为何不给 Avrami"
+
+    u_liq = make("liquid", 3, 5.0, seed=11)
+    r_liq = BOO.analyze_crystal_regions(MDTrajectory.from_universe(u_liq), u_liq.atoms,
+                                        sel, cutoff=3.7, q6_solid=0.5, min_cluster=10)
+    assert r_liq.summary["结晶分数 平均"] < 0.05, r_liq.summary["结晶分数 平均"]
+    return (f"fcc 晶区占比 {r_solid.summary['结晶分数 平均']:.3f}"
+            f"（最大晶簇 {r_solid.summary['最大晶簇原子数 平均']:.0f} 原子）；"
+            f"随机液体 φ_c={r_liq.summary['结晶分数 平均']:.4f}；"
+            f"两者都正确拒绝 Avrami")
 
 
 def main(argv: list[str] | None = None) -> int:

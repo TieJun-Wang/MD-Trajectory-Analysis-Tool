@@ -548,8 +548,17 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
         _m, slices, mol_labels = ms
         n_mol = len(slices)
     else:
-        slices, mol_labels, n_mol = [], [], 1
+        slices, mol_labels = [], []
+        # 即使不算逐分子值，**分子数也必须如实报出**：早先这里直接写 n_mol = 1，
+        # 于是关掉逐分子统计后，一个含 648 个癸醇分子的 polymer 组分会在结果里
+        # 显示成「统计口径 = 整组（该组即 1 个分子）」—— 与事实相反。
+        from .interface import _atom_molnums
+
+        _mm = _atom_molnums(ag)
+        n_mol = int(np.unique(_mm).size) if _mm is not None else 1
     multi = n_mol > 1
+    #: 只有真的拆开了分子才做逐分子统计（per_molecule=False 时 slices 为空）
+    do_per_mol = multi and bool(slices)
     rg_mol = np.full((n_frame, n_mol), np.nan)
 
     for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
@@ -557,7 +566,7 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
         # 因此逐分子 Rg 可以直接在这份坐标上切片，无需重复展开。
         pos = positions_for(ag, unwrap=unwrap)
         rg[k] = compute_rg(pos, masses)
-        if multi:
+        if do_per_mol:
             for j, sl in enumerate(slices):
                 sub_m = None if masses is None else masses[sl]
                 rg_mol[k, j] = compute_rg(pos[sl], sub_m)
@@ -596,7 +605,7 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
     res.summary["Rg 块平均标准误"] = float(bsem)
     res.summary["分子数"] = int(n_mol)
 
-    if multi:
+    if do_per_mol:
         mol_mean = np.nanmean(rg_mol, axis=0)                  # 每个分子的时间平均 Rg
         ok = np.isfinite(mol_mean)
         res.summary["统计口径"] = "整组 Rg + 逐分子 Rg"
@@ -630,6 +639,13 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
             res.add_notes(
                 "分子间 Rg 的相对离散度超过 30%，说明体系里各分子的链尺寸差别很大"
                 "（存在不同聚合度/构象亚群），只报一个平均值会掩盖这种多分散性。")
+    elif multi:
+        # 多分子组分但关掉了逐分子统计：如实说明这个数是"整团物质"的尺寸
+        res.summary["统计口径"] = f"整组（未逐分子拆分；该组分含 {n_mol} 个分子）"
+        res.add_notes(
+            f"已按 per_molecule=False 关闭逐分子统计：该组分含 **{n_mol} 个分子**，"
+            f"上面的 Rg 是**整团物质**（{ag.n_atoms:,} 个原子一起）的回转半径，"
+            f"不是单个分子有多大。需要单分子尺寸请打开「逐分子统计」。")
     else:
         res.summary["统计口径"] = "整组（该组即 1 个分子）"
         if per_molecule:

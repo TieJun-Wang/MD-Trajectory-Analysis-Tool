@@ -48,13 +48,22 @@ DEFAULT_PARAMS: dict = {
     "interface": {"axis": 2, "nbins": 120},
     # 取向链段默认取**化学重复单元**（1.0.1 起；1.0.0 为几何骨架 "backbone"）
     "orientation": {"mode": "repeat", "stride": 1},
-    "order": {},
+    # trans/gauche 判据与「二面角分析」共用同一阈值：改一处两处都变，
+    # 免得同一条轨迹上两个模块报出不同的"trans 构象比例"。
+    # ⚠️ 每个分析项在这张表里只能出现**一次**：字典字面量里重复的键会被后者
+    #    静默覆盖（这里曾同时写了 `"order": {"gauche_edge": …}` 和 `"order": {}`，
+    #    结果默认阈值被吃掉，只有显式传参才生效）。
+    "order": {"gauche_edge": 120.0},
     "msd": {},
+    # 键取向序参数 / 晶体-非晶识别（1.0.2）：默认用 Lechner–Dellago 平均版 q̄6，
+    # 邻域半径留空 = 自动按最近邻距离中位数推定
+    "boo": {"cutoff": None, "averaged": True},
+    "crystal": {"cutoff": None, "q6_solid": 0.5, "min_cluster": 10},
 }
 
 #: 默认执行顺序（按设计大纲第 25–27 章）
 DEFAULT_ORDER = ["rg", "ree", "dihedral", "density", "rdf", "contact",
-                 "interface", "orientation", "order", "msd"]
+                 "interface", "orientation", "order", "boo", "crystal", "msd"]
 
 #: 中文标题
 ANALYSIS_TITLES = {
@@ -67,6 +76,8 @@ ANALYSIS_TITLES = {
     "interface": "界面宽度分析",
     "orientation": "链段取向分析",
     "order": "结构有序度分析",
+    "boo": "键取向序参数 BOO",
+    "crystal": "晶体/非晶区域识别",
     "msd": "均方位移 MSD",
 }
 
@@ -76,7 +87,7 @@ ANALYSIS_TITLES = {
 ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("链构象", ("rg", "ree", "dihedral")),
     ("空间结构", ("density", "rdf", "contact", "interface")),
-    ("取向与结晶", ("orientation", "order")),
+    ("取向与结晶", ("orientation", "order", "boo", "crystal")),
     ("动力学与输运", ("msd",)),
 ]
 
@@ -225,7 +236,17 @@ class Analyzer:
     # ------------------------------------------------------------ 运行
     def run(self, name: str, *, params: Mapping | None = None,
             verbose: bool = False) -> AnalysisResult | None:
-        """运行单个分析项。"""
+        """运行单个分析项（跑完自动挂上科研 QC 检查项）。"""
+        from . import qc
+
+        res = self._run_one(name, params=params, verbose=verbose)
+        if res is not None:
+            qc.derive_checks(res)          # 统一把散落的判据变成结构化结论
+        return res
+
+    def _run_one(self, name: str, *, params: Mapping | None = None,
+                 verbose: bool = False) -> AnalysisResult | None:
+        """单项分析的实际实现（不含 QC 导出）。"""
         from .analysis import conformation as conf
         from .analysis import crystallinity as cry
         from .analysis import dynamics as dyn
@@ -289,6 +310,18 @@ class Analyzer:
             ag, lab = self._orientation_target()
             return cry.analyze_structural_order(self.trajectory, ag, sel,
                                                 label=lab, verbose=verbose, **p)
+        if name == "boo":
+            from .analysis import boo as boo_mod
+
+            ag, lab = self._orientation_target()
+            return boo_mod.analyze_boo(self.trajectory, ag, sel,
+                                       label=lab, verbose=verbose, **p)
+        if name == "crystal":
+            from .analysis import boo as boo_mod
+
+            ag, lab = self._orientation_target()
+            return boo_mod.analyze_crystal_regions(self.trajectory, ag, sel,
+                                                   label=lab, verbose=verbose, **p)
         if name == "msd":
             groups = self._msd_groups()
             if not groups:
@@ -302,6 +335,40 @@ class Analyzer:
     #: 可能比正式分析还大（AdK 10 帧实测：预估 12 s，正式跑 18 s）。
     #: 大体系（46 体系 10001 帧）预估算 17 s，占预计总时长不到 0.2%，非常划算。
     ESTIMATE_MIN_FRAMES = 40
+
+    def warmup(self) -> dict:
+        """把**一次性初始化**开销先做掉（不归属于任何分析项）。
+
+        为什么必须做：molnums 展开、键图/连通分量、解包裹机制都是**首次访问才建**。
+        实测（AdK water 组分、3 帧、全新进程）：``rg`` 关掉逐分子统计后第一次调用
+        **6.40 s**、之后每次 **0.03 s**；开着时稳定 **1.25 s**。那几秒会记在
+        "队首那一项"头上 —— 于是只要改一个开关让排序变一下，同一项就可能从
+        1.3 s "变成" 6.4 s，看起来像变慢了（总时长其实更短）。预热之后，
+        逐项耗时与预估都能跨设置比较。
+        """
+        from .analysis.base import positions_for
+
+        touched: list[str] = []
+        u = self.universe
+        for label, fn in (("molnums", lambda: u.atoms.molnums),
+                          ("fragments", lambda: u.atoms.fragments)):
+            try:
+                fn()
+                touched.append(label)
+            except Exception:  # noqa: BLE001
+                pass
+        groups = ([self.primary] if self.primary is not None else []) + \
+                 [g for g in self.components.values() if g is not None]
+        for ag in groups:
+            try:
+                ag.fragments
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                positions_for(ag, unwrap=True)
+            except Exception:  # noqa: BLE001
+                pass
+        return {"touched": touched, "n_groups": len(groups)}
 
     def _time_one(self, name: str, params: Mapping, sel) -> float:
         """把帧选择临时换成 ``sel``，跑一次并计时（**结果丢弃**）。"""
@@ -341,6 +408,12 @@ class Analyzer:
         keep_frames, keep_current = self.frames, self.current
         out: dict[str, dict] = {}
         try:
+            # 先预热：否则"第一个被探测的项"会把一次性初始化算进自己的预估里，
+            # 排序就会因此跑偏
+            try:
+                self.warmup()
+            except Exception:  # noqa: BLE001
+                pass
             if n < max(int(self.ESTIMATE_MIN_FRAMES), 2 * (k + 1)):
                 # 体系太小：预估要跑 k 帧，占比过高，直接跑更省事
                 note = (f"只有 {n} 帧，预估本身的成本已不可忽略"
@@ -426,6 +499,14 @@ class Analyzer:
         #: ``{分析名: 耗时秒数}``，供界面显示"哪一项最慢"
         self.timings: dict[str, float] = {}
         self.run_order: list[str] = list(names)
+        # 预热放在计时之前：一次性初始化（分子编号展开/键图/解包裹）不该算进
+        # 队首那一项的耗时里（否则改个开关就能让同一项"看起来变慢"）
+        if progress:
+            progress(0.0, "预热（一次性初始化：分子编号 / 键图 / 解包裹）…")
+        try:
+            self.warmup()
+        except Exception:  # noqa: BLE001
+            pass
         sel = self.require_frames()
         if verbose:
             print(f"[帧选择] {sel.describe()}")

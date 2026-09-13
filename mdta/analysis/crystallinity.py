@@ -452,6 +452,7 @@ def analyze_structural_order(mdt, ag, selection: FrameSelection, *,
                              rdf_rmax: float = 8.0,
                              rdf_nbins: int = 80,
                              g_ref: float | None = None,
+                             gauche_edge: float = 120.0,
                              weights: tuple[float, float, float] = (1.0, 1.0, 1.0),
                              verbose: bool = False,
                              label: str = "链") -> AnalysisResult:
@@ -544,8 +545,12 @@ def analyze_structural_order(mdt, ag, selection: FrameSelection, *,
         a = a[np.isfinite(a)]
         if a.size:
             s_tors[k] = float(-np.mean(np.cos(np.radians(3.0 * a))))
-            f_trans[k] = classify_dihedrals(a)["trans"]
+            f_trans[k] = classify_dihedrals(a, gauche_edge=gauche_edge)["trans"]
     notes.append(f"二面角分量：{series.shape[1]} 个二面角（{dname}）")
+    # 与「二面角分析」共用同一个 trans 判据：早先这里写死默认 120°，
+    # 界面把阈值改成别的值只影响 dihedral、不影响本分量，两个模块的
+    # "trans 构象比例"会互相矛盾。
+    notes.append(f"trans 判据：|φ| > {gauche_edge:g}°（与「二面角分析」同一阈值）")
 
     # ---- 3. 局部结构（RDF 第一峰高度）
     from .interface import _first_peak, _rdf_accumulate

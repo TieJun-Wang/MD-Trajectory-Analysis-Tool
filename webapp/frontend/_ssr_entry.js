@@ -13,6 +13,7 @@ export { default as NotesPanel } from './src/components/NotesPanel.jsx'
 export { default as StatsPanel } from './src/components/StatsPanel.jsx'
 export { default as ExportPanel, DirPicker } from './src/components/ExportPanel.jsx'
 export { default as LogPanel } from './src/components/LogPanel.jsx'
+export { default as QcPanel } from './src/components/QcPanel.jsx'
 export {
   SelectionBlock,
   FrameBlock,

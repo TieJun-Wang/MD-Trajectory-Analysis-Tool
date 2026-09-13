@@ -13,6 +13,8 @@ import sys
 import threading
 import time
 import uuid
+
+import numpy as np
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
@@ -177,14 +179,41 @@ class Session:
         return out
 
     def components(self) -> list[dict]:
+        """组分清单。``n_molecules`` 是给界面用的：**逐分子统计只在多分子组分上有意义**
+        （单分子组分里"整组 Rg"和"该分子 Rg"是同一个数），界面据此把开关置灰。
+        代价极小（``molnums`` 直接读属性，AdK water 44336 原子实测 0.000 s）。
+        """
+        from mdta.analysis.interface import _atom_molnums
+
         out = []
         for name, ag in self.az.components.items():
+            n_mol = 1
+            try:
+                m = _atom_molnums(ag)
+                if m is not None:
+                    n_mol = int(np.unique(m).size) if m.size else 1
+            except Exception:  # noqa: BLE001
+                n_mol = 1
             out.append({
                 "name": name,
                 "n_atoms": int(ag.n_atoms),
                 "n_residues": int(ag.residues.n_residues),
+                "n_molecules": n_mol,
             })
         return out
+
+    def primary_molecules(self) -> int:
+        """当前主链对象含多少个分子（1 = 逐分子统计无意义）。"""
+        from mdta.analysis.interface import _atom_molnums
+
+        ag = self.az.primary
+        if ag is None or ag.n_atoms == 0:
+            return 0
+        try:
+            m = _atom_molnums(ag)
+            return int(np.unique(m).size) if m is not None and m.size else 1
+        except Exception:  # noqa: BLE001
+            return 1
 
     # ----------------------------------------------------------------- 选择
     def apply_selection(self, req: Mapping[str, Any] | None) -> dict:
@@ -214,7 +243,20 @@ class Session:
                           min_atoms=int(primary.get("min_atoms", 1)))
             if not got:
                 raise SessionError("按 segid/resname 没有找到任何链")
-            az.set_primary(got[0], f"{primary.get('segid')}:{primary.get('resname')}")
+            tag = f"{primary.get('segid')}:{primary.get('resname')}"
+            if primary.get("all") and len(got) > 1:
+                # 界面上的「链」是按 segid+resname 归并出来的**链类型**（如 PEG 的
+                # "200 条，每条 30 原子"）。标了"全部 N 条"就必须真的把 N 条并起来：
+                # 早先无论 count 是多少都只取 got[0]，于是一个写着"200 条"的选项
+                # 实际只分析了 30 个原子（1 条链）—— 实测 Rg 因此给出 7.57 Å
+                # 而不是 200 条整组的 26.98 Å，耗时也差 25 倍。
+                idx = np.sort(np.concatenate(
+                    [np.asarray(g.indices, dtype=np.int64) for g in got]))
+                ag = az.universe.atoms[idx]
+                az.set_primary(ag, f"{tag} 全部 {len(got)} 条链 ({ag.n_atoms} 原子)")
+            else:
+                az.set_primary(got[0], tag + (f" 第 1 条（共 {len(got)} 条）"
+                                              if len(got) > 1 else ""))
 
         wanted = req.get("components")
         if wanted:
@@ -233,6 +275,7 @@ class Session:
         return {
             "primary_label": az.primary_label,
             "primary_atoms": int(az.primary.n_atoms) if az.primary is not None else 0,
+            "primary_molecules": self.primary_molecules(),
             "components": self.components(),
         }
 

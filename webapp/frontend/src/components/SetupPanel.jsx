@@ -33,20 +33,37 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
               : JSON.parse(v))
           }}>
           <option value={JSON.stringify({ mode: 'auto' })}>
-            自动（最大链：{sess.primary_label}，{sess.primary_atoms} 原子）
+            自动（最大链：{sess.primary_label}，{sess.primary_atoms} 原子 / 1 分子）
           </option>
           {comps.map((c) => (
             <option key={c.name} value={JSON.stringify({ mode: 'component', name: c.name })}>
-              组分 {c.name}（{c.n_atoms} 原子）
+              组分 {c.name}（{c.n_atoms} 原子
+              {c.n_molecules != null ? ` / ${c.n_molecules} 分子` : ''}）
             </option>
           ))}
-          {chains.map((c) => (
-            <option key={c.label}
-                    value={JSON.stringify({ mode: 'chain', segid: c.segid,
-                                            resname: c.resname, min_atoms: c.n_atoms })}>
-              {c.label}（{c.description}）
-            </option>
-          ))}
+          {chains.flatMap((c) => {
+            // 一个 ChainType 可能含多条同种链（PEG 体系：200 条 × 30 原子）。
+            // 标"全部 N 条"就必须真的选全部（后端 all=true 会合并），
+            // 否则用户按标签理解的对象和实际分析对象不是一回事。
+            const base = { mode: 'chain', segid: c.segid, resname: c.resname,
+                           min_atoms: c.n_atoms }
+            if ((c.count || 1) > 1) {
+              return [
+                <option key={`${c.label}-all`}
+                        value={JSON.stringify({ ...base, all: true })}>
+                  全部 {c.count} 条链 {c.label}（共 {(c.n_atoms * c.count).toLocaleString()} 原子）
+                </option>,
+                <option key={`${c.label}-first`} value={JSON.stringify(base)}>
+                  第 1 条（共 {c.count} 条，{c.n_atoms} 原子）
+                </option>,
+              ]
+            }
+            return [(
+              <option key={c.label} value={JSON.stringify(base)}>
+                {c.label}（{c.description}）
+              </option>
+            )]
+          })}
           <option value="custom">自定义选择语句…</option>
         </select>
       </label>
@@ -67,7 +84,10 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
             <button key={c.name}
                     className={`chip-pick ${components.includes(c.name) ? 'on' : ''}`}
                     onClick={() => toggleComponent(c.name)}
-                    title={`${c.n_atoms.toLocaleString()} 原子 / ${c.n_residues} 残基`}>
+                    title={`${c.n_atoms.toLocaleString()} 原子 / ${c.n_residues} 残基`
+                      + (c.n_molecules != null
+                        ? ` / ${c.n_molecules} 个分子${c.n_molecules === 1
+                          ? '（单分子，逐分子统计无意义）' : ''}` : '')}>
               {c.name}
             </button>
           ))}
@@ -176,7 +196,7 @@ export function FrameBlock({ frames, setFrames }) {
 }
 
 /** 分析参数：按分析项分组，**只显示已选分析项的参数**（which=null → 全显示）。 */
-export function ParamBlock({ params, setParams, which = null }) {
+export function ParamBlock({ params, setParams, which = null, primaryMolecules = null }) {
   const p = (key) => ({
     value: params[key] ?? '',
     onChange: (e) => setParams({ ...params, [key]: e.target.value }),
@@ -189,13 +209,62 @@ export function ParamBlock({ params, setParams, which = null }) {
   )
   const F = (key, label, kind, node, ph = '') => ({ key, label, span: spanOf(label, kind, ph), node })
 
+  // 布尔开关：值必须是**真布尔**（后端按 bool 收），不能用上面 p() 的字符串写法
+  const chk = (key, label, title = '', { disabled = false } = {}) => (
+    <label className={`pchk${disabled ? ' off' : ''}`} title={title || undefined}>
+      <input type="checkbox" checked={params[key] !== false} disabled={!!disabled}
+             onChange={(e) => setParams({ ...params, [key]: e.target.checked })} />
+      {label}
+    </label>
+  )
+
   const show = (mods) => {
     if (mods === null) return true
     if (which === null || !Array.isArray(which)) return true
     return mods.some((m) => which.includes(m))
   }
 
+  //: 主链只有一个分子时，「逐分子统计」在数学上没有作用（整组 Rg == 该分子 Rg）
+  const singleMol = primaryMolecules === 1
+
   const GROUPS = [
+    ['键取向序 BOO / 晶体识别', ['boo', 'crystal'], [
+      F('boo_cutoff', '邻域半径 (Å)', 'input',
+        numInput('自动', { step: 0.1, min: 0, ...p('boo_cutoff') }), '自动'),
+      F('boo_averaged', '用平均版 q̄_l', 'check',
+        chk('boo_averaged', '是（推荐）',
+          '开：Lechner–Dellago 平均版 q̄_l（先用邻居的 q_lm 平均再求模，识别固-液更稳）；'
+          + '关：单原子 q_l（液相里涨落大，判据会偏松）')),
+      F('q6_solid', '固相判据 q̄6 >', 'input',
+        numInput('0.5', { step: 0.05, min: 0, max: 1, ...p('q6_solid') }),
+        '0.5'),
+      F('min_cluster', '晶簇最小规模', 'input',
+        numInput('10', { step: 1, min: 1, ...p('min_cluster') }), '10'),
+    ]],
+    ['回转半径 Rg / 端到端距离 R_ee', ['rg', 'ree'], [
+      F('mass_weighted', '质量加权 Rg', 'check',
+        chk('mass_weighted', '用质量加权', '开：质量加权回转半径（默认）；'
+          + '关：等权（几何）口径，每个原子权重相同')),
+      F('per_molecule', '逐分子统计', 'check',
+        chk('per_molecule', '按分子分别算',
+          singleMol
+            ? '该组分只有 1 个分子'
+            : '开（默认）：Rg/R_ee 逐分子计算后再对分子取平均（多分子组分才有'
+              + '「单分子 Rg 平均」等统计量）；关：只给整组值（多分子组分的整组 '
+              + 'Rg 接近盒子尺度，不是「分子有多大」）',
+          { disabled: singleMol })),
+      F('ree_ends', 'R_ee 链端来源', 'select', sel('ree_ends', [
+        ['bond_graph', 'bond_graph（键连图端基，默认）'],
+        ['selection', 'selection（所选原子组首尾原子）'],
+      ])),
+      F('ree_atoms', 'R_ee 指定原子', 'text',
+        <input type="text" placeholder="如 0,3034（留空自动）"
+               style={{ minWidth: inputMinWidth('如 0,3034（留空自动）') }}
+               value={params.ree_atoms ?? ''}
+               title="手工指定两个成键原子作为链端，逗号或空格分隔；填了就优先用它"
+               onChange={(e) => setParams({ ...params, ree_atoms: e.target.value })} />,
+        '如 0,3034（留空自动）'),
+    ]],
     ['接触分析', ['contact'], [
       F('cutoff', 'cutoff (Å)', 'input', numInput('', { step: 0.5, ...p('cutoff') })),
       F('contact_mode', '接触配对模式', 'select', sel('contact_mode', [
@@ -380,12 +449,27 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
                 </span>
               </div>
               <ul className="est-list">
-                {estRows.map(([n, s]) => (
-                  <li key={n} className={n === live?.current ? 'cur' : ''}>
-                    <span className="est-name">{titles[n] || n}</span>
-                    <span className="est-sec">≈{fmtSec(s)}</span>
-                  </li>
-                ))}
+                {estRows.map(([n, s]) => {
+                  // 算完的项显示**实测**秒数（后端的 timings），没算完才显示 ≈ 预估
+                  const done = run?.timings?.[n]
+                  return (
+                    <li key={n} className={n === live?.current ? 'cur' : ''}>
+                      <span className="est-name">{titles[n] || n}</span>
+                      <span className={`est-sec${done != null ? ' done' : ''}`}>
+                        {done != null ? `实测 ${fmtSec(done)}` : `≈${fmtSec(s)}`}
+                      </span>
+                    </li>
+                  )
+                })}
+                {/* 有实测但没进预估列表的项（例如关掉开关后估不出来、或分析被跳过）*/}
+                {Object.entries(run?.timings || {})
+                  .filter(([n]) => !(n in (live?.estimates || {})))
+                  .map(([n, s]) => (
+                    <li key={`t-${n}`}>
+                      <span className="est-name">{titles[n] || n}</span>
+                      <span className="est-sec done">实测 {fmtSec(s)}</span>
+                    </li>
+                  ))}
               </ul>
             </div>
           )}

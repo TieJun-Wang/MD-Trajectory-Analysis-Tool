@@ -322,7 +322,8 @@ ok(h.includes('已选 4 / 10'), '高亮时已选数量正确')
 
 // 选择为「取向与结晶」时应高亮「仅取向」而不是「仅结构」
 h = flat(render(() => React.createElement(M.FunctionBlock, {
-  titles: FB_TITLES, order: FB_ORDER, which: ['orientation', 'order'],
+  titles: FB_TITLES, order: FB_ORDER,
+  which: ['orientation', 'order', 'boo', 'crystal'],   // 与「仅取向」预设一致
   setWhich: () => {},
 })))
 const activeCount = (h.match(/mini active/g) || []).length
@@ -363,7 +364,49 @@ ok(h.includes('bar'), 'RunBlock 显示进度条')
 ok(h.includes('取消') && h.includes('保留已算完的'), 'RunBlock 说明取消会保留已完成结果')
 ok(!h.includes('丢弃本次请求'), 'RunBlock 不再说"丢弃本次请求"')
 
-// ---------------------------------------- 预估用时 + 按短→长跑（新）
+// ---------------------------------------------------- 科研 QC 页（排版同「统计量」）
+h = flat(render(() => React.createElement(M.QcPanel, { run: null })))
+ok(h.includes('还没有结果') && h.includes('科研 QC 判断'), 'QcPanel 空态给出说明')
+
+h = flat(render(() => React.createElement(M.QcPanel, {
+  groups: [['动力学与输运', ['msd', 'contact'], '输运']],
+  run: { results: {
+    msd: { title: '均方位移 MSD', checks_digest: { ok: 1, warn: 2, bad: 1 },
+           checks: [
+             { 名称: 'PBC 追踪', 级别: 'bad', 结论: '最小镜像失效比例 24.0%（严重）',
+               依据: '跨周期追踪不可靠，D 不可引用' },
+             { 名称: '扩散标度', 级别: 'warn', 结论: 'MSD∝t^0.84，偏离扩散标度 α=1',
+               依据: '拟合区间未落扩散区' },
+             { 名称: '样本规模', 级别: 'ok', 结论: '帧数 = 5001', 依据: '' },
+           ] },
+    contact: { title: '接触分析', checks_digest: { ok: 1, warn: 1, bad: 0 },
+               checks: [{ 名称: '指标区分度', 级别: 'warn',
+                          结论: '接触概率饱和（恒为 1，无区分度）', 依据: '改用平均接触数' }] },
+  } },
+})))
+// 表头必须是这四列（类型/结果/数据参考/原因）
+ok(h.includes('QC判断类型') && h.includes('QC判断结果')
+   && h.includes('QC数据参考') && h.includes('解释'),
+   'QC 表头为「QC判断类型 / QC判断结果 / QC数据参考 / 解释」四列')
+ok(h.includes('stats qc'), 'QC 表格用独立的 stats qc 类（居中/不换行只作用于它）')
+ok((h.match(/<colgroup>[\s\S]*?<\/colgroup>/g) || [])
+  .every((g) => (g.match(/<col\/>/g) || []).length === 4)
+  && (h.match(/<colgroup>/g) || []).length >= 1,
+   '每个 QC 表都是 colgroup 四等分（列宽与内容无关，表头间隔必然相等）',
+   `表数=${(h.match(/<colgroup>/g) || []).length}`)
+ok(h.includes('statsview') && h.includes('stattabs') && h.includes('statblock'),
+   '排版复用「统计量」的结构（statsview/stattabs/statblock）')
+ok(h.includes('动力学与输运'), '按模块分标签（与统计量同一套分组）')
+ok(h.includes('不可引用') && h.includes('qc-bad'), 'bad 级别有徽标与中文标签')
+// 级别排序：不可引用排最前，正常排最后
+ok(h.indexOf('PBC 追踪') < h.indexOf('扩散标度')
+   && h.indexOf('扩散标度') < h.indexOf('样本规模'), '行内按严重程度排序（bad→warn→ok）')
+ok(h.indexOf('均方位移 MSD') < h.indexOf('接触分析'),
+   '模块内按严重程度排序（有 bad 的分析项在前）')
+ok(h.includes('跨周期追踪不可靠'), '「原因」列显示依据原文')
+ok(h.includes('正常 2') && h.includes('注意 3') && h.includes('不可引用 1'),
+   '总览汇总 ok/warn/bad 计数', h.match(/正常 \d+/)?.[0] || '')
+
 h = flat(render(() => React.createElement(M.RunBlock, {
   busy: false, progress: 0, onRun: () => {}, onCancel: () => {},
   estimateOn: true, setEstimateOn: () => {}, lastLine: '', onOpenLog: () => {},
@@ -393,6 +436,21 @@ ok(h.indexOf('均方位移 MSD') < h.indexOf('径向分布函数 RDF'),
    '预估列表按用时短→长排列（MSD 在 RDF 之前）')
 ok(h.includes('est-list') && h.includes('cur'), '预估列表有列表结构且标出当前项')
 
+// 算完的项要显示**实测**秒数（否则用户无法核对"关掉开关到底快没快"）
+h = flat(render(() => React.createElement(M.RunBlock, {
+  busy: true, progress: 0.5, onRun: () => {}, onCancel: () => {}, live: liveEst,
+  which: ['msd', 'rdf'],
+  titles: { msd: '均方位移 MSD', rdf: '径向分布函数 RDF', contact: '接触分析' },
+  run: { timings: { msd: 0.21, contact: 6.23 } },
+  lastLine: '', onOpenLog: () => {},
+})))
+ok(h.includes('实测') && h.includes('&lt;1 s'),
+   '算完的项显示实测秒数（带「实测」前缀，<1 s 走可读格式）',
+   h.match(/实测[^<"]*/)?.[0] || '')
+ok(h.includes('est-sec done'), '实测秒数有独立样式类，与 ≈ 预估区分')
+ok(h.includes('接触分析'), '有实测但没预估的项也会列出来')
+ok(/实测 6\.2 s/.test(h), '实测 6.23 s 渲染成可读的「6.2 s」')
+
 // 分析功能里每项直接标出预估用时
 h = flat(render(() => React.createElement(M.FunctionBlock, {
   titles: { msd: '均方位移 MSD', rdf: '径向分布函数 RDF' },
@@ -403,6 +461,65 @@ h = flat(render(() => React.createElement(M.FunctionBlock, {
 ok(h.includes('est-tag'), '分析功能的分析项上标出预估用时')
 ok(h.includes('≈1 min 40 s') && h.includes('≈1 h 7 min'),
    '分析项标签用可读单位（min/h）')
+
+// ------------------------------- Rg / R_ee 的口径开关（质量加权 / 逐分子 / 链端）
+const rgParams = { mass_weighted: true, per_molecule: true,
+                   ree_ends: 'bond_graph', ree_atoms: '' }
+h = flat(render(() => React.createElement(M.ParamBlock, {
+  params: rgParams, setParams: () => {}, which: ['rg', 'ree'],
+})))
+ok(h.includes('质量加权 Rg'), 'ParamBlock 有「质量加权 Rg」开关')
+ok(h.includes('逐分子统计'), 'ParamBlock 有「逐分子统计」开关')
+ok(h.includes('R_ee 链端来源') && h.includes('bond_graph'),
+   'ParamBlock 有 R_ee 链端来源（含 bond_graph 选项）')
+ok(h.includes('selection（所选原子组首尾原子）'), 'R_ee 链端来源含 selection 选项')
+ok(h.includes('如 0,3034'), 'ParamBlock 有 R_ee 指定原子输入框')
+ok(h.includes('pchk') && h.includes('type="checkbox"'),
+   '布尔开关渲染成复选框并带 .pchk 样式')
+ok(!flat(render(() => React.createElement(M.ParamBlock, {
+  params: rgParams, setParams: () => {}, which: ['rdf'],
+}))).includes('逐分子统计'), '未勾选 rg/ree 时不显示这些开关')
+
+// 单分子主链：直接不给选（置灰），**不额外加说明文字**
+h = flat(render(() => React.createElement(M.ParamBlock, {
+  params: rgParams, setParams: () => {}, which: ['rg', 'ree'], primaryMolecules: 1,
+})))
+ok(h.includes('pchk off') && h.includes('disabled'),
+   '单分子主链时「逐分子统计」被置灰（不给选）')
+ok(!h.includes('完全一样') && !h.includes('想看到'), '置灰时不再插入解释性提示文字')
+ok(!h.includes('pm_hint'), '参数表里没有额外的「提示」行')
+h = flat(render(() => React.createElement(M.ParamBlock, {
+  params: rgParams, setParams: () => {}, which: ['rg', 'ree'], primaryMolecules: 11084,
+})))
+ok(!h.includes('pchk off'), '多分子主链时不置灰')
+ok(h.includes('逐分子统计'), '多分子主链时开关正常可用')
+
+// 分析对象下拉里带分子数
+h = flat(render(() => React.createElement(M.SelectionBlock, {
+  sess: { primary_label: '最大链 (seg_0_AKeco)', primary_atoms: 3341, chains: [],
+          components: [{ name: 'protein', n_atoms: 3341, n_residues: 214, n_molecules: 1 },
+                       { name: 'water', n_atoms: 44336, n_residues: 11084, n_molecules: 11084 }] },
+  primary: { mode: 'auto' }, setPrimary: () => {},
+  components: ['water'], setComponents: () => {},
+})))
+ok(h.includes('1 分子') && h.includes('11084 分子'),
+   '分析对象下拉显示各组分的分子数')
+ok(h.includes('单分子，逐分子统计无意义'), '组分胶囊 tooltip 标出单分子组分')
+
+// 链类型含多条链时（PEG 体系：200 条 × 30 原子）必须给出**两个**明确选项，
+// 不能让一个写着"200 条"的选项实际只选 1 条
+h = flat(render(() => React.createElement(M.SelectionBlock, {
+  sess: { primary_label: 'SYSTEM:PEG', primary_atoms: 6000, components: [],
+          chains: [{ label: 'SYSTEM:PEG', segid: 'SYSTEM', resname: 'PEG',
+                     count: 200, n_atoms: 30, n_residues: 10,
+                     description: 'SYSTEM:PEG: 200 条, 每条 10 residue / 30 原子' }] },
+  primary: { mode: 'auto' }, setPrimary: () => {},
+  components: [], setComponents: () => {},
+})))
+ok(h.includes('全部 200 条链'), '多链类型的选项一：全部 200 条链')
+ok(h.includes('6,000 原子') || h.includes('6000 原子'), '全部链选项标出合并后的总原子数')
+ok(h.includes('第 1 条（共 200 条'), '多链类型的选项二：明确写「第 1 条（共 200 条）」')
+ok(h.includes('&quot;all&quot;:true'), '全部链选项带 all:true（后端据此合并）')
 
 // 实时运行时、第一项还没算完：不能说"还没有结果"
 h = flat(render(() => React.createElement(M.ChartPanel, {
@@ -721,8 +838,8 @@ ok(M.FALLBACK_GROUPS.map(([l]) => l).join('/')
 ok(M.FALLBACK_GROUPS.every(([, , s]) => typeof s === 'string' && s.length >= 1 && s.length <= 3),
   '每个兜底分组都带 2 字按钮缩写', M.FALLBACK_GROUPS.map(([, , s]) => s).join('/'))
 const allNames = M.FALLBACK_GROUPS.flatMap(([, ns]) => ns)
-ok(allNames.length === 10 && new Set(allNames).size === 10,
-  '兜底分组覆盖 10 项且不重复', `n=${allNames.length}`)
+ok(allNames.length === 12 && new Set(allNames).size === 12,
+  '兜底分组覆盖 12 项且不重复', `n=${allNames.length}`)
 ok(M.normalizeGroups(null) === M.FALLBACK_GROUPS, 'groups 缺失时用兜底')
 ok(M.normalizeGroups([]) === M.FALLBACK_GROUPS, 'groups 为空时用兜底')
 ok(M.normalizeGroups([{ label: 'X', names: ['rg'] }])[0][0] === 'X',

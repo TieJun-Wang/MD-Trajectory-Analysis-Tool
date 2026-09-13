@@ -21,6 +21,7 @@ import DataPanel from './components/DataPanel'
 import StatsPanel from './components/StatsPanel'
 import ExportPanel from './components/ExportPanel'
 import LogPanel from './components/LogPanel'
+import QcPanel from './components/QcPanel'
 import ChartPanel from './components/ChartPanel'
 import NotesPanel from './components/NotesPanel'
 import {
@@ -37,6 +38,7 @@ const TABS = [
   ['charts', '图表'],
   ['data', '数据表'],
   ['stats', '统计量'],
+  ['qc', '科研 QC'],
   ['export', '导出'],
   ['log', '运行日志'],
 ]
@@ -63,6 +65,13 @@ export default function App() {
     cutoff: 5.0, axis: 2, nbins: 100, rmax: 12, dihedral_mode: 'auto',
     rdf_mode: 'inter', msd_object: 'molecule', gauche_edge: 120,
     orient_mode: 'repeat', orient_stride: 1, contact_mode: 'inter', g_ref: '',
+    // Rg / R_ee：两个布尔开关默认开（与后端函数签名一致），
+    // 关掉「逐分子统计」就只看整组 Rg（一团物质的尺寸），
+    // 关掉「质量加权」就用等权（几何）口径。
+    mass_weighted: true, per_molecule: true,
+    ree_ends: 'bond_graph', ree_atoms: '',
+    // BOO / 晶体识别：邻域半径留空 = 自动（按最近邻距离中位数推定）
+    boo_cutoff: '', boo_averaged: true, q6_solid: 0.5, min_cluster: 10,
   })
   const [primary, setPrimary] = useState({ mode: 'auto' })
   const [components, setComponents] = useState([])
@@ -148,6 +157,19 @@ export default function App() {
 
     liveRunRef.current = { cancelled: false }
 
+    // R_ee 手工链端：形如 "0, 3034"（逗号/空格分隔）；不是两个非负整数就当留空，
+    // 由后端的「链端来源」自动判定（bond_graph = 键连图端基）。
+    // 可选数值：留空 → null（后端按默认/自动处理），否则转成数字
+    const optNum = (v) => (v === '' || v == null ? null : Number(v))
+
+    const reeAtoms = (() => {
+      const raw = String(params.ree_atoms ?? '').trim()
+      if (!raw) return null
+      const nums = raw.split(/[^0-9]+/).filter((s) => s !== '').map(Number)
+      return (nums.length === 2 && nums.every((n) => Number.isInteger(n) && n >= 0))
+        ? nums : null
+    })()
+
     const body = {
       which,
       // 先跑几帧预估各项用时，再按短→长排序开跑（可在「运行」里关掉）
@@ -171,7 +193,21 @@ export default function App() {
                        stride: Number(params.orient_stride) || 1 },
         // 结构有序度的局部结构分量：留空 → g_ref=None（该分量不计入指数）
         order: { g_ref: String(params.g_ref).trim() === ''
-          ? null : Number(params.g_ref) },
+          ? null : Number(params.g_ref),
+          // 与「二面角分析」共用同一个 trans/gauche 阈值（后端两个模块都收这个键）
+          gauche_edge: Number(params.gauche_edge) || 120 },
+        // Rg / R_ee：布尔开关直接传（后端 analyze_rg / analyze_end_to_end 接受）
+        rg: { mass_weighted: params.mass_weighted !== false,
+              per_molecule: params.per_molecule !== false },
+        ree: { ends: params.ree_ends || 'bond_graph',
+               per_molecule: params.per_molecule !== false,
+               // 手工指定两个成键原子作为链端（留空 = None，按 ends 自动判定）
+               atom_indices: reeAtoms },
+        // 键取向序 BOO / 晶体-非晶识别：邻域半径留空 → null（后端自动推定）
+        boo: { cutoff: optNum(params.boo_cutoff), averaged: params.boo_averaged !== false },
+        crystal: { cutoff: optNum(params.boo_cutoff),
+                   q6_solid: Number(params.q6_solid) || 0.5,
+                   min_cluster: Number(params.min_cluster) || 10 },
       },
       selection: { primary, components },
     }
@@ -293,8 +329,20 @@ export default function App() {
       (result.panels?.length || 1) - 1))
     return { result, panelIndex }
   }, [run, chart])
-  // 顶栏第二行「当前分析项」：取后端记录的**分析名**再用标题表翻译成中文，
-  // 不去解析进度文字（那种做法一改文案就失效）。排队数放在同一行的括号里。
+  // 当前主链含多少个分子：单分子时「逐分子统计」没有意义（整组 Rg 就是该分子的 Rg），
+  // 界面据此把开关置灰并写明原因。auto = 最大链（按构造必然是 1 个分子）；
+  // 组分模式直接查组分表（后端已给出 n_molecules）；segid/自定义不猜，返回 null。
+  const primaryMolecules = useMemo(() => {
+    if (!sess) return null
+    if (primary.mode === 'component' && primary.name) {
+      const c = (sess.components || []).find((x) => x.name === primary.name)
+      return c?.n_molecules ?? null
+    }
+    if (primary.mode === 'auto') return 1
+    return null
+  }, [sess, primary])
+
+  // 顶栏第二行「当前分析项」：取后端记录的**分析名**再用标题表翻译成中文，  // 不去解析进度文字（那种做法一改文案就失效）。排队数放在同一行的括号里。
   const curTitle = live?.current
     ? ((run?.titles || {})[live.current] || live.current) : ''
 
@@ -406,7 +454,8 @@ export default function App() {
                                          groups={groups}
                                          estimates={live?.estimates} />
                           <ParamBlock params={params} setParams={setParams}
-                                      which={which} />
+                                      which={which}
+                                      primaryMolecules={primaryMolecules} />
                           <RunBlock busy={busy} progress={progress} onRun={doRun}
                                     onCancel={cancelRun} live={live}
                                     which={which} titles={titles} run={run}
@@ -447,6 +496,8 @@ export default function App() {
             {tab === 'data' && <DataPanel run={run} groups={groups} />}
             {/* 统计量：只显示指标 */}
             {tab === 'stats' && <StatsPanel run={run} groups={groups} />}
+            {/* 科研 QC：每项分析导出的检查项（PBC/样本/误差/峰显著性…） */}
+            {tab === 'qc' && <QcPanel run={run} groups={groups} />}
             {/* 导出：只管导出 */}
             {tab === 'export' && (
               <ExportPanel run={run} sid={sess?.sid} log={pushLog} groups={groups} />

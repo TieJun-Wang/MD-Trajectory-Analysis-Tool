@@ -177,7 +177,63 @@ if png:
     import io
     P(f"      PNG 尺寸 = {Image.open(io.BytesIO(resp.content)).size}")
 
-# 8) 错误处理
+# 8) PEG 数据集：链类型的「全部 N 条」必须真的合并全部链
+#    回归目标：1.0.1 之前 apply_selection 无论 count 是多少都只取 got[0]，
+#    于是一个标着"200 条链"的选项实际只分析了 1 条（30 原子）。
+P("\n   PEG 数据集（链类型合并回归）:")
+PEG_DIR = Path(os.environ.get("MDTA_PEG_DIR", r"C:\temp\dataset\PEG_parametrization"))
+PEG_TOP = PEG_DIR / "eqpbc.gro"
+PEG_XTC = PEG_DIR / "trajpbc.xtc"
+if not (PEG_TOP.is_file() and PEG_XTC.is_file()):
+    P(f"      ~ 跳过：找不到 {PEG_DIR}（可用 MDTA_PEG_DIR 覆盖）")
+else:
+    dp = show(client.post("/api/session",
+                          json={"topology": str(PEG_TOP), "trajectory": str(PEG_XTC)}),
+              "POST /api/session (PEG)", limit=200)
+    sid_p = dp["sid"]
+    comp = next(c for c in dp["components"] if c["name"] == "polymer")
+    ch = dp["chains"][0]
+    P(f"      {dp['info']['n_atoms']} 原子 / {dp['info']['n_frames']} 帧；"
+      f"组分 polymer = {comp['n_molecules']} 个分子；"
+      f"链类型 {ch['label']} count={ch['count']} 每条 {ch['n_atoms']} 原子")
+    assert comp["n_molecules"] == ch["count"] == 200
+    assert ch["n_atoms"] == 30
+
+    def _rg(primary, tag):
+        body = {"which": ["rg"], "estimate": False, "frames": {"max_frames": 20},
+                "params": {"rg": {"per_molecule": True}},
+                "selection": {"primary": primary, "components": ["polymer"]}}
+        r = show(client.post(f"/api/session/{sid_p}/run", json=body), f"run {tag}")
+        s = r["results"]["rg"]["summary"]
+        return r["selection"], s
+
+    sel_all, s_all = _rg({"mode": "chain", "segid": ch["segid"],
+                          "resname": ch["resname"], "min_atoms": ch["n_atoms"],
+                          "all": True}, "全部链")
+    sel_comp, s_comp = _rg({"mode": "component", "name": "polymer"}, "组分 polymer")
+    sel_one, s_one = _rg({"mode": "chain", "segid": ch["segid"],
+                          "resname": ch["resname"], "min_atoms": ch["n_atoms"]},
+                         "第 1 条")
+    P(f"      全部 {ch['count']} 条链 -> {sel_all['primary_atoms']} 原子 / "
+      f"{sel_all['primary_molecules']} 分子，整组 Rg={s_all['Rg mean']:.3f} Å")
+    P(f"      组分 polymer  -> {sel_comp['primary_atoms']} 原子 / "
+      f"{sel_comp['primary_molecules']} 分子，整组 Rg={s_comp['Rg mean']:.3f} Å")
+    P(f"      第 1 条        -> {sel_one['primary_atoms']} 原子 / "
+      f"{sel_one['primary_molecules']} 分子，整组 Rg={s_one['Rg mean']:.3f} Å")
+    assert sel_all["primary_atoms"] == comp["n_atoms"] == 6000, sel_all
+    assert sel_all["primary_molecules"] == 200
+    # 「全部链」与「组分 polymer」是同一批原子 → 数值必须一致
+    assert abs(s_all["Rg mean"] - s_comp["Rg mean"]) < 1e-9, (s_all["Rg mean"],
+                                                              s_comp["Rg mean"])
+    # 而「第 1 条」只有 30 原子，数值必须明显不同（否则说明合并没生效）
+    assert sel_one["primary_atoms"] == 30
+    assert abs(s_one["Rg mean"] - s_all["Rg mean"]) > 5.0, (s_one["Rg mean"],
+                                                            s_all["Rg mean"])
+    P(f"      ✓ 全部链 == 组分 polymer（同批原子，Rg 差 <1e-9）；"
+      f"第 1 条相差 {abs(s_one['Rg mean'] - s_all['Rg mean']):.2f} Å")
+    show(client.delete(f"/api/session/{sid_p}"), "DELETE /api/session/{sid_p} (PEG)")
+
+# 9) 错误处理
 P("\n   错误处理:")
 r404 = client.get("/api/session/deadbeef/info")
 P(f"      不存在的会话 -> HTTP {r404.status_code}")
@@ -189,7 +245,7 @@ rbad = client.post(f"/api/session/{sid}/run", json={"which": ["nonsense"]})
 P(f"      未知分析项 -> HTTP {rbad.status_code}")
 assert rbad.status_code in (400, 500)
 
-# 9) 关闭会话
+# 10) 关闭会话
 d = show(client.delete(f"/api/session/{sid}"), "DELETE /api/session/{sid}")
 P(f"      已关闭 {d['closed']}")
 r404b = client.get(f"/api/session/{sid}/info")

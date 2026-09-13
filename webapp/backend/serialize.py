@@ -21,6 +21,8 @@ from typing import Any, Mapping
 
 import numpy as np
 
+from mdta.qc import checks_digest
+
 #: 单条曲线返回给前端的最大点数（超过则等间隔抽稀，并标记 ``downsampled``）
 MAX_POINTS = 4000
 
@@ -89,6 +91,9 @@ def result_to_json(result, max_points: int = MAX_POINTS) -> dict:
         # 每条说明的作用域（属于哪张图 / 哪条曲线）——前端据此只显示与当前
         # 图表可见曲线相关的说明
         "note_meta": result.notes_with_scope(),
+        # 科研 QC 检查项（名称/级别/结论/依据）+ 总览：前端「科研 QC」页直接用
+        "checks": [dict(c) for c in (getattr(result, "checks", None) or [])],
+        "checks_digest": checks_digest(getattr(result, "checks", None) or []),
         "meta": {str(k): _num(v) for k, v in (result.meta or {}).items()
                  if not isinstance(v, (list, dict, tuple))},
     }

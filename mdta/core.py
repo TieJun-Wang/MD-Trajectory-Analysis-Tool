@@ -70,6 +70,11 @@ class AnalysisResult:
     #: 未显式指定时由 :meth:`notes_with_scope` 按**曲线标签前缀**自动归属。
     note_meta: list[dict] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
+    #: **科研 QC 检查项**：``[{"名称", "级别", "结论", "依据"}, ...]``，
+    #: 级别取 ``"ok" | "warn" | "bad"``。由 :func:`mdta.qc.derive_checks` 在分析
+    #: 结束时按 summary/notes 自动导出（分析内部也可用 :meth:`add_check` 直接登记）。
+    #: 它把原本散落在 50 多处判据里的"这个数还能不能用"变成**可展示、可导出**的结论。
+    checks: list[dict] = field(default_factory=list)
 
     # ---------------------------------------------------------------- 构造
     def add_curve(
@@ -87,6 +92,17 @@ class AnalysisResult:
 
     def add_summary(self, key: str, value: Any) -> None:
         self.summary[key] = value
+
+    def add_check(self, name: str, verdict: str, level: str = "ok",
+                  detail: str = "") -> None:
+        """登记一条科研 QC 检查。
+
+        ``level``：``"ok"`` 正常 / ``"warn"`` 需注意（数仍可用）/
+        ``"bad"`` 不可用（该量已拒绝或不可引用）。``verdict`` 是一句话结论，
+        ``detail`` 写依据（判据、实测值）。
+        """
+        self.checks.append({"名称": str(name), "级别": str(level),
+                            "结论": str(verdict), "依据": str(detail)})
 
     def add_notes(self, *lines: str, panel: int | None = None,
                   curve: str | None = None) -> None:
