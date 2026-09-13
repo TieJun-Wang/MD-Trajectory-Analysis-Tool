@@ -201,3 +201,138 @@ def needs_bond_guessing(universe) -> bool:
         return len(universe.bonds) == 0
     except Exception:  # noqa: BLE001 - NoDataError 表示完全没有键属性
         return True
+
+
+# --------------------------------------------------------------- 对象层属性
+#: 标准原子质量 (u)。``.gro`` / 多数 ``.pdb`` 都不带质量，
+#: 而质量加权 Rg、质量密度、质心 MSD 都要用 —— 这里按元素补齐。
+ATOMIC_MASSES: dict[str, float] = {
+    "H": 1.008, "HE": 4.003, "LI": 6.94, "BE": 9.012, "B": 10.81, "C": 12.011,
+    "N": 14.007, "O": 15.999, "F": 18.998, "NE": 20.180, "NA": 22.990,
+    "MG": 24.305, "AL": 26.982, "SI": 28.085, "P": 30.974, "S": 32.06,
+    "CL": 35.45, "AR": 39.948, "K": 39.098, "CA": 40.078, "SC": 44.956,
+    "TI": 47.867, "V": 50.942, "CR": 51.996, "MN": 54.938, "FE": 55.845,
+    "CO": 58.933, "NI": 58.693, "CU": 63.546, "ZN": 65.38, "GA": 69.723,
+    "GE": 72.630, "AS": 74.922, "SE": 78.971, "BR": 79.904, "KR": 83.798,
+    "RB": 85.468, "SR": 87.62, "Y": 88.906, "ZR": 91.224, "NB": 92.906,
+    "MO": 95.95, "RU": 101.07, "RH": 102.91, "PD": 106.42, "AG": 107.87,
+    "CD": 112.41, "IN": 114.82, "SN": 118.71, "SB": 121.76, "TE": 127.60,
+    "I": 126.90, "XE": 131.29, "CS": 132.91, "BA": 137.33, "LA": 138.91,
+    "CE": 140.12, "PT": 195.08, "AU": 196.97, "HG": 200.59, "TL": 204.38,
+    "PB": 207.2, "BI": 208.98, "PO": 208.98, "U": 238.03,
+}
+
+#: 明确不是元素的"类型名"（虚拟位点 / 孤对电子 / 力场占位符）
+NON_ELEMENT_TYPES = {"DUMMY", "M", "MW", "VS", "LP", "LP1", "LP2", "EP", "X", ""}
+
+
+def ensure_object_attrs(universe, *, verbose: bool = False) -> dict:
+    """补齐**对象模型必需、但 ``.gro`` 常常不提供**的三个属性。
+
+    ==========  ======================================================
+    属性        缺失时的来源
+    ==========  ======================================================
+    elements    由原子名/类型推断（复用猜键用的同一套推断）
+    masses      由 elements 查 :data:`ATOMIC_MASSES`
+    molnums     由**键图连通分量**（``atoms.fragments``）编号
+    ==========  ======================================================
+
+    为什么必须补：``molnums`` 是按分子排除配对的**唯一依据**
+    （MDAnalysis 的 ``InterRDF.exclude_same`` 不支持 molecule，而本类体系
+    segment 恒为 SYSTEM，不能用来区分分子）；``masses`` 是质量加权 Rg /
+    质量密度 / 质心 MSD 的前提。
+
+    返回诊断信息，便于把"这个数是谁的数"写进结果 metadata。
+    """
+    import numpy as np
+
+    u = universe
+    n = u.atoms.n_atoms
+    info: dict = {"added": [], "n_molecules": 0, "n_missing_mass": 0,
+                  "n_missing_element": 0, "sources": {}}
+
+    # ---------------------------------------------------------- elements
+    elements = None
+    try:
+        cur = np.asarray(u.atoms.elements, dtype=str)
+        if cur.size == n and any(str(x).strip() for x in cur):
+            elements = np.char.upper(np.char.strip(cur))
+            info["sources"]["elements"] = "拓扑自带"
+    except Exception:  # noqa: BLE001 - NoDataError
+        pass
+    if elements is None:
+        types = _atom_types(u)
+        if types is not None and types.size == n:
+            elements = np.array(
+                ["" if str(t).upper() in NON_ELEMENT_TYPES else str(t).upper()
+                 for t in types], dtype=object)
+            info["n_missing_element"] = int(
+                sum(1 for e in elements if e and str(e).upper() not in ATOMIC_MASSES))
+            u.add_TopologyAttr("elements", [str(e) for e in elements])
+            info["added"].append("elements")
+            info["sources"]["elements"] = "由原子名推断"
+
+    # ------------------------------------------------------------ masses
+    try:
+        cur = np.asarray(u.atoms.masses, dtype=float)
+        has_mass = cur.size == n and bool(np.all(np.isfinite(cur))) and bool(np.any(cur > 0))
+    except Exception:  # noqa: BLE001
+        has_mass = False
+    if not has_mass and elements is not None:
+        masses = np.array(
+            [ATOMIC_MASSES.get(str(e).upper(), 0.0) if str(e) else 1.0
+             for e in elements], dtype=float)
+        # 未知元素给 1.0（而非 0）：零质量会把质心与质量加权拉偏；
+        # 同时报出个数，调用方可据此决定是否退化成非质量加权。
+        n_missing = int(np.sum(masses == 0.0))
+        masses[masses == 0.0] = 1.0
+        info["n_missing_mass"] = n_missing
+        u.add_TopologyAttr("masses", masses)
+        info["added"].append("masses")
+        info["sources"]["masses"] = "由元素查表" + (
+            f"（{n_missing} 个未知元素按 1.0 处理）" if n_missing else "")
+
+    # ----------------------------------------------------------- molnums
+    # ⚠️ MDAnalysis 的 ``molnums`` 是**残基级**属性（和 segids/resids 一样），
+    #    长度必须是残基数，不是原子数；写成原子级会直接报错。
+    has_mol = False
+    try:
+        cur = np.asarray(u.residues.molnums, dtype=int)
+        has_mol = cur.size == u.residues.n_residues and int(cur.min()) >= 0
+    except Exception:  # noqa: BLE001
+        pass
+    if has_mol:
+        info["n_molecules"] = int(len(set(
+            np.asarray(u.residues.molnums, dtype=int).tolist())))
+        info["sources"]["molnums"] = "拓扑自带"
+    elif needs_bond_guessing(u):
+        info["sources"]["molnums"] = "无键表，无法划分分子（已跳过）"
+    else:
+        n_res = u.residues.n_residues
+        res_mol = np.full(n_res, -1, dtype=int)
+        frags = u.atoms.fragments
+        for i, f in enumerate(frags):
+            ridx = np.unique(np.asarray(f.resindices, dtype=int))
+            res_mol[ridx] = i
+        # 一个残基被拆到多个碎片（键断裂）时上面是"后写覆盖"；报出来
+        n_unassigned = int(np.sum(res_mol < 0))
+        # 压缩成连续编号 0..k-1
+        uniq = np.unique(res_mol[res_mol >= 0])
+        remap = np.full(int(res_mol.max()) + 1 if res_mol.size and res_mol.max() >= 0
+                        else 0, -1, dtype=int)
+        remap[uniq] = np.arange(uniq.size, dtype=int)
+        res_mol = np.where(res_mol >= 0, remap[np.clip(res_mol, 0, None)], -1)
+        u.add_TopologyAttr("molnums", res_mol)
+        info["added"].append("molnums")
+        info["n_molecules"] = int(uniq.size)
+        info["n_residues_unassigned"] = n_unassigned
+        info["sources"]["molnums"] = (
+            f"由键图连通分量按**残基**编号（{len(frags):,} 个碎片 → "
+            f"{int(uniq.size):,} 个分子编号）")
+        if n_unassigned:
+            info["sources"]["molnums"] += f"；{n_unassigned} 个残基未归属"
+
+    if verbose:
+        print(f"[对象层属性] 补齐 {info['added'] or '无'}；"
+              f"分子 {info['n_molecules']:,}；来源 {info['sources']}")
+    return info

@@ -1,5 +1,5 @@
 /**
- * 分析项按设计大纲**模块**分组（链构象 / 界面 / 结晶 / 辅助）。
+ * 分析项按**模块**分组（链构象 / 空间结构 / 取向与结晶 / 动力学与输运）。
  *
  * 权威定义在后端 `mdta.pipeline.ANALYSIS_GROUPS`，通过 `/api/analyses`
  * 的 `groups` 字段下发；这里只保留一份**同内容的兜底**，用于后端暂时拿不到
@@ -7,22 +7,25 @@
  *
  * 统一放在这个模块里，「分析功能」的预设按钮（SetupPanel）与「图表导航」的
  * 分层（ChartPanel）用的是同一份定义，不会出现两边对不上的情况。
+ *
+ * 每项是 `[完整名, 分析项, 按钮缩写]`；缩写只用于快捷按钮行（那一行必须在
+ * 一行内放下，见 `webapp/_css_check.py`），完整名用于面板标题与 tooltip。
  */
 
-/** 与后端 `mdta.pipeline.ANALYSIS_GROUPS` 保持一致 */
+/** 与后端 `mdta.pipeline.ANALYSIS_GROUPS` / `GROUP_SHORT` 保持一致 */
 export const FALLBACK_GROUPS = [
-  ['链构象', ['rg', 'ree', 'dihedral']],
-  ['界面', ['density', 'rdf', 'contact', 'interface']],
-  ['结晶', ['orientation', 'order']],
-  ['辅助', ['msd']],
+  ['链构象', ['rg', 'ree', 'dihedral'], '构象'],
+  ['空间结构', ['density', 'rdf', 'contact', 'interface'], '结构'],
+  ['取向与结晶', ['orientation', 'order'], '取向'],
+  ['动力学与输运', ['msd'], '输运'],
 ]
 
 /** 没被任何模块覆盖到的分析项兜底归到这里 */
 export const OTHER_LABEL = '其他'
 
 /**
- * 归一化成 `[[label, names], ...]`。
- * 后端给的是 `[{label, names}]`，本地兜底是 `[label, names]`，两种都收。
+ * 归一化成 `[[label, names, short], ...]`。
+ * 后端给的是 `[{label, names, short}]`，本地兜底是 `[label, names, short]`，两种都收。
  */
 export function normalizeGroups(fromApi) {
   if (!Array.isArray(fromApi) || !fromApi.length) return FALLBACK_GROUPS
@@ -30,8 +33,10 @@ export function normalizeGroups(fromApi) {
   for (const g of fromApi) {
     const label = Array.isArray(g) ? g[0] : g?.label
     const names = Array.isArray(g) ? g[1] : g?.names
+    const short = (Array.isArray(g) ? g[2] : g?.short) || ''
     if (!label || !Array.isArray(names) || !names.length) continue
-    out.push([String(label), names.map(String)])
+    out.push([String(label), names.map(String),
+      String(short || String(label).slice(0, 2))])
   }
   return out.length ? out : FALLBACK_GROUPS
 }

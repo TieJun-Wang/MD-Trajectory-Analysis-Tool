@@ -23,7 +23,7 @@ from .core import AnalysisResult, Curve, Panel
 from .io import MDTrajectory, load_trajectory
 from .systeminfo import SystemInfo, describe_system, format_system_info
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 __all__ = [
     "AnalysisResult",
     "Curve",

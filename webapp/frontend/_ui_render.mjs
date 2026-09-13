@@ -204,25 +204,89 @@ ok(h.includes('主链') && h.includes('组分 protein'), 'SelectionBlock 渲染�
 ok(h.includes('chip-pick on'), '已选组分高亮（胶囊式多选）')
 ok(h.includes('water'), 'SelectionBlock 列出全部组分')
 
-h = flat(render(() => React.createElement(M.ParamBlock, {
+// 「帧选择」独立成板块（排在「分析功能」之前），用**表格约束布局**
+h = flat(render(() => React.createElement(M.FrameBlock, {
   frames: { interval_ps: '100' }, setFrames: () => {},
+})))
+ok(h.includes('帧选择'), 'FrameBlock 有「帧选择」小标题')
+ok(h.includes('起始 (ps)') && h.includes('平衡 (ps)') && h.includes('抽帧 (ps)'),
+  'FrameBlock 渲染 5 个帧选择参数')
+ok(/<table class="ptab">/.test(h),
+  'FrameBlock 用表格约束布局（列在各行间共享 → 输入框左边缘天然对齐）')
+ok(/<th scope="row">起始 \(ps\)<\/th><td colSpan="1"><input/.test(h),
+  '表格式：标签放 th、输入放紧随的 td')
+const nRows = (h.match(/<tr>/g) || []).length
+ok(nRows === 2, '帧选择 5 个参数排成 2 行（3 个 + 2 个）', `rows=${nRows}`)
+
+// **提示文字必须完整显示**：每个带 placeholder 的输入框都要有内联 min-width，
+// 且 ≥ 提示文字宽度 + 内边距12 + 边框2（元素级保证，不依赖布局推算）。
+function checkPlaceholders(html, label, minN = 1) {
+  const re = /placeholder="([^"]+)"[^>]*?min-width:([0-9.]+)px/g
+  let m
+  let n = 0
+  const bad = []
+  while ((m = re.exec(html)) !== null) {
+    n += 1
+    const need = [...m[1]].reduce(
+      (w, ch) => w + (ch.codePointAt(0) < 0x2E80 ? 0.55 : 1.0) * 12.5, 0) + 14
+    if (Number(m[2]) + 0.5 < need) bad.push(`${m[1]}: ${m[2]}px < ${need.toFixed(1)}px`)
+  }
+  ok(n >= minN, `${label}：带提示文字的输入框都有内联 min-width`, `n=${n}`)
+  ok(bad.length === 0, `${label}：提示文字都放得下（不会被截断）`, bad.join('; '))
+}
+checkPlaceholders(h, '帧选择', 5)
+
+// 「分析参数」只含按分析项分组的参数（帧选择已独立出去）
+let ph = flat(render(() => React.createElement(M.ParamBlock, {
   params: { cutoff: 5, axis: 2, nbins: 100, rmax: 12, dihedral_mode: 'auto' },
   setParams: () => {},
 })))
-ok(h.includes('参数设置'), 'ParamBlock 有「参数设置」小标题')
-ok(h.includes('起始 (ps)') && h.includes('平衡段 (ps)') && h.includes('抽帧间隔 (ps)'),
-  'ParamBlock 渲染帧选择参数')
-ok(h.includes('grid3'), 'ParamBlock 用三列紧凑网格')
-ok(h.includes('接触 cutoff') && h.includes('密度方向') && h.includes('二面角模式'),
+ok(ph.includes('分析参数'), 'ParamBlock 有「分析参数」小标题')
+ok(!ph.includes('起始 (ps)') && !ph.includes('最多帧数'),
+  'ParamBlock 不再包含帧选择参数（已独立成板块）')
+ok(/<table class="ptab">/.test(ph), 'ParamBlock 也用表格约束布局')
+ok(/<th scope="row">trans\/gauche 阈值 \(°\)<\/th><td colSpan="5">/.test(ph),
+  '长参数（trans/gauche 阈值）独占一行（colSpan=5）')
+ok(ph.includes('cutoff (Å)') && ph.includes('密度方向') && ph.includes('二面角模式'),
   'ParamBlock 渲染分析参数')
+
+checkPlaceholders(ph, '分析参数')
+
+// 参数**按分析项分组**：只显示当前勾选的分析项的参数（which=null 时全显示）
+ph = flat(render(() => React.createElement(M.ParamBlock, {
+  params: {}, setParams: () => {},
+  which: ['rdf'],
+})))
+ok(ph.includes('径向分布函数 RDF') && ph.includes('RDF 最大 r (Å)'),
+  '参数分组：选中 RDF 时显示 RDF 组的参数')
+ok(!ph.includes('cutoff (Å)') && !ph.includes('trans/gauche 阈值'),
+  '参数分组：未选中的接触/二面角参数被隐藏')
+ok(!ph.includes('MSD 追踪对象') && !ph.includes('取向链段定义'),
+  '参数分组：未选中的 MSD/取向参数被隐藏')
+ok(!ph.includes('起始 (ps)') && !ph.includes('最多帧数'),
+  '参数分组：帧选择已独立成板块，不再出现在分析参数里')
+ok(ph.includes('随上方「分析功能」的勾选出现'),
+  '参数分组：标题说明这些参数随勾选出现')
+ph = flat(render(() => React.createElement(M.ParamBlock, {
+  params: {}, setParams: () => {}, which: ['order'],
+})))
+ok(ph.includes('局部结构 g_ref'), '参数分组：结构有序度暴露 g_ref（留空则不计入指数）')
+ok(/<th scope="row">局部结构 g_ref<\/th><td colSpan="2">/.test(ph),
+  'g_ref 占 2 列（一行 2 个），且提示文字有内联 min-width')
+checkPlaceholders(ph, '结构有序度')
+ph = flat(render(() => React.createElement(M.ParamBlock, {
+  params: {}, setParams: () => {}, which: [],
+})))
+ok(ph.includes('尚未勾选任何分析项'), '参数分组：一个都没勾时给出提示而不是空白')
+ok(!ph.includes('cutoff (Å)'), '参数分组：切到 order 后接触参数仍隐藏')
 
 h = flat(render(() => React.createElement(M.FunctionBlock, {
   titles: { rg: '回转半径 Rg' }, order: ['rg'], which: ['rg'], setWhich: () => {},
 })))
 ok(h.includes('分析功能'), 'FunctionBlock 有「分析功能」小标题')
 ok(h.includes('回转半径 Rg'), 'FunctionBlock 渲染勾选项')
-ok(h.includes('链构象') && h.includes('界面') && h.includes('结晶') && h.includes('辅助'),
-  'FunctionBlock 四组分类齐全')
+ok(h.includes('链构象') && h.includes('空间结构') && h.includes('取向与结晶')
+  && h.includes('动力学与输运'), 'FunctionBlock 四组分类齐全')
 ok(h.includes('已选 1 / 1'), 'FunctionBlock 显示已选数量')
 
 // 「仅 XX」预设按钮：每一类都要有一个，参考「仅链构象」
@@ -236,9 +300,12 @@ const FB_ORDER = Object.keys(FB_TITLES)
 h = flat(render(() => React.createElement(M.FunctionBlock, {
   titles: FB_TITLES, order: FB_ORDER, which: [...FB_ORDER], setWhich: () => {},
 })))
-for (const label of ['仅链构象', '仅界面', '仅结晶', '仅辅助']) {
+// 按钮用 2 字缩写（完整名在 tooltip 里）：完整名太长会把这一行挤爆，
+// 而这一行要求在单行内放下（webapp/_css_check.py 有静态宽度估算盯着）
+for (const label of ['仅构象', '仅结构', '仅取向', '仅输运']) {
   ok(h.includes(label), `FunctionBlock 有「${label}」按钮`)
 }
+ok(h.includes('title="只勾选「动力学与输运」这一类'), '按钮 tooltip 保留分组完整名')
 ok(h.includes('全选'), 'FunctionBlock 保留「全选」')
 ok(!h.includes('全不选'), '已去掉「全不选」（全不选 = 什么都不勾，无需按钮）')
 const nBtns = (h.match(/class="mini/g) || []).length
@@ -249,22 +316,22 @@ h = flat(render(() => React.createElement(M.FunctionBlock, {
   titles: FB_TITLES, order: FB_ORDER,
   which: ['density', 'rdf', 'contact', 'interface'], setWhich: () => {},
 })))
-ok(/class="mini active"[^>]*>仅界面/.test(h) || /仅界面/.test(h) && /mini active/.test(h),
-  '「仅界面」在选中界面类时高亮')
+ok(/class="mini active"[^>]*>仅结构/.test(h) || /仅结构/.test(h) && /mini active/.test(h),
+  '「仅结构」在选中空间结构类时高亮')
 ok(h.includes('已选 4 / 10'), '高亮时已选数量正确')
 
-// 选择为「结晶」时应高亮「仅结晶」而不是「仅界面」
+// 选择为「取向与结晶」时应高亮「仅取向」而不是「仅结构」
 h = flat(render(() => React.createElement(M.FunctionBlock, {
   titles: FB_TITLES, order: FB_ORDER, which: ['orientation', 'order'],
   setWhich: () => {},
 })))
 const activeCount = (h.match(/mini active/g) || []).length
 ok(activeCount === 1, '同时只有一个预设处于高亮态', `active=${activeCount}`)
-ok(h.includes('仅结晶'), '结晶类被高亮时「仅结晶」按钮存在')
+ok(h.includes('仅取向'), '取向类被高亮时「仅取向」按钮存在')
 
 // 不带参数也能渲染（例如 order 为空时）
 h = flat(render(() => React.createElement(M.FunctionBlock, { titles: {}, order: [] })))
-ok(h.includes('仅界面') && h.includes('仅结晶'), 'order 为空时预设按钮仍在')
+ok(h.includes('仅结构') && h.includes('仅取向'), 'order 为空时预设按钮仍在')
 
 h = flat(render(() => React.createElement(M.RunBlock, {
   busy: false, progress: 0, onRun: () => {}, onCancel: () => {},
@@ -435,7 +502,7 @@ ok(h.includes('数据表'), 'DataPanel 标题')
 // 数据表导航用与图表导航相同的模块分层
 ok(h.includes('navmodule'), '数据表导航有模块层')
 ok(h.includes('class="mtitle">链构象'), '数据表导航模块标题=链构象')
-ok(h.includes('class="mtitle">辅助'), '数据表导航模块标题=辅助')
+ok(h.includes('class="mtitle">动力学与输运'), '数据表导航模块标题=动力学与输运')
 ok(h.includes('1 项 / 2 张'), '数据表模块显示「N 项 / M 张」')
 ok(!h.includes('class="mtitle">界面'), '数据表里没结果的模块也不显示')
 h = flat(render(() => React.createElement(M.DataPanel, { run })))
@@ -466,17 +533,27 @@ ok(h.indexOf('开始导出') < h.indexOf('打开目标目录'),
   '「打开目标目录」排在「开始导出」右边')
 // 4) 未导出时不显示"最近导出"，且导出页**不显示统计量明细**
 ok(!h.includes('最近导出'), '未导出时不显示最近导出信息')
-ok(!h.includes('filetable'), '界面不再渲染导出文件清单表')
 ok(!h.includes('Rg mean'), '导出页不掺统计量明细')
-ok(!h.includes('stattabs'), '导出页没有统计量标签栏')
-ok(!h.includes('全部统计量'), '导出页没有「全部统计量」区块')
+ok(!h.includes('stattabs'), '导出页没有统计量的模块标签栏')
+ok(!h.includes('statblock'), '导出页没有统计量明细区块')
+ok(!h.includes('<th>统计量</th>'), '导出页没有「统计量 / 数值」表')
+// 5) 下方「选择要导出的文件」：按模块分板块（参照统计量页的设计）
+ok(h.includes('filetabs'), '有「选择要导出的文件」区（独立类名 filetabs）')
+ok(h.includes('选择要导出的文件'), '区块标题正确')
+ok(h.includes('filegroup'), '文件按模块分板块')
+ok(h.includes('filegroup-head'), '每个板块有标题栏（含全选 / 全不选）')
+ok(h.includes('rg__panel0.csv'), '列出实际会产出的文件名（多面板带 __panelN）')
+ok(h.includes('rg.png'), '列出合并图 PNG')
+ok(h.includes('summary.xlsx'), '列出 Excel 汇总')
+ok(h.includes('已选'), '显示已选文件数')
+ok(h.includes('type="checkbox"'), '每个文件有勾选框')
 
 // ------------------------------------------------ 「统计量」页（只显示指标）
 h = flat(render(() => React.createElement(M.StatsPanel, { run, groups: M.FALLBACK_GROUPS })))
 ok(h.includes('stattabs'), '统计量页有模块标签栏')
 ok(!h.includes('导出结果') && !h.includes('开始导出'), '统计量页不含任何导出控件')
 ok(!h.includes('目标目录') && !h.includes('文件形式'), '统计量页不含导出设置')
-ok(h.includes('链构象') && h.includes('辅助'), '标签栏含各模块')
+ok(h.includes('链构象') && h.includes('动力学与输运'), '标签栏含各模块')
 ok(!h.includes('statmodule'), '不再一次性铺开全部模块')
 // 默认停在第一个有结果的模块
 ok(h.includes('Rg mean'), '默认显示第一个模块（链构象）的统计量')
@@ -485,13 +562,13 @@ ok(h.includes('<thead>') && h.includes('<th>统计量</th>') && h.includes('<th>
 ok(!h.includes('water OW D'), '只显示本模块（不含辅助模块的 MSD 统计量）')
 
 h = flat(render(() => React.createElement(M.StatsPanel, {
-  run, groups: M.FALLBACK_GROUPS, defaultView: '辅助',
+  run, groups: M.FALLBACK_GROUPS, defaultView: '动力学与输运',
 })))
 ok(h.includes('water OW D'), '切到「辅助」标签显示 MSD 统计量')
 ok(!h.includes('Rg mean'), '切模块后不显示其它模块的统计量')
 
 h = flat(render(() => React.createElement(M.StatsPanel, {
-  run, groups: M.FALLBACK_GROUPS, defaultView: '界面',
+  run, groups: M.FALLBACK_GROUPS, defaultView: '空间结构',
 })))
 ok(h.includes('这个模块下没有结果'), '没有结果的模块给出明确提示')
 
@@ -597,8 +674,11 @@ ok(typeof M.api.runStart === 'function' && typeof M.api.runProgress === 'functio
 console.log('\n[6] 分析分组与图表导航分层')
 ok(Array.isArray(M.FALLBACK_GROUPS) && M.FALLBACK_GROUPS.length === 4,
   '兜底分组有 4 个模块', `n=${M.FALLBACK_GROUPS?.length}`)
-ok(M.FALLBACK_GROUPS.map(([l]) => l).join('/') === '链构象/界面/结晶/辅助',
-  '兜底模块名与大纲一致', M.FALLBACK_GROUPS.map(([l]) => l).join('/'))
+ok(M.FALLBACK_GROUPS.map(([l]) => l).join('/')
+  === '链构象/空间结构/取向与结晶/动力学与输运',
+  '兜底模块名与后端定义一致', M.FALLBACK_GROUPS.map(([l]) => l).join('/'))
+ok(M.FALLBACK_GROUPS.every(([, , s]) => typeof s === 'string' && s.length >= 1 && s.length <= 3),
+  '每个兜底分组都带 2 字按钮缩写', M.FALLBACK_GROUPS.map(([, , s]) => s).join('/'))
 const allNames = M.FALLBACK_GROUPS.flatMap(([, ns]) => ns)
 ok(allNames.length === 10 && new Set(allNames).size === 10,
   '兜底分组覆盖 10 项且不重复', `n=${allNames.length}`)
@@ -614,7 +694,7 @@ ok(M.normalizeGroups([{ label: 'X' }, { label: 'Y', names: ['rg'] }]).length ===
 const gp = M.groupPresent(['rg', 'msd', 'zzz'], M.FALLBACK_GROUPS)
 ok(gp.length === 3, '只保留有结果的模块', gp.map(([l]) => l).join('/'))
 ok(gp[0][0] === '链构象' && gp[0][1].length === 1, '链构象模块只含 rg')
-ok(gp[1][0] === '辅助' && gp[2][0] === '其他', '未归类的进「其他」')
+ok(gp[1][0] === '动力学与输运' && gp[2][0] === '其他', '未归类的进「其他」')
 ok(gp[2][1][0] === 'zzz', '「其他」里是 zzz')
 ok(M.groupPresent([], M.FALLBACK_GROUPS).length === 0, '没有结果时不显示任何模块')
 
@@ -622,7 +702,7 @@ ok(M.groupPresent([], M.FALLBACK_GROUPS).length === 0, '没有结果时不显示
 h = chartPanel(run, { name: 'rg', index: 0 }, { groups: M.FALLBACK_GROUPS })
 ok(h.includes('navmodule'), '导航有模块层')
 ok(h.includes('class="mtitle">链构象'), '模块标题=链构象')
-ok(h.includes('class="mtitle">辅助'), '模块标题=辅助')
+ok(h.includes('class="mtitle">动力学与输运'), '模块标题=动力学与输运')
 ok(h.includes('1 项 / 2 张'), '模块显示「N 项 / M 张」')
 ok(h.includes('navgroup'), '模块内还有分析项一层')
 ok(h.includes('回转半径 Rg —— 最大链'), '分析项标题仍在')

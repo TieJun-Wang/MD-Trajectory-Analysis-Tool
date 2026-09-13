@@ -107,12 +107,14 @@ def describe_system(mdt_or_universe) -> SystemInfo:
         mdt = mdt_or_universe
         u = mdt.universe
         info = SystemInfo(topology=str(mdt.topology), trajectory=mdt.trajectory)
-        times = mdt.times_ps
+        # O(1) 取首末时刻：不能用 mdt.times_ps —— 那会为了一份"起止时间"
+        # 把整个 1.7 GB 轨迹的帧头扫一遍（46 体系实测 28 s）。
+        rng = mdt.time_range_ps()
         info.n_frames = mdt.n_frames
         info.dt_ps = mdt.dt_ps
-        if times.size:
-            info.first_time_ps = float(times[0])
-            info.last_time_ps = float(times[-1])
+        if rng is not None:
+            info.first_time_ps = float(rng[0])
+            info.last_time_ps = float(rng[1])
     else:
         u = mdt_or_universe
         info = SystemInfo(topology=str(getattr(u, "filename", "") or ""))

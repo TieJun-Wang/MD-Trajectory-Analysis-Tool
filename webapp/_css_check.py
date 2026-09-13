@@ -20,9 +20,12 @@ need = [
     (".acc-body", "折叠内容区"),
     (".ops", "左操作台"),
     (".layout", "主体分栏"),
-    ("grid-template-columns:1fr1fr1fr", "参数三列网格"),
+    (".ptab", "参数表（表格约束布局）"),
+    ("table-layout:auto", "参数表列宽由内容决定"),
+    ("appearance:textfield", "隐藏数字输入箭头（省宽、外观一致）"),
     (".chip-pick", "组分胶囊多选"),
     (".fgroup", "分析功能紧凑分组"),
+    (".pgroup", "参数按分析项分组的小标题"),
     (".notes-foot", "说明栏底部提示"),
     (".logview", "运行日志页"),
     (".tabbody", "标签页内容区"),
@@ -70,6 +73,10 @@ need = [
     (".dp-item", "目录选择器条目"),
     (".chinline", "模块/格式胶囊勾选"),
     (".exppath", "目标目录显示框"),
+    (".filetabs", "导出的「可选文件」标签栏"),
+    (".filegroup", "导出文件按模块分板块"),
+    (".filegroup-head", "板块标题栏（含全选/全不选）"),
+    ("table.filetable", "可选文件表"),
 ]
 
 #: 这些样式**必须已经不存在**（结构改掉了，留着就是死代码）
@@ -79,7 +86,6 @@ gone = [
     ("white-space:pre;", "旧的定宽文本报告（报告已改为表格）"),
     (".logo", "顶栏 logo 方块（改为两行标题）"),
     (".statmodule", "统计量旧的分板块样式（已改为单一模块标签）"),
-    ("table.filetable", "导出文件清单表（已改为只显示目录+时间）"),
 ]
 
 bad = []
@@ -145,7 +151,9 @@ if row:
         gap = float(m.group(1))
     nowrap = "flex-wrap:nowrap" in g.replace(" ", "")
 
-LABELS = ["全选", "仅链构象", "仅界面", "仅结晶", "仅辅助"]
+LABELS = ["全选", "仅构象", "仅结构", "仅取向", "仅输运"]
+# ↑ 必须与 `mdta.pipeline.GROUP_SHORT`（经 /api/analyses 下发）一致；
+#   按钮文字 = "仅" + 缩写，完整分组名放在 tooltip 上。
 
 
 def _text_w(s, fs):
@@ -168,6 +176,50 @@ if need > avail:
     print("    -> 放不下！")
 else:
     print(f"    -> 排得下，余量 {avail - need:.1f}px")
+
+# ------------------------------------------- 参数区布局（表格约束）
+# 用户建议并采纳：参数改用 <table class="ptab"> 约束排版——列在各行之间共享宽度，
+# 因此同一列的输入框左边缘天然对齐（flex 布局下标签长短不一 → 输入框起点参差不齐）。
+# "提示文字不被截断"已升级为**元素级保证**（每个输入框带内联 min-width），
+# 由 _ui_render.mjs 直接读渲染结果断言，这里只校验表格本身的基础规则。
+ptab = re.search(r"\.ptab\{([^}]*)\}", flat)
+th_rule = re.search(r"\.ptabth\{([^}]*)\}", flat)
+spin = re.search(r"\.ptabinput\[type=number\]::-webkit-inner-spin-button\{([^}]*)\}", flat)
+print("\n  参数区布局（表格约束）:")
+if not ptab:
+    bad.append("找不到 .ptab 规则（参数区没有用表格约束布局）")
+else:
+    print(f"    .ptab: {ptab.group(1)}")
+    if "width:100%" not in ptab.group(1):
+        bad.append(".ptab 没有 width:100%")
+    if not th_rule or "white-space:nowrap" not in th_rule.group(1):
+        bad.append(".ptab th 缺 nowrap（标签会折行）")
+    else:
+        print(f"    .ptab th: {th_rule.group(1)}")
+    if not spin or "-webkit-appearance:none" not in spin.group(1):
+        bad.append("数字输入的上下箭头没隐藏（占宽且外观不齐）")
+    else:
+        print(f"    数字输入箭头: {spin.group(1)}")
+    if not bad:
+        print("    -> 表格约束布局 + 标签不折行 + 箭头已隐藏 ✓")
+
+# 提示文字的宽度保证在 JSX 里（内联 min-width），这里只确认公式里的内边距常数一致：
+IN_CHROME = 14.0
+print(f"    提示文字余量由 JSX 内联 min-width 保证（+{IN_CHROME:.0f}px 内边距/边框）；"
+      f"渲染级断言见 _ui_render.mjs 的 checkPlaceholders")
+
+# nowrap 三条声明必须齐全。**逐条查、不查拼接串**：压缩器会重排声明顺序
+# （实测产物里是 white-space;text-overflow;…;overflow），拼接匹配会误报。
+span_rule = re.search(r"\.grid3\.field>span\{([^}]*)\}", flat)
+_decls = ["white-space:nowrap", "overflow:hidden", "text-overflow:ellipsis"]
+if not span_rule:
+    bad.append("找不到 .grid3 .field>span 规则（参数标签可能折行）")
+else:
+    _miss = [d for d in _decls if d not in span_rule.group(1)]
+    if _miss:
+        bad.append(f"参数标签缺声明 {_miss}（长标签会折成两行）")
+    else:
+        print("    -> 标签 nowrap / overflow / ellipsis 三条齐全，强制单行 ✓")
 
 # ------------------------------- 说明栏：纵向可滚、横向必须锁死
 # 只写 overflow-y:auto 时另一轴会由 visible 计算成 auto，于是超宽就冒出横向滚动条。

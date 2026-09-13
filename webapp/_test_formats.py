@@ -29,6 +29,24 @@ from mdta.selection import component_groups                   # noqa: E402
 
 set_agg_backend()
 
+# --- 数据位置解析：工作区 / 上一级 / 上一级 dataset（兼容一层或两层目录）---
+_DATA_ROOTS = [ROOT, ROOT.parent, ROOT.parent / "dataset"]
+
+
+def find_data(name: str) -> Path:
+    """按文件名在候选根目录里找（含一层子目录），找不到就返回工作区下的预期路径。"""
+    for base in _DATA_ROOTS:
+        direct = base / name
+        if direct.exists():
+            return direct
+        try:
+            for hit in sorted(base.glob(f"*/{name}")):
+                if hit.exists():
+                    return hit
+        except OSError:
+            continue
+    return ROOT / name
+
 SYSTEMS = [
     ("adk_oplsaa", "AdK 蛋白水溶液"),
     ("md_biopolymer_nowater", "糖蛋白 + DOL"),
@@ -77,8 +95,8 @@ print("拓扑格式一致性验证 —— .tpr / .gro / .pdb")
 print("=" * 74)
 
 for stem, desc in SYSTEMS:
-    tpr = ROOT / f"{stem}.tpr"
-    xtc = ROOT / f"{stem}.xtc"
+    tpr = find_data(f"{stem}.tpr")
+    xtc = find_data(f"{stem}.xtc")
     gro = ROOT / "_fmt_test" / f"{stem}.gro"
     pdb = ROOT / "_fmt_test" / f"{stem}.pdb"
     if not tpr.is_file() or not xtc.is_file():
@@ -146,8 +164,8 @@ ok(not is_sugar_resname("DOL") and not is_sugar_resname("SOL"),
    "DOL / SOL 不被误判为糖")
 
 print("\n【.top 必须被明确拒绝】")
-top = ROOT / "Abeta_4_16_Cu" / "Abeta_4_16_Cu" / "topol.top"
-xtc = ROOT / "Abeta_4_16_Cu" / "Abeta_4_16_Cu" / "md_dt200.xtc"
+top = find_data("topol.top")
+xtc = find_data("md_dt200.xtc")
 if top.is_file():
     try:
         load_trajectory(str(top), str(xtc)).universe.atoms.n_atoms
@@ -162,7 +180,7 @@ else:
     print("  [跳过] 找不到 topol.top")
 
 print("\n【原子数不匹配时的提示】")
-bad = ROOT / "Abeta_4_16_Cu" / "Abeta_4_16_Cu" / "ab_4_16_cu.pdb"
+bad = find_data("ab_4_16_cu.pdb")
 if bad.is_file():
     try:
         load_trajectory(str(bad), str(xtc)).universe.atoms.n_atoms

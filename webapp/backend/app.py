@@ -39,7 +39,7 @@ from typing import Any, Mapping
 
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 # ---------------------------------------------------------------- 路径准备
@@ -113,7 +113,7 @@ def analyses() -> dict:
     return {
         "order": list(DEFAULT_ORDER),
         "titles": {k: ANALYSIS_TITLES.get(k, k) for k in DEFAULT_ORDER},
-        # 按大纲模块分组（链构象 / 界面 / 结晶 / 辅助）：
+        # 按大纲模块分组（链构象 / 空间结构 / 取向与结晶 / 动力学与输运）：
         # 前端「分析功能」预设按钮与「图表导航」分层都用这一份，
         # 避免前后端各维护一份分组表而对不上。
         "groups": analysis_groups(),
@@ -134,8 +134,10 @@ def files(dir: str | None = None) -> dict:
 def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
     top = str(payload.get("topology") or "").strip()
     traj = str(payload.get("trajectory") or "").strip() or None
+    # 前端会带一个 token 并**并发轮询** /api/session/open/progress 显示读取进度
+    token = str(payload.get("progress_token") or "").strip() or None
     try:
-        sess = registry.open(top, traj)
+        sess = registry.open(top, traj, progress_token=token)
     except SessionError as exc:
         raise _fail(exc) from exc
     return {
@@ -147,6 +149,59 @@ def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
         "primary_atoms": int(sess.az.primary.n_atoms) if sess.az.primary else 0,
         "outdir": sess.outdir,
     }
+
+
+@app.get("/api/session/open/progress")
+def open_progress(token: str = "") -> dict:
+    """「文件读取」进度（轮询版）：阶段、逐阶段耗时、总耗时。"""
+    return registry.open_progress(token)
+
+
+@app.get("/api/session/open/stream")
+async def open_stream(token: str = "") -> StreamingResponse:
+    """「文件读取」进度的**流式**推送（SSE）。
+
+    为什么用流式：读取大轨迹首次要扫全文件（46 体系 1.7 GB 实测 >135 s），
+    轮询只能"定期取样"，阶段切换最多晚一个轮询周期；SSE 在阶段变化时**立即**
+    推送，客户端不必反复发请求。结束/出错时发一个 ``event: end`` 让前端收流。
+
+    实现要点：本接口是 ``async``，而 ``registry.open_progress()`` 是同步的
+    （内部有锁，耗时是微秒级），在事件循环里直接调用不会造成阻塞。
+    """
+    import asyncio
+    import json
+    import time as _time
+
+    async def gen():
+        last = None
+        beat = _time.time()
+        hard_deadline = _time.time() + 3600.0        # 最长 1 小时，避免僵尸连接
+        grace_until = _time.time() + 15.0            # 等 token 注册（见下）
+        while True:
+            snap = registry.open_progress(token)
+            # 前端通常**先开流、再 POST**，所以刚开始查不到 token 是正常的
+            # （实测：不等就会立刻收流，前端永远看不到进度）。这里等它出现，
+            # 超过宽限期才当作"未知 token"收流。
+            if snap.get("unknown") and _time.time() < grace_until:
+                await asyncio.sleep(0.2)
+                continue
+            key = (snap.get("n_stages"), snap.get("done"), bool(snap.get("error")))
+            now = _time.time()
+            if key != last or now - beat >= 1.0:      # 变化即时推；否则每秒一次心跳
+                last, beat = key, now
+                yield "data: " + json.dumps(snap, ensure_ascii=False) + "\n\n"
+            if snap.get("unknown") or snap.get("done") or snap.get("error"):
+                yield "event: end\ndata: {}\n\n"
+                return
+            if now > hard_deadline:
+                yield "event: end\ndata: {}\n\n"
+                return
+            await asyncio.sleep(0.12)
+
+    return StreamingResponse(gen(), media_type="text/event-stream", headers={
+        "Cache-Control": "no-cache", "Connection": "keep-alive",
+        "X-Accel-Buffering": "no",
+    })
 
 
 @app.get("/api/session/{sid}/info")

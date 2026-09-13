@@ -86,6 +86,9 @@ def result_to_json(result, max_points: int = MAX_POINTS) -> dict:
         "curves": [curve_to_json(c, max_points) for c in result.curves],
         "summary": {str(k): _num(v) for k, v in result.summary.items()},
         "notes": [str(x) for x in result.notes],
+        # 每条说明的作用域（属于哪张图 / 哪条曲线）——前端据此只显示与当前
+        # 图表可见曲线相关的说明
+        "note_meta": result.notes_with_scope(),
         "meta": {str(k): _num(v) for k, v in (result.meta or {}).items()
                  if not isinstance(v, (list, dict, tuple))},
     }

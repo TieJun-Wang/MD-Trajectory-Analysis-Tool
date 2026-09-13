@@ -15,7 +15,35 @@ from mdta.pipeline import DEFAULT_ORDER, Analyzer
 from mdta.selection import component_groups, largest_chains, list_chains
 
 set_agg_backend()
-D = ROOT / "Abeta_4_16_Cu" / "Abeta_4_16_Cu"
+# --- 数据位置解析：工作区 / 上一级 / 上一级 dataset（兼容一层或两层目录）---
+_DATA_ROOTS = [ROOT, ROOT.parent, ROOT.parent / "dataset"]
+
+
+def find_data(name: str) -> Path:
+    """按文件名在候选根目录里找（含一层子目录），找不到就返回工作区下的预期路径。"""
+    for base in _DATA_ROOTS:
+        direct = base / name
+        if direct.exists():
+            return direct
+        try:
+            for hit in sorted(base.glob(f"*/{name}")):
+                if hit.exists():
+                    return hit
+        except OSError:
+            continue
+    return ROOT / name
+
+D = find_data("Abeta_4_16_Cu")
+if D.is_file():
+    D = D.parent
+
+if not (D / "min_nopbc.gro").is_file() or not (D / "md_dt200.xtc").is_file():
+    print("=" * 76)
+    print("跳过：找不到 Abeta_4_16_Cu 数据集")
+    print(f"  {D}")
+    print("  该数据集不在工作区（已被移出）；放回后本套件会自动恢复运行。")
+    print("=" * 76)
+    sys.exit(0)
 XTC = str(D / "md_dt200.xtc")
 
 

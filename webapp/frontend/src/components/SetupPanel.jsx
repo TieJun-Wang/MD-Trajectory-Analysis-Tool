@@ -76,52 +76,195 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
   )
 }
 
-export function ParamBlock({ frames, setFrames, params, setParams }) {
+// ------------------------------------------------------------ 参数区布局
+// 用**表格约束**排版（用户建议）：`<table class="ptab">` 是 6 列基准网格，
+// 一行最多放 3 个参数（label|input 各占列），同一列的输入框左边缘**天然对齐**。
+// 每个参数按"标签宽 + 提示文字宽"决定占 2 / 3 / 6 列（即每行 3 / 2 / 1 个）。
+//
+// **提示文字必须完整显示**：不再只靠布局推算，而是给每个输入框直接设定
+// 内联 `min-width = max(40, 提示文字宽 + 内边距12 + 边框2)`——这是元素级保证，
+// 布局怎么变都不会截断。数字输入的上下箭头也一并隐藏（约占 18px 宽，
+// 而且会让数字框与下拉框外观不一致、看着不齐）。
+const LABEL_FS = 11.5
+const INPUT_FS = 12.5
+const CELL_3 = 113.3           // 三个一排时每格宽度（6 列基准、间距 4px）
+const CELL_2 = 172.0           // 两个一排时每格宽度
+const GRID_GAP = 4.0
+const IN_MIN = 40.0            // 数字输入的绝对最小宽
+const SEL_MIN = 70.0           // 下拉框最小宽（选项文字长）
+const PH_CHROME = 14.0         // 输入框左右内边距 12 + 边框 2
+
+const textPx = (t, fs) => [...String(t)].reduce(
+  (w, ch) => w + (ch.codePointAt(0) < 0x2E80 ? 0.55 : 1.0) * fs, 0)
+const labelPx = (t) => textPx(t, LABEL_FS)
+/** 输入框的最小宽度：必须放得下提示文字（元素级保证）。 */
+const inputMinWidth = (ph) => Math.max(IN_MIN, textPx(ph || '', INPUT_FS) + PH_CHROME)
+
+/** 按需要宽度选跨度（列数）：2 = 一行 3 个、3 = 一行 2 个、6 = 独占一行。 */
+function spanOf(label, kind = 'input', ph = '') {
+  const inNeed = kind === 'select' ? SEL_MIN : inputMinWidth(ph)
+  const need = labelPx(label) + GRID_GAP + inNeed
+  if (need <= CELL_3) return 2
+  if (need <= CELL_2) return 3
+  return 6
+}
+
+/** 贪心装箱：每行跨度合计不超过 6。 */
+function packRows(fields) {
+  const rows = []
+  let cur = []
+  let used = 0
+  for (const f of fields) {
+    if (used + f.span > 6 && cur.length) { rows.push(cur); cur = []; used = 0 }
+    cur.push(f)
+    used += f.span
+  }
+  if (cur.length) rows.push(cur)
+  return rows
+}
+
+/** 数字输入：内联 min-width 保证提示文字完整显示。 */
+const numInput = (ph, props) => (
+  <input type="number" placeholder={ph || undefined} title={ph || undefined}
+         style={{ minWidth: inputMinWidth(ph) }} {...props} />
+)
+
+/** 参数表格：th（标签）+ td（输入），td 的 colSpan = 跨度 − 1。 */
+function ParamTable({ fields }) {
+  const rows = packRows(fields.filter(Boolean))
+  if (!rows.length) return null
+  return (
+    <table className="ptab">
+      <tbody>
+        {rows.map((row, ri) => (
+          <tr key={ri}>
+            {row.flatMap((f) => [
+              <th key={`${f.key}-l`} scope="row">{f.label}</th>,
+              <td key={`${f.key}-i`} colSpan={f.span - 1}>{f.node}</td>,
+            ])}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  )
+}
+
+/** 帧选择（所有分析共用）：独立板块，排在「分析功能」之前。 */
+export function FrameBlock({ frames, setFrames }) {
   const f = (key) => ({
     value: frames[key] ?? '',
     onChange: (e) => setFrames({ ...frames, [key]: e.target.value }),
   })
+  const SPEC = [
+    ['start_ps', '起始 (ps)', '首帧'],
+    ['stop_ps', '结束 (ps)', '末帧'],
+    ['equil_ps', '平衡 (ps)', '不统计'],
+    ['interval_ps', '抽帧 (ps)', '每帧'],
+    ['max_frames', '最多帧数', '不限'],
+  ]
+  const fields = SPEC.map(([key, label, ph]) => ({
+    key, label, span: spanOf(label, 'input', ph),
+    node: numInput(ph, f(key)),
+  }))
+  return (
+    <>
+      <div className="sect-title" style={{ marginTop: 10 }}>帧选择</div>
+      <ParamTable fields={fields} />
+    </>
+  )
+}
+
+/** 分析参数：按分析项分组，**只显示已选分析项的参数**（which=null → 全显示）。 */
+export function ParamBlock({ params, setParams, which = null }) {
   const p = (key) => ({
     value: params[key] ?? '',
     onChange: (e) => setParams({ ...params, [key]: e.target.value }),
   })
+  const sel = (key, opts) => (
+    <select value={params[key]}
+            onChange={(e) => setParams({ ...params, [key]: e.target.value })}>
+      {opts.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
+    </select>
+  )
+  const F = (key, label, kind, node, ph = '') => ({ key, label, span: spanOf(label, kind, ph), node })
 
+  const show = (mods) => {
+    if (mods === null) return true
+    if (which === null || !Array.isArray(which)) return true
+    return mods.some((m) => which.includes(m))
+  }
+
+  const GROUPS = [
+    ['接触分析', ['contact'], [
+      F('cutoff', 'cutoff (Å)', 'input', numInput('', { step: 0.5, ...p('cutoff') })),
+      F('contact_mode', '接触配对模式', 'select', sel('contact_mode', [
+        ['inter', '分子间（默认，剔除同分子配对）'],
+        ['intra', '分子内（只算同一分子内部）'],
+        ['total', '总体（含分子内，1.0.0 旧口径）'],
+      ])),
+    ]],
+    ['密度分布 / 界面宽度', ['density', 'interface'], [
+      F('axis', '密度方向', 'select', sel('axis', [[2, 'c (2)'], [1, 'b (1)'], [0, 'a (0)']])),
+      F('nbins', '密度 bin 数', 'input', numInput('', p('nbins'))),
+    ]],
+    ['径向分布函数 RDF', ['rdf'], [
+      F('rmax', 'RDF 最大 r (Å)', 'input', numInput('', { step: 1, ...p('rmax') })),
+      F('rdf_mode', 'RDF 配对模式', 'select', sel('rdf_mode', [
+        ['inter', '分子间（默认，g(r) 标准口径）'],
+        ['intra', '分子内（同一分子内构象）'],
+        ['total', '总体（含分子内，1.0.0 旧口径）'],
+      ])),
+    ]],
+    ['二面角分析', ['dihedral'], [
+      F('dihedral_mode', '二面角模式', 'select', sel('dihedral_mode', [
+        ['auto', 'auto（自动）'],
+        ['phi_psi', 'phi_psi（蛋白质主链 φ/ψ）'],
+        ['chain', 'chain（几何连续原子模式：键图最长路径）'],
+        ['topology', 'topology（拓扑定义）'],
+      ])),
+      F('gauche_edge', 'trans/gauche 阈值 (°)', 'input',
+        numInput('', { step: 5, min: 60, max: 180, ...p('gauche_edge') })),
+    ]],
+    ['链段取向分析', ['orientation'], [
+      F('orient_mode', '取向链段定义', 'select', sel('orient_mode', [
+        ['repeat', 'repeat（化学重复单元，默认）'],
+        ['backbone', 'backbone（几何骨架：键图最长路径）'],
+        ['bonds', 'bonds（所有重原子键）'],
+      ])),
+      F('orient_stride', '几何骨架 stride', 'input',
+        numInput('', { step: 1, min: 1, ...p('orient_stride') })),
+    ]],
+    ['结构有序度分析', ['order'], [
+      F('g_ref', '局部结构 g_ref', 'input', numInput('留空不计入', { step: 1, ...p('g_ref') }),
+        '留空不计入'),
+    ]],
+    ['均方位移 MSD', ['msd'], [
+      F('msd_object', 'MSD 追踪对象', 'select', sel('msd_object', [
+        ['molecule', '分子质心（默认，分子平动扩散）'],
+        ['atom', '原子（含分子内部运动）'],
+      ])),
+    ]],
+  ]
+
+  const visible = GROUPS.filter(([, mods, fields]) => show(mods) && fields.length)
   return (
     <>
-      <div className="sect-title" style={{ marginTop: 10 }}>参数设置</div>
-      <div className="grid3">
-        <label className="field"><span>起始 (ps)</span>
-          <input type="number" placeholder="首帧" {...f('start_ps')} /></label>
-        <label className="field"><span>结束 (ps)</span>
-          <input type="number" placeholder="末帧" {...f('stop_ps')} /></label>
-        <label className="field"><span>平衡段 (ps)</span>
-          <input type="number" placeholder="不统计" {...f('equil_ps')} /></label>
-        <label className="field"><span>抽帧间隔 (ps)</span>
-          <input type="number" placeholder="每帧" {...f('interval_ps')} /></label>
-        <label className="field"><span>最多帧数</span>
-          <input type="number" placeholder="不限" {...f('max_frames')} /></label>
-        <label className="field"><span>接触 cutoff (Å)</span>
-          <input type="number" step="0.5" {...p('cutoff')} /></label>
-        <label className="field"><span>密度方向</span>
-          <select value={params.axis}
-                  onChange={(e) => setParams({ ...params, axis: e.target.value })}>
-            <option value={2}>c (2)</option>
-            <option value={1}>b (1)</option>
-            <option value={0}>a (0)</option>
-          </select></label>
-        <label className="field"><span>密度 bin 数</span>
-          <input type="number" {...p('nbins')} /></label>
-        <label className="field"><span>RDF 最大 r (Å)</span>
-          <input type="number" step="1" {...p('rmax')} /></label>
-        <label className="field col-span-all"><span>二面角模式</span>
-          <select value={params.dihedral_mode}
-                  onChange={(e) => setParams({ ...params, dihedral_mode: e.target.value })}>
-            <option value="auto">auto（自动）</option>
-            <option value="phi_psi">phi_psi（蛋白质主链 φ/ψ）</option>
-            <option value="chain">chain（链骨架）</option>
-            <option value="topology">topology（拓扑定义）</option>
-          </select></label>
+      <div className="sect-title" style={{ marginTop: 10 }}>
+        分析参数
+        <span className="dim" style={{ fontWeight: 400 }}>
+          {Array.isArray(which)
+            ? ' （随上方「分析功能」的勾选出现）'
+            : ' （未按分析项筛选，显示全部）'}
+        </span>
       </div>
+      {visible.length ? visible.map(([title, , fields]) => (
+        <div className="pblock" key={title}>
+          <div className="pgroup">{title}</div>
+          <ParamTable fields={fields} />
+        </div>
+      )) : (
+        <div className="pempty">尚未勾选任何分析项（在上方「分析功能」里勾选后，这里会出现对应参数）</div>
+      )}
     </>
   )
 }
@@ -163,13 +306,13 @@ export function FunctionBlock({ titles = {}, order = [], which = [], setWhich,
       ))}
       <div className="btnrow">
         <button className="mini" onClick={() => setWhich([...order])}>全选</button>
-        {GROUPS.map(([group, names]) => (
+        {GROUPS.map(([group, names, short]) => (
           <button key={group}
                   className={`mini ${isPreset(names) ? 'active' : ''}`}
                   title={`只勾选「${group}」这一类（${names.map(
                     (n) => titles[n] || n).join('、')}）；要全部取消就逐个点掉勾选框`}
                   onClick={() => setWhich([...names])}>
-            仅{group}
+            仅{short}
           </button>
         ))}
       </div>
@@ -226,4 +369,4 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
   )
 }
 
-export default { SelectionBlock, ParamBlock, FunctionBlock, RunBlock }
+export default { SelectionBlock, FrameBlock, ParamBlock, FunctionBlock, RunBlock }

@@ -24,6 +24,7 @@ import ChartPanel from './components/ChartPanel'
 import NotesPanel from './components/NotesPanel'
 import {
   FunctionBlock,
+  FrameBlock,
   ParamBlock,
   RunBlock,
   SelectionBlock,
@@ -59,6 +60,8 @@ export default function App() {
   })
   const [params, setParams] = useState({
     cutoff: 5.0, axis: 2, nbins: 100, rmax: 12, dihedral_mode: 'auto',
+    rdf_mode: 'inter', msd_object: 'molecule', gauche_edge: 120,
+    orient_mode: 'repeat', orient_stride: 1, contact_mode: 'inter', g_ref: '',
   })
   const [primary, setPrimary] = useState({ mode: 'auto' })
   const [components, setComponents] = useState([])
@@ -76,6 +79,8 @@ export default function App() {
   const [error, setError] = useState('')
   const [opsCollapsed, setOpsCollapsed] = useState(false)
   const [notesCollapsed, setNotesCollapsed] = useState(false)
+  // 当前图表里**仍然显示**的曲线（由图例点选决定）：说明区据此动态过滤
+  const [visibleCurves, setVisibleCurves] = useState(null)
   const abortRef = useRef(null)
   const liveRunRef = useRef(null)
   const cancelledRef = useRef(false)
@@ -152,9 +157,16 @@ export default function App() {
       params: {
         density: { axis: Number(params.axis), nbins: Number(params.nbins) },
         interface: { axis: Number(params.axis), nbins: Math.max(Number(params.nbins), 60) },
-        rdf: { rmax: Number(params.rmax), nbins: 120 },
-        contact: { cutoff: Number(params.cutoff) },
-        dihedral: { mode: params.dihedral_mode },
+        rdf: { rmax: Number(params.rmax), nbins: 120, mode: params.rdf_mode },
+        msd: { object: params.msd_object, remove_drift: true },
+        contact: { cutoff: Number(params.cutoff), mode: params.contact_mode },
+        dihedral: { mode: params.dihedral_mode,
+                    gauche_edge: Number(params.gauche_edge) || 120 },
+        orientation: { mode: params.orient_mode,
+                       stride: Number(params.orient_stride) || 1 },
+        // 结构有序度的局部结构分量：留空 → g_ref=None（该分量不计入指数）
+        order: { g_ref: String(params.g_ref).trim() === ''
+          ? null : Number(params.g_ref) },
       },
       selection: { primary, components },
     }
@@ -171,6 +183,7 @@ export default function App() {
         // 第一项算完就切到图表页，让用户马上看到东西
         if (got === fresh.length) {
           setChart({ name: fresh[0][0], index: 0 })
+          setVisibleCurves(null)
           setTab('charts')
         }
         for (const [name] of fresh) {
@@ -360,11 +373,12 @@ export default function App() {
                                           setPrimary={setPrimary}
                                           components={components}
                                           setComponents={setComponents} />
-                          <ParamBlock frames={frames} setFrames={setFrames}
-                                      params={params} setParams={setParams} />
+                          <FrameBlock frames={frames} setFrames={setFrames} />
                           <FunctionBlock titles={titles} order={order}
                                          which={which} setWhich={setWhich}
                                          groups={groups} />
+                          <ParamBlock params={params} setParams={setParams}
+                                      which={which} />
                           <RunBlock busy={busy} progress={progress} onRun={doRun}
                                     onCancel={cancelRun} live={live}
                                     which={which} titles={titles} run={run}
@@ -395,7 +409,8 @@ export default function App() {
 
           <div className="tabbody">
             {tab === 'charts' && (
-              <ChartPanel run={run} chart={chart} setChart={setChart}
+              <ChartPanel onVisibleChange={setVisibleCurves}
+                                 run={run} chart={chart} setChart={setChart}
                           live={live} titles={titles} groups={groups}
                           current={current?.result} panelIndex={current?.panelIndex ?? 0} />
             )}
@@ -415,7 +430,8 @@ export default function App() {
         {/* ------------------------------------- 右：图表说明（同样可折叠） */}
         {tab === 'charts' && current && (
           <aside className={`notes ${notesCollapsed ? 'collapsed' : ''}`}>
-            <NotesPanel result={current.result} panelIndex={current.panelIndex} />
+            <NotesPanel result={current.result} panelIndex={current.panelIndex}
+                                 visibleCurves={visibleCurves} />
             {/* 右侧同理：竖条放在最右边，展开时是「收起」 */}
             <button className="rail rail-r"
                     title={notesCollapsed ? '展开图表说明（会收起左侧操作台）'

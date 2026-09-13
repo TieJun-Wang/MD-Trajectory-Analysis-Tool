@@ -19,7 +19,48 @@ from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import quote
 
 from mdta import __version__
-from mdta.io import TrajectoryError, load_trajectory
+import time
+
+from mdta.io import TrajectoryError, load_trajectory, set_progress_sink
+from mdta.io import _progress
+
+
+class OpenProgress:
+    """「文件读取」这一步的进度记录：阶段、逐阶段耗时、总耗时、是否完成/失败。
+
+    为什么需要：打开大轨迹首次要扫全文件建立帧索引（46 体系 1.7 GB 实测 >135 s），
+    期间界面完全没有反馈，用户会以为程序卡死。这里把加载器的阶段回报攒下来，
+    前端在 POST /api/session **进行中**并发轮询它（该接口是同步 def，FastAPI 走
+    线程池，所以请求未返回时仍能响应其它请求）。
+    """
+
+    def __init__(self) -> None:
+        self.t0 = time.time()
+        self.stages: list[dict] = []
+        self.done = False
+        self.error = ""
+        self._lock = threading.Lock()
+
+    def __call__(self, stage: str, **info) -> None:
+        with self._lock:
+            now = time.time()
+            prev = self.stages[-1]["t"] if self.stages else self.t0
+            self.stages.append({"stage": str(stage), "t": now,
+                                "elapsed": round(now - self.t0, 2),
+                                "dt": round(now - prev, 2),
+                                **{k: v for k, v in info.items() if v is not None}})
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            stages = list(self.stages)
+        return {
+            "elapsed": round(time.time() - self.t0, 2),
+            "stages": stages,
+            "stage": stages[-1]["stage"] if stages else "准备中",
+            "n_stages": len(stages),
+            "done": bool(self.done),
+            "error": self.error,
+        }
 from mdta.pipeline import ANALYSIS_TITLES, DEFAULT_ORDER, Analyzer
 from mdta.selection import chains as _chains
 from mdta.selection import list_chains, select
@@ -419,12 +460,41 @@ class Session:
             out = export_all(list(rows.values()), outdir, formats=formats, dpi=dpi,
                              excel=("excel" in formats or "xlsx" in formats),
                              panel_pngs=panel_pngs, verbose=False)
+
+        # 逐文件筛选：前端可以按"导出哪些文件"精确勾选（按大纲模块分板块展示），
+        # 没勾上的文件导出后删掉。这里先导出再删，而不是让 export_all 支持
+        # 逐面板过滤 —— 少写一层参数，代价只是几个小文件的 I/O。
+        kept_files = {"csv": [], "png": [], "panel_png": [], "excel": None}
+        want_files = req.get("files")
+        if want_files is None:
+            kept_files = {"csv": list(out["csv"]), "png": list(out["png"]),
+                          "panel_png": list(out.get("panel_png", [])),
+                          "excel": out["excel"]}
+        else:
+            keep = {os.path.basename(str(f)) for f in want_files}
+            for key in ("csv", "png", "panel_png"):
+                for p in out.get(key, []):
+                    if os.path.basename(p) in keep:
+                        kept_files[key].append(p)
+                    else:
+                        try:
+                            os.remove(p)
+                        except OSError:
+                            pass
+            if out["excel"] and os.path.basename(out["excel"]) in keep:
+                kept_files["excel"] = out["excel"]
+            elif out["excel"]:
+                try:
+                    os.remove(out["excel"])
+                except OSError:
+                    pass
+
         self.last_export = {
             "dir": out["dir"],
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "n_csv": len(out["csv"]),
-            "n_png": len(out["png"]) + len(out.get("panel_png", [])),
-            "excel": out["excel"],
+            "n_csv": len(kept_files["csv"]),
+            "n_png": len(kept_files["png"]) + len(kept_files["panel_png"]),
+            "excel": kept_files["excel"],
             "which": list(names),
             "formats": formats,
         }
@@ -497,9 +567,43 @@ class SessionRegistry:
         self.max_sessions = int(max_sessions)
         self._items: "OrderedDict[str, Session]" = OrderedDict()
         self._lock = threading.Lock()
+        # 「文件读取」进度：token → OpenProgress（前端打开文件时并发轮询）
+        self._open_progress: "dict[str, OpenProgress]" = {}
+        self._prog_lock = threading.Lock()
+
+    def open_progress(self, token: str) -> dict:
+        """查询某次「文件读取」的进度快照（未知 token 返回空快照）。"""
+        with self._prog_lock:
+            prog = self._open_progress.get(token)
+        if prog is None:
+            return {"elapsed": 0.0, "stages": [], "stage": "", "n_stages": 0,
+                    "done": False, "error": "", "unknown": True}
+        return prog.snapshot()
 
     # ------------------------------------------------------------------ 建立
-    def open(self, topology: str, trajectory: str | None = None) -> Session:
+    def open(self, topology: str, trajectory: str | None = None,
+             progress_token: str | None = None) -> Session:
+        """打开一个体系。``progress_token`` 非空时记录加载进度供前端轮询。"""
+        prog: OpenProgress | None = None
+        if progress_token:
+            prog = OpenProgress()
+            with self._prog_lock:
+                self._open_progress[progress_token] = prog
+                if len(self._open_progress) > 8:          # 只留最近几次
+                    for k in list(self._open_progress)[:-8]:
+                        self._open_progress.pop(k, None)
+            set_progress_sink(prog)
+        try:
+            return self._open_inner(topology, trajectory, prog)
+        except Exception as exc:  # noqa: BLE001 - 记录失败原因后原样抛出
+            if prog is not None:
+                prog.error = str(exc)
+            raise
+        finally:
+            set_progress_sink(None)
+
+    def _open_inner(self, topology: str, trajectory: str | None,
+                    prog: "OpenProgress | None") -> Session:
         if not topology:
             raise SessionError("必须提供拓扑文件（.tpr/.gro/.pdb）")
         if not os.path.isfile(topology):
@@ -515,8 +619,25 @@ class SessionRegistry:
         stem = os.path.splitext(os.path.basename(topology))[0]
         outdir = os.path.join(self.base_outdir, f"{stem}_{sid}")
         os.makedirs(outdir, exist_ok=True)
+        if prog is not None:
+            set_progress_sink(prog)          # 打开轨迹与组分识别都要上报
+        # 注意：load_trajectory 是**惰性**的，真正的读取发生在 auto_setup() 里
+        # （它第一次访问 .universe），所以"读取"相关的阶段由 io 层上报、
+        # "识别组分"必须在 auto_setup 之后才报，否则顺序会前后颠倒。
+        _progress("打开体系")
         az = Analyzer(topology, trajectory)
         az.auto_setup()
+        _progress("识别组分与主链")
+        # 体系信息在这里就算好（并缓存）：它的耗时全部来自"重复扫盘"，
+        # 修掉之后只要 ~0.3 s。提前算掉有两个好处：
+        #   1) 「完成」真的是最后一步，POST 返回时页面能立刻拿到全部信息；
+        #   2) 万一将来某个体系的信息真的变慢，它也会出现在进度条里，
+        #      而不是像以前那样在「完成」之后静默 50 s（用户只能看到卡住）。
+        _progress("统计体系信息")
+        _ = az.info          # 预热并缓存体系信息（耗时全在重复扫盘上，现已消除）
+        _progress("完成")
+        if prog is not None:
+            prog.done = True
         sess = Session(sid=sid, az=az, outdir=outdir)
 
         with self._lock:

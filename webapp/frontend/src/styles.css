@@ -419,10 +419,10 @@ table.notes-table tr + tr td { border-top: 1px solid #f1f5f9; }
 }
 
 /* ================================================================ 表单 */
-.field { display: block; margin-bottom: 7px; }
-.field > span {
-  display: block; font-size: 11.5px; color: var(--dim); margin-bottom: 2px;
-}
+/* 基础形态：标签在上、输入在下（"分析对象"面板用，那里的标签很长，
+   需要自然折行，不能截断）。 */
+.field { display: block; margin-bottom: 7px; min-width: 0; }
+.field > span { display: block; font-size: 11.5px; color: var(--dim); margin-bottom: 2px; }
 .field input, .field select {
   width: 100%; padding: 4px 8px;
   border: 1px solid var(--line-strong); border-radius: 6px;
@@ -431,9 +431,67 @@ table.notes-table tr + tr td { border-top: 1px solid #f1f5f9; }
 .field input:focus, .field select:focus {
   outline: 2px solid var(--accent-soft); border-color: var(--accent);
 }
+
+/* 参数设置网格内：**标签与输入同一行**（标签左、输入右）。
+   每个参数只占一行，纵向空间比"标签一行 + 输入一行"明显更省
+   （16 个参数：约 376px → 约 225px，按 CSS 盒模型估算）。
+   标签不折行，也不许被省略号截断：塞不进一个网格单元的长标签由 JSX 加
+   `col-span-all` 横跨整行（判定阈值与 webapp/_css_check.py 的估算规则一致）。 */
+.grid3 .field { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.grid3 .field > span {
+  flex: 0 1 auto; margin-bottom: 0; font-size: 11.5px; color: var(--dim);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.grid3 .field input {
+  flex: 1 1 52px; min-width: 42px; width: auto; padding: 2px 6px;
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  background: #fff; color: var(--text); font: inherit; font-size: 12.5px;
+}
+.grid3 .field select {            /* 下拉框要宽一些：选项文字长 */
+  flex: 1 1 52px; min-width: 70px; width: auto; padding: 2px 6px;
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  background: #fff; color: var(--text); font: inherit; font-size: 12.5px;
+}
+/* 参数按分析项分组：每组一个小标题 + 一个网格（3 个一排的排版在组内生效） */
+.pblock { margin-bottom: 2px; }
+.pgroup {
+  margin: 7px 0 2px; padding-left: 6px; font-size: 11px; font-weight: 600;
+  color: var(--dim); border-left: 2px solid var(--line-strong);
+}
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 9px; }
-.grid3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0 9px; }
+/* 参数表（**表格约束布局**）：6 列基准，一行最多 3 个参数（th 标签 + td 输入）。
+   表格的列在各行之间共享宽度，因此同一列的输入框左边缘天然对齐——
+   这是之前 flex 布局做不到的（标签长短不一 → 输入框起点参差不齐）。 */
+.ptab { width: 100%; border-collapse: collapse; table-layout: auto; }
+.ptab th {
+  text-align: left; font-weight: 400; font-size: 11.5px; color: var(--dim);
+  white-space: nowrap; vertical-align: middle; padding: 0 4px 4px 0;
+}
+.ptab td { vertical-align: middle; padding: 0 6px 4px 0; }
+.ptab tr > td:last-child { padding-right: 0; }
+.ptab input, .ptab select {
+  width: 100%; min-width: 0; padding: 2px 6px;
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  background: #fff; color: var(--text); font: inherit; font-size: 12.5px;
+}
+.ptab input:focus, .ptab select:focus {
+  outline: 2px solid var(--accent-soft); border-color: var(--accent);
+}
+/* 数字输入的上下箭头：约占 18px 宽，且让数字框与下拉框外观不一致（看着不齐）。
+   宽度已在 JSX 里按提示文字算好，这里直接去掉。 */
+.ptab input[type="number"]::-webkit-outer-spin-button,
+.ptab input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none; margin: 0;
+}
+.ptab input[type="number"] { -moz-appearance: textfield; appearance: textfield; }
+.pempty { font-size: 11.5px; color: var(--dim); padding: 2px 0 4px; }
 .col-span-all { grid-column: 1 / -1; }
+/* 「文件读取」进度：打开大轨迹时先扫全文件建帧索引，可能持续几十秒到几分钟 */
+.openprog { margin: 6px 0 8px; }
+.openprog .progress { margin-bottom: 4px; }
+.openmeta { line-height: 1.5; }
+.openstage { line-height: 1.5; }
+
 
 .checks { display: flex; flex-wrap: wrap; gap: 4px 10px; }
 .check {
@@ -666,7 +724,7 @@ table.inforows tr:first-child td { padding-top: 3px; }
 }
 .chartnav-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; overflow-x: hidden; padding: 5px; }
 
-/* 第一层：大纲模块（链构象 / 界面 / 结晶 / 辅助） */
+/* 第一层：大纲模块（链构象 / 空间结构 / 取向与结晶 / 动力学与输运） */
 .navmodule { margin-bottom: 6px; }
 .navmodule-head {
   display: flex; align-items: center; gap: 6px; width: 100%;
@@ -840,18 +898,21 @@ input.tiny {
 .statblock > summary:hover { color: var(--accent); }
 
 /* 统计量 / 导出页内部的**单一模块标签**：一次只显示一个板块 */
-.stattabs {
+/* 统计量 / 导出页内部的标签栏；导出的「可选文件」区复用同一套视觉
+   （类名分开，便于区分"统计量的模块标签"与"导出的文件板块"） */
+.stattabs, .filetabs {
   display: flex; align-items: center; gap: 4px; flex-wrap: wrap;
   margin: 14px 0 0; padding-bottom: 0;
   border-bottom: 1px solid var(--line);
 }
-.stattabs .tab {
+.filetabs { margin-top: 16px; }
+.stattabs .tab, .filetabs .tab {
   border: 1px solid transparent; border-bottom: 0;
   border-radius: 7px 7px 0 0; padding: 5px 12px;
   background: none; color: var(--dim); font-size: 12.5px;
 }
-.stattabs .tab:hover { color: var(--accent); }
-.stattabs .tab.active {
+.stattabs .tab:hover, .filetabs .tab:hover { color: var(--accent); }
+.stattabs .tab.active, .filetabs .tab.active {
   color: var(--accent); font-weight: 650; background: var(--accent-soft);
   border-color: var(--line); border-bottom-color: transparent;
   margin-bottom: -1px;
@@ -926,6 +987,21 @@ input.tiny {
   display: flex; align-items: center; gap: 9px;
   padding: 6px 8px; border-top: 1px solid var(--line); background: #f8fafc;
 }
+
+/* 导出的「可选文件」区：按模块分板块，视觉与「统计量」页一致 */
+.filetabs-title { font-size: 12.5px; font-weight: 700; color: #334155; }
+.stattabs .filetabs-title { margin-right: 4px; }
+.filegroup { margin-bottom: 14px; }
+.filegroup-head {
+  display: flex; align-items: center; gap: 8px;
+  margin: 10px 0 5px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12.5px;
+}
+.filegroup-head strong { color: #334155; }
+.filegroup-head .dim { flex: 1 1 auto; }
+table.filetable code { font-size: 11px; }
+table.filetable td:nth-child(2) { text-align: left; }
 .stats { width: 100%; border-collapse: collapse; font-size: 12px; }
 .stats th {
   text-align: center; font-weight: 500; color: var(--dim);

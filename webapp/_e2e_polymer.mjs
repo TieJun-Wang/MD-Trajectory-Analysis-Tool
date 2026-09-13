@@ -3,10 +3,30 @@
  *
  * 用法: node webapp/_e2e_polymer.mjs [baseUrl]
  */
+import { existsSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
+
 const BASE = process.argv[2] || 'http://127.0.0.1:8000'
 const ROOT = 'C:\\temp\\MDT'
-const TOP = `${ROOT}\\md_biopolymer_nowater.tpr`
-const XTC = `${ROOT}\\md_biopolymer_nowater.xtc`
+
+/** 在候选根目录（含一层子目录）里按文件名找数据；找不到就返回工作区下的预期路径。 */
+function findData(name) {
+  const roots = [ROOT, 'C:\\temp', 'C:\\temp\\dataset']
+  for (const base of roots) {
+    const direct = join(base, name)
+    if (existsSync(direct)) return direct
+    try {
+      for (const sub of readdirSync(base)) {
+        const hit = join(base, sub, name)
+        if (existsSync(hit)) return hit
+      }
+    } catch { /* 目录不存在或无权限，继续 */ }
+  }
+  return join(ROOT, name)
+}
+
+const TOP = findData('md_biopolymer_nowater.tpr')
+const XTC = findData('md_biopolymer_nowater.xtc')
 
 let pass = 0
 const fails = []
@@ -22,6 +42,31 @@ async function req(path, options = {}) {
   let data
   try { data = text ? JSON.parse(text) : null } catch { data = text }
   return { status: res.status, data }
+}
+
+// 本套件依赖第二套体系（糖蛋白 + DOL）。数据集不在工作区时明确跳过，
+// 而不是抛一堆看不懂的错；放回数据后会自动恢复运行。
+if (!existsSync(TOP) || !existsSync(XTC)) {
+  // --- 数据位置解析：工作区 / 上一级 / 上一级 dataset（兼容一层或两层目录）---
+const DATA_ROOTS = [ROOT, join(ROOT, '..'), join(ROOT, '..', 'dataset')]
+function findData(name) {
+  for (const base of DATA_ROOTS) {
+    const direct = join(base, name)
+    if (existsSync(direct)) return direct
+    for (const sub of [name.replace(/\.[^.]+$/, ''), '']) {
+      const nested = join(base, sub, name)
+      if (sub && existsSync(nested)) return nested
+    }
+  }
+  return join(ROOT, name)
+}
+
+console.log('='.repeat(76))
+  console.log('跳过：找不到第二套体系数据（糖蛋白 + DOL）')
+  console.log(`  ${TOP}`)
+  console.log(`  ${XTC}`)
+  console.log('='.repeat(76))
+  process.exit(0)
 }
 
 console.log('='.repeat(76))
@@ -138,8 +183,10 @@ ok(msdKeys.some((k) => msd.summary[k] === null),
 
 const ori = results.orientation
 console.log(`   取向参数 S = ${ori.summary['S mean']?.toFixed(4)} ± ${ori.summary['S std']?.toFixed(4)}`)
-console.log(`   综合有序度指数 = ${results.order.summary['综合有序度指数 平均']?.toFixed(4)}`
-  + `（分量: ${results.order.summary['综合指数包含的分量']}）`)
+console.log(`   ${results.order.summary['指数名称'] || '多分量有序度指数'} = `
+  + `${results.order.summary['多分量有序度指数 平均']?.toFixed(4)}`
+  + `（分量: ${results.order.summary['指数包含的分量']}；`
+  + `链段来源: ${results.order.summary['链段来源']}）`)
 
 const rdfPks = Object.keys(results.rdf.summary).filter((k) => k.includes('第一峰位置'))
 console.log('   RDF 第一峰:')

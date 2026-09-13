@@ -54,6 +54,28 @@ def box_vector_lengths(universe) -> np.ndarray:
     return np.linalg.norm(box_matrix(universe), axis=1)
 
 
+def box_volume_from_dims(dims) -> float:
+    """由某一帧的 ``dimensions`` 直接算盒体积（Å³）。
+
+    **必须按帧取**：NPT 轨迹的盒子会波动（AdK 实测 80.017–80.135 Å，
+    体积相差 0.22%），若像 1.0.0 那样只取"调用分析时轨迹恰好停在哪一帧"的
+    体积，同一个分析的结果就会依赖轨迹的偶然位置——实测同一份数据两次
+    连续调用得到不同的 g(r)，且无法复现。
+    """
+    from MDAnalysis.lib.mdamath import triclinic_vectors
+
+    m = np.asarray(triclinic_vectors(np.asarray(dims, dtype=float)), dtype=float)
+    return float(abs(np.linalg.det(m)))
+
+
+def box_min_length_from_dims(dims) -> float:
+    """某一帧三个盒矢量长度的最小值（Å），用于判断 rmax 是否安全。"""
+    from MDAnalysis.lib.mdamath import triclinic_vectors
+
+    m = np.asarray(triclinic_vectors(np.asarray(dims, dtype=float)), dtype=float)
+    return float(np.min(np.linalg.norm(m, axis=1)))
+
+
 def fractional_coordinates(universe, positions: np.ndarray | None = None,
                            wrap: bool = True) -> np.ndarray:
     """把笛卡尔坐标转成沿盒矢量的分数坐标，可选折回 ``[0, 1)``。"""
@@ -281,9 +303,19 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
     res.summary["沿轴平均盒长 (Å)"] = dmeta["mean_box_length"]
     res.summary["平均盒体积 (Å³)"] = dmeta["mean_box_volume"]
     res.summary["统计帧数"] = dmeta["n_frames"]
+    # 口径必须写进结果本身（不能只藏在 metadata/纵轴标签里）：质量密度与数密度
+    # 数值差一个摩尔质量量级（水 0.0334 个/Å³ vs 0.997 g/cm³），导出成表以后
+    # 光看"体相密度 0.168"根本分不清是哪个。
+    res.summary["密度口径"] = ("质量密度 (g/cm³)" if str(mode) == "mass"
+                          else "数密度 (1/Å³)")
+    res.summary["密度单位"] = "g/cm³" if str(mode) == "mass" else "1/Å³"
     res.add_notes("方向按模拟盒矢量的分数坐标计算，对三斜盒同样成立；"
                   "密度用时间窗口内的平均盒尺寸归一化。")
     res.add_notes("体相密度取分布上四分位区的中位数，作为归一化基准。")
+    res.add_notes(
+        f"本次密度口径 = {res.summary['密度口径']}；"
+        f"各组分的「体相密度」「平均密度」都按这个口径给出（质量密度与数密度"
+        f"相差一个摩尔质量量级，不可直接互比）。用 mode=\"number\"/\"mass\" 切换。")
     return res
 
 
@@ -324,9 +356,113 @@ def _bulk_value(y: np.ndarray, frac: float = 0.25) -> float:
 
 
 # ------------------------------------------------------------------ RDF
+#: RDF 的配对模式（框架 §三：默认只统计**分子间**配对）
+RDF_MODES = ("inter", "intra", "total")
+
+RDF_MODE_LABELS = {
+    "inter": "分子间（不同分子，默认）",
+    "intra": "分子内（同一分子）",
+    "total": "总体（两者都含，1.0.0 旧行为）",
+}
+
+
+def _atom_molnums(ag) -> np.ndarray | None:
+    """原子级分子编号。
+
+    ``molnums`` 在 MDAnalysis 里是**残基级**属性，取 ``ag.molnums`` 时会自动
+    广播到原子级。返回 ``None`` 表示体系没有分子信息（例如猜键失败），
+    此时按分子区分配对无法进行。
+    """
+    try:
+        m = np.asarray(ag.molnums, dtype=np.int64)
+    except Exception:  # noqa: BLE001 - 无该属性时抛 NoDataError
+        return None
+    if m.size != ag.n_atoms:
+        return None
+    return m
+
+
+def _molnums_for_filter(ag) -> np.ndarray | None:
+    """用于配对过滤的分子编号；未归属残基（``-1``）给每个原子独立编号。
+
+    为什么：``-1`` 表示该残基没被归入任何分子。若原样参与比较，所有 ``-1``
+    原子会被判成"同一个分子"，于是分子间 RDF 会把它们整体丢掉。给它们各自
+    独立编号后，它们之间的配对按"分子间"处理（更保守，也不会凭空消失）。
+    """
+    m = _atom_molnums(ag)
+    if m is None:
+        return None
+    neg = m < 0
+    if neg.any():
+        m = m.copy()
+        m[neg] = -(np.arange(m.size, dtype=np.int64)[neg] + 1)
+    return m
+
+
+def mode_pair_counts(ga, gb, same: bool) -> tuple[dict[str, float] | None, str]:
+    """三种模式下的**理想有序原子对数**，供 g(r) 归一化使用。
+
+    为什么不能用 ``N_a·N_b`` 一把梭：``total`` 含分子内配对，``inter`` 把它们
+    全部剔除，``intra`` 只留它们。三种模式若共用同一个分母，``g(r)`` 就不再是
+    密度归一化的量（``inter`` 被系统性压低、``intra`` 被抬高），由 g(r) 积分出来
+    的配位数会跟着错——这正是 1.0.0 的问题。
+
+    恒等式（自检用）：``inter + intra == total``。
+    """
+    ma = _molnums_for_filter(ga)
+    mb = ma if same else _molnums_for_filter(gb)
+    if ma is None or mb is None:
+        return None, "体系没有分子编号（molnums），无法按分子区分配对"
+    na, nb = int(ga.n_atoms), int(gb.n_atoms)
+    nmax = int(max(int(ma.max(initial=0)), int(mb.max(initial=0)))) + 1
+    ca = np.bincount(ma, minlength=nmax).astype(float)
+    cb = ca if same else np.bincount(mb, minlength=nmax).astype(float)
+    overlap = float(np.sum(ca * cb))            # 同一分子内的有序对（含自配对）
+    if same:
+        total = float(na) * (na - 1)
+        intra = overlap - float(na)             # 扣掉 i==j 的自配对
+    else:
+        total = float(na) * float(nb)
+        intra = overlap
+    inter = total - intra
+    return ({"total": total, "inter": inter, "intra": intra},
+            f"有序原子对：分子间 {inter:,.0f} / 分子内 {intra:,.0f} / 合计 {total:,.0f}")
+
+
+def _subsample_group(ag, max_atoms: int):
+    """抽稀：**按分子整取**，而不是按原子等间隔抽。
+
+    为什么必须按分子：等间隔抽原子会把分子拆散——4 原子/分子的水按 stride 8
+    抽取后每个保留分子只剩 1 个原子，分子内配对被清空，intra 模式的 g(r)
+    直接变成空（实测踩到）。整分子抽取既保留分子内结构，对分子间结构也仍是
+    等价抽样（g(r) 是密度归一化的量，抽稀只增加噪声）。
+
+    返回 ``(新原子组, 原原子数, 新原子数, 说明)``。
+    """
+    n0 = int(ag.n_atoms)
+    m = _atom_molnums(ag)
+    if m is None:
+        step = max(1, int(np.ceil(n0 / float(max_atoms))))
+        sub = ag[::step]
+        return sub, n0, int(sub.n_atoms), f"原子等间隔（每 {step} 个取 1 个，无分子信息）"
+    uniq = np.unique(m)
+    if uniq.size <= 1:
+        return ag, n0, n0, "仅 1 个分子，未抽稀"
+    atoms_per_mol = n0 / float(uniq.size)
+    n_mol_keep = max(1, int(max_atoms / max(atoms_per_mol, 1.0)))
+    if n_mol_keep >= uniq.size:
+        return ag, n0, n0, "未抽稀"
+    step = max(1, int(np.ceil(uniq.size / float(n_mol_keep))))
+    kept = uniq[::step]
+    sub = ag[np.isin(m, kept)]
+    return (sub, n0, int(sub.n_atoms),
+            f"按分子整取（每 {step} 个分子取 1 个，共 {kept.size:,} 个分子）")
+
+
 def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
-                    exclude_bonded: bool = False, verbose: bool = False):
-    """手工累积 RDF 直方图，支持任意帧号列表。
+                    exclude_bonded: bool = False, mode: str = "total",
+                    verbose: bool = False):
+    """手工累积 RDF 直方图，支持任意帧号列表与配对模式。
 
     配对计数约定
     ------------
@@ -334,45 +470,106 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
     每个无序对只返回一次（且不含自配对），因此同组分情形要把直方图乘以 2，
     分子端仍使用 ``N(N−1)``，两者才自洽。``same=False`` 时 ``capped_distance``
     的返回天然是有序对（reference 与 configuration 的笛卡尔积），无需修正。
+
+    配对模式（``mode``）
+    -------------------
+    ``inter`` 只保留 ``molnums[i] != molnums[j]``，``intra`` 只保留相等者，
+    ``total`` 全要（1.0.0 行为）。``bonded`` 排除是**独立开关**，与模式无关。
+
+    返回 ``(hist, n_used, qc)``；``qc`` 给出"这个数是谁的数"所需的诊断量。
     """
     from MDAnalysis.lib.distances import capped_distance, self_capped_distance
 
     rmax = float(edges[-1])
     hist = np.zeros(edges.size - 1, dtype=float)
     na, nb = ref.n_atoms, conf.n_atoms
+    qc = {"有效原子对数": 0, "统计帧数": 0, "分子内配对占比": 0.0,
+          "模式": str(mode), "模式退化": "",
+          # 归一化用：逐帧累加 1/V 与最小盒边长（NPT 盒波动必须逐帧计入）
+          "体积倒数和": 0.0, "n_体积": 0, "最小盒边长": float("inf")}
     if na == 0 or nb == 0:
-        return hist, 0
+        return hist, 0, qc
+
+    ma = _molnums_for_filter(ref)
+    mb = ma if same else _molnums_for_filter(conf)
+    eff_mode = str(mode)
+    if eff_mode in ("inter", "intra") and (ma is None or mb is None):
+        eff_mode = "total"                      # 没有分子信息 → 只能给总体
+        qc["模式退化"] = "体系无 molnums，已退化为 total"
+
     n_used = 0
+    n_pairs = 0
+    n_intra = 0
     for idx in frame_indices:
         u.trajectory[int(idx)]
         box = u.dimensions
+        if box is not None:
+            try:
+                vol = box_volume_from_dims(box)
+                if vol > 0:
+                    qc["体积倒数和"] += 1.0 / vol
+                    qc["n_体积"] += 1
+                qc["最小盒边长"] = min(float(qc["最小盒边长"]),
+                                       box_min_length_from_dims(box))
+            except Exception:  # noqa: BLE001
+                pass
         pa = np.asarray(ref.positions, dtype=float)
         if same:
             pairs, dist = self_capped_distance(pa, max_cutoff=rmax, box=box,
                                                return_distances=True)
+            mc = ma
         else:
             pb = np.asarray(conf.positions, dtype=float)
             pairs, dist = capped_distance(pa, pb, max_cutoff=rmax, box=box,
                                           return_distances=True)
-        if exclude_bonded and pairs.size:
-            dist = _drop_bonded_pairs(ref, conf, pairs, dist, same)
+            mc = mb
+        if pairs.size:
+            keep = np.ones(dist.size, dtype=bool)
+            if exclude_bonded:
+                keep &= _drop_bonded_pairs(ref, conf, pairs, dist, same,
+                                           return_mask=True)
+            if mc is not None:
+                mi = ma[np.asarray(pairs[:, 0], dtype=np.int64)]
+                mj = (ma if same else mb)[np.asarray(pairs[:, 1], dtype=np.int64)]
+                same_mol = mi == mj
+                if eff_mode == "inter":
+                    keep &= ~same_mol
+                elif eff_mode == "intra":
+                    keep &= same_mol
+                dist = dist[keep]
+                n_intra += int(np.sum(same_mol[keep]))
+                n_pairs += int(keep.sum())
+            else:
+                dist = dist[keep]
+                n_pairs += int(keep.sum())
         if dist.size:
             h, _ = np.histogram(dist, bins=edges)
             hist += h * (2.0 if same else 1.0)
         n_used += 1
-    return hist, n_used
+    qc["有效原子对数"] = n_pairs
+    qc["统计帧数"] = n_used
+    qc["分子内配对占比"] = float(n_intra / n_pairs) if n_pairs else 0.0
+    return hist, n_used, qc
 
 
-def _drop_bonded_pairs(ref, conf, pairs, dist, same, depth: int = 1):
+def _drop_bonded_pairs(ref, conf, pairs, dist, same, depth: int = 1,
+                       return_mask: bool = False):
     """剔除键连（1-2）原子对，避免分子内成键原子污染 RDF。
 
     用 numpy 向量化实现（原子对数量可达百万级，纯 Python 循环会慢几个数量级）。
     每一对原子映射到局部索引后用 ``min*N+max`` 编码成整型 key，
     再与键表编码出的 key 集合做一次 ``np.isin``。
+
+    ``return_mask=True`` 时返回布尔掩码而不是过滤后的距离——调用方要在同一批
+    原子上叠加别的过滤条件（例如分子间/分子内模式）时必须用掩码，否则两次
+    过滤会因索引错位而互相污染。
     """
+    def _ret(mask):
+        return mask if return_mask else dist[mask]
+
     try:
         if ref.bonds is None or len(ref.bonds) == 0 or pairs.size == 0:
-            return dist
+            return _ret(np.ones(dist.size, dtype=bool))
         n_u = ref.universe.atoms.n_atoms
         lut_r = np.full(n_u, -1, dtype=np.int64)
         lut_r[np.asarray(ref.indices, dtype=np.int64)] = np.arange(ref.n_atoms, dtype=np.int64)
@@ -392,7 +589,7 @@ def _drop_bonded_pairs(ref, conf, pairs, dist, same, depth: int = 1):
         bj = lut_c[bidx[:, 1]]
         m = (bi >= 0) & (bj >= 0)
         if not m.any():
-            return dist
+            return _ret(np.ones(dist.size, dtype=bool))
         bonded_keys = key(bi[m], bj[m])
 
         li = lut_r[np.asarray(pairs[:, 0], dtype=np.int64)]
@@ -403,9 +600,9 @@ def _drop_bonded_pairs(ref, conf, pairs, dist, same, depth: int = 1):
             is_bonded = np.zeros(dist.size, dtype=bool)
             is_bonded[valid] = np.isin(key(li[valid], lj[valid]), bonded_keys)
             keep = ~is_bonded
-        return dist[keep]
+        return _ret(keep)
     except Exception:  # noqa: BLE001
-        return dist
+        return _ret(np.ones(dist.size, dtype=bool))
 
 
 @register("rdf", "径向分布函数 RDF")
@@ -413,6 +610,7 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 pairs: Sequence[tuple[str, str]] | None = None,
                 rmax: float = 12.0, nbins: int = 120,
                 exclude_bonded: bool = False,
+                mode: str = "inter",
                 compare_halves: bool = False,
                 max_group_atoms: int = 6000,
                 verbose: bool = False) -> AnalysisResult:
@@ -429,6 +627,14 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         最大距离与 bin 数。
     exclude_bonded
         是否剔除成键原子对（分子内 RDF 通常需要剔除 1-2 对）。
+        这是**独立开关**，与 ``mode`` 无关：先按模式筛配对，再按键表剔 1-2 对。
+    mode
+        配对模式，取值 ``"inter"``（默认，只统计**不同分子**之间的配对）、
+        ``"intra"``（只统计同一分子内部的配对）、``"total"``（两者都含，
+        即 1.0.0 的旧行为）。判定依据是 ``molnums``。
+        **三种模式各自使用自己的真实有序原子对数做归一化**——这是关键：
+        若都用 ``N_a·N_b``，``g(r)`` 与由它积分的配位数都会系统性偏移。
+        体系缺少 ``molnums`` 时自动退化为 ``total`` 并给出说明。
     compare_halves
         是否额外计算"模拟前半段 vs 后半段"的 RDF，用于观察结构有序化趋势。
     max_group_atoms
@@ -442,7 +648,8 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         pairs = [(a, b) for i, a in enumerate(names) for b in names[i:]]
     edges = np.linspace(0.0, float(rmax), int(nbins) + 1)
     centers = bin_edges_to_centers(edges)
-    vbox = float(abs(np.linalg.det(box_matrix(u))))
+    # 兜底体积：仅当所选帧完全没有盒信息时才用（正常情况下逐帧累加 1/V）
+    vbox_fallback = float(abs(np.linalg.det(box_matrix(u))))
     shell = (4.0 / 3.0) * np.pi * (edges[1:] ** 3 - edges[:-1] ** 3)
 
     # 大组分抽稀（g(r) 是密度归一化的量，等间隔取子集不改变其数值，只降噪 + 大幅提速）
@@ -452,16 +659,16 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         for nm in names:
             ag = groups[nm]
             if ag is not None and ag.n_atoms > max_group_atoms:
-                step = int(np.ceil(ag.n_atoms / float(max_group_atoms)))
+                sub, n0, n1, how = _subsample_group(ag, int(max_group_atoms))
                 groups = dict(groups)
-                groups[nm] = ag[::step]
-                subsampled[nm] = (int(ag.n_atoms), int(groups[nm].n_atoms))
+                groups[nm] = sub
+                subsampled[nm] = (n0, n1, how)
 
     idx = np.asarray(selection.indices, dtype=int)
     res = AnalysisResult(
         name="rdf",
         title="径向分布函数 g(r)",
-        meta={"rmax": float(rmax), "nbins": int(nbins),
+        meta={"rmax": float(rmax), "nbins": int(nbins), "mode": str(mode),
               "n_frames": int(idx.size), "pairs": [f"{a}-{b}" for a, b in pairs]},
     )
     res.panels = [
@@ -470,15 +677,14 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
               title="模拟前半段 vs 后半段（结构有序化趋势）"),
     ]
 
-    blen = box_vector_lengths(u)
-    if rmax > 0.5 * float(np.min(blen)):
-        res.add_notes(
-            f"注意：rmax={rmax:g} Å 超过最小盒边长的一半 "
-            f"({0.5 * float(np.min(blen)):.2f} Å)，最小镜像近似可能失效，"
-            f"建议减小 rmax。"
-        )
+    # rmax 安全性：按所选帧的**最小**盒边长判断（逐帧在循环里收集），
+    # 不再用"调用时轨迹停在哪一帧"的盒边长——那会随轨迹位置飘。
+    min_blen_seen = float("inf")
+    vbox_last = vbox_fallback
 
     halves = {}
+    degraded_modes: set[str] = set()
+    auto_intra: set[str] = set()
     if compare_halves and idx.size >= 2:
         half = idx.size // 2
         halves = {"前半段": idx[:half], "后半段": idx[half:]}
@@ -487,31 +693,83 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         ga, gb = groups[a], groups[b]
         same = (ga.n_atoms == gb.n_atoms
                 and np.array_equal(np.asarray(ga.indices), np.asarray(gb.indices)))
-        hist, n_used = _rdf_accumulate(u, ga, gb, edges, idx, same,
-                                       exclude_bonded=exclude_bonded, verbose=verbose)
-        if n_used == 0 or ga.n_atoms == 0 or gb.n_atoms == 0:
+        if ga.n_atoms == 0 or gb.n_atoms == 0:
             continue
-        neff = float(ga.n_atoms) * float(gb.n_atoms) - (float(ga.n_atoms) if same else 0.0)
+        # 先算三种模式的配对数，据此确定**实际使用**的模式，再累积直方图：
+        # 这样"分子间配对恒为空"的退化组（例如单条蛋白链的 P–P）不会白算一遍。
+        counts, why = mode_pair_counts(ga, gb, same)
+        eff_mode = str(mode)
+        if counts is None:
+            eff_mode = "total"          # 没有分子信息：退回旧口径
+        elif (eff_mode == "inter" and counts["inter"] <= 0 and counts["intra"] > 0):
+            # 该组分的原子全在同一个分子里（分子数 = 1），分子间 RDF 恒为空。
+            # 直接给空曲线或 0 都没有物理意义，因此自动改用分子内口径并写明。
+            eff_mode = "intra"
+            auto_intra.add(f"{a}-{b}")
+        hist, n_used, qc = _rdf_accumulate(u, ga, gb, edges, idx, same,
+                                           exclude_bonded=exclude_bonded,
+                                           mode=eff_mode, verbose=verbose)
+        if n_used == 0:
+            continue
+        if qc.get("模式退化"):
+            degraded_modes.add(str(qc["模式退化"]))
+        if counts is None:
+            neff = float(ga.n_atoms) * float(gb.n_atoms) - (float(ga.n_atoms) if same else 0.0)
+            why = why or "无 molnums"
+        else:
+            neff = float(counts.get(eff_mode, counts["total"]))
         if neff <= 0:
             continue
-        ideal = n_used * neff * shell / vbox
+        # 归一化：逐帧用该帧的盒体积，等效于对 g(r) 做帧平均（而非先平均成一条
+        # 曲线再除以某个固定体积）。NPT 盒波动时这才是可复现且物理正确的做法。
+        sum_inv_vol = float(qc.get("体积倒数和", 0.0) or 0.0)
+        if sum_inv_vol > 0:
+            ideal = neff * shell * sum_inv_vol
+            vbox_eff = float(n_used) / sum_inv_vol
+        else:
+            ideal = n_used * neff * shell / vbox_fallback
+            vbox_eff = vbox_fallback
+        min_blen_seen = min(min_blen_seen, float(qc.get("最小盒边长", float("inf"))))
+        vbox_last = vbox_eff
         g = np.divide(hist, ideal, out=np.zeros_like(hist), where=ideal > 0)
 
         label = f"{a}-{b}"
         res.add_curve(label, centers, g, panel=0)
+        # QC：把"这个数是谁的数"写清楚——模式、分母、以及分子内配对的实际占比
+        res.summary[f"{label} 配对模式"] = eff_mode
+        res.summary[f"{label} 归一化分母 (有序原子对)"] = neff
+        res.summary[f"{label} 有效原子对数/帧"] = (
+            float(qc.get("有效原子对数", 0)) / n_used if n_used else 0.0)
+        res.summary[f"{label} 分子内配对占比"] = float(qc.get("分子内配对占比", 0.0))
         # 数密度（Å⁻³）：用于把 RDF 积分成第一壳层配位数。
         # 必须用**原始**原子数——抽稀只影响 g(r) 的统计噪声，不该改变配位数；
         # 若用子集原子数，配位数会被整体缩小 step 倍。
-        rho_b = float(n_orig.get(b, gb.n_atoms)) / vbox
+        # 体积同样用逐帧平均体积，与 g(r) 的归一化保持一致。
+        rho_b = float(n_orig.get(b, gb.n_atoms)) / vbox_eff
         pk = _first_peak(centers, g)
         if pk:
+            # 结构峰的显著性判据：g 必须明显高于 1（相对均匀分布有富集）。
+            # 没有这条判据时，曲线上的任意小起伏都会被当成"第一峰"，
+            # 进而积分出一个毫无物理含义的配位数——例如 46 体系的 DPE–DPE
+            # 分子间 g(r)（该组分较稀，r<3 Å 根本没有结构峰），旧代码会报出
+            # "第一峰 1.75 Å、配位数 0.0077"这种数。
+            sig = float(pk["height"]) >= 1.2
             res.summary[f"{label} 第一峰位置 (Å)"] = pk["position"]
             res.summary[f"{label} 第一峰高度 g_max"] = pk["height"]
+            res.summary[f"{label} 第一峰是否显著"] = "是" if sig else "否"
             if pk.get("minimum_position"):
                 res.summary[f"{label} 第一极小位置 (Å)"] = pk["minimum_position"]
-            cn = _coordination_number(centers, g, pk["minimum_position"], rho_b)
-            res.summary[f"{label} 配位数 (第一壳层)"] = cn
-            if pk["position"] < 1.7 and not exclude_bonded:
+            if sig:
+                cn = _coordination_number(centers, g, pk["minimum_position"], rho_b)
+                res.summary[f"{label} 配位数 (第一壳层)"] = cn
+            else:
+                res.add_notes(
+                    f"{label} 在 r ≤ {rmax:g} Å 内**没有显著的结构峰**"
+                    f"（最大 g 仅 {pk['height']:.2f}，未明显高于 1）："
+                    f"此时的「第一峰位置/第一极小」只是曲线的局部起伏，由它积分出的"
+                    f"配位数没有物理含义，因此不给该数。常见原因是该组分在体系中被"
+                    f"稀释，或 rmax 尚未覆盖它的关联距离。")
+            if sig and pk["position"] < 1.7 and not exclude_bonded:
                 res.add_notes(
                     f"{label} 的第一峰位于 {pk['position']:.2f} Å，属于**成键原子对**的"
                     f"距离尺度（1-2 对），并非局部结构信息。若要研究结构有序性，"
@@ -529,28 +787,55 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             )
 
         for hname, hidx in halves.items():
-            h, nu = _rdf_accumulate(u, ga, gb, edges, hidx, same,
-                                    exclude_bonded=exclude_bonded)
+            h, nu, qc_h = _rdf_accumulate(u, ga, gb, edges, hidx, same,
+                                          exclude_bonded=exclude_bonded,
+                                          mode=eff_mode)
             if nu == 0:
                 continue
-            ideal_h = nu * neff * shell / vbox
+            siv = float(qc_h.get("体积倒数和", 0.0) or 0.0)
+            ideal_h = (neff * shell * siv) if siv > 0 else (nu * neff * shell / vbox_fallback)
             gh = np.divide(h, ideal_h, out=np.zeros_like(h), where=ideal_h > 0)
             res.add_curve(f"{label} ({hname})", centers, gh, panel=1)
             pkh = _first_peak(centers, gh)
             if pkh:
                 res.summary[f"{label} {hname}第一峰高度 g_max"] = pkh["height"]
 
-    res.summary["盒体积 (Å³)"] = vbox
-    for nm, (n0, n1) in subsampled.items():
+    if np.isfinite(min_blen_seen) and rmax > 0.5 * min_blen_seen:
         res.add_notes(
-            f"组分 {nm} 原子数 {n0:,} 较多，RDF 使用等间隔抽取的 {n1:,} 个代表原子"
-            f"（每 {int(np.ceil(n0 / n1))} 个取 1 个）。g(r) 按密度归一化，"
-            f"子集只增加少量统计噪声，不改变其数值；配位数仍按原始原子数的"
-            f"数密度计算。"
+            f"注意：rmax={rmax:g} Å 超过所选帧中最小盒边长的一半 "
+            f"({0.5 * min_blen_seen:.2f} Å)，最小镜像近似可能失效，建议减小 rmax。")
+    res.summary["帧平均盒体积 (Å³)"] = vbox_last
+    for nm, (n0, n1, how) in subsampled.items():
+        res.add_notes(
+            f"组分 {nm} 原子数 {n0:,} 较多，RDF 使用抽稀后的 {n1:,} 个代表原子"
+            f"（{how}）。g(r) 按密度归一化，子集只增加少量统计噪声，不改变其数值；"
+            f"配位数仍按原始原子数的数密度计算。"
         )
-    res.add_notes("g(r) 按每帧原子对数归一化：g = n(r) / (N_a·N_b·V_shell/V_box) 的帧平均。")
+    _mode_note = {
+        "inter": "只统计**不同分子之间**的原子对（同分子配对已剔除）。"
+                 "这是 g(r) 的标准口径：它描述的是分子间的空间关联。",
+        "intra": "只统计**同一分子内部**的原子对，反映分子内构象分布"
+                 "（分子间结构与它无关）。",
+        "total": "同时包含分子内与分子间配对（1.0.0 旧口径）。分子内配对会把"
+                 "成键/近邻原子的尖峰混进来，若关注分子间结构请改用 inter。",
+    }.get(str(mode), "")
+    if _mode_note:
+        res.add_notes(f"配对模式 = {mode}：{_mode_note}")
+    res.add_notes(
+        "g(r) 的归一化分母用的是**该模式下的真实有序原子对数**"
+        "（inter/intra/total 各不相同），因此三种模式的 g(r) 与配位数不可直接互比；"
+        "每种模式的配位数都按原始原子数的数密度积分得到。"
+    )
+    if auto_intra:
+        res.add_notes(
+            "以下组分对的所有原子属于**同一个分子**，分子间配对恒为空，"
+            "因此已自动改用 intra（分子内）口径：" + "、".join(sorted(auto_intra))
+            + "。若要研究分子间结构，请选择含多个分子的组分。")
+    if degraded_modes:
+        res.add_notes("配对模式未能生效：" + "；".join(sorted(degraded_modes))
+                      + "——已按 total 口径计算，结果与 1.0.0 一致。")
     if exclude_bonded:
-        res.add_notes("已剔除成键（1-2）原子对。")
+        res.add_notes("已剔除成键（1-2）原子对（独立于配对模式的开关）。")
     return res
 
 
@@ -612,6 +897,9 @@ def _coordination_number(r: np.ndarray, g: np.ndarray, rmin: float | None,
 @register("contact", "接触分析")
 def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
                      cutoff: float = 5.0, top_n: int = 0,
+                     mode: str = "inter",
+                     track_pairs: bool = True,
+                     occupancy_max_frames: int = 300,
                      verbose: bool = False) -> AnalysisResult:
     """接触分析（设计大纲第 13 章）。
 
@@ -653,13 +941,41 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
         na == nb and np.array_equal(np.asarray(group_a.indices),
                                     np.asarray(group_b.indices)))
 
+    # ---------------------------------------------------------- 配对模式（阶段 5）
+    # 与 RDF 同一套口径：inter = 只保留不同分子的配对（默认），intra = 只保留同一
+    # 分子内部的配对，total = 全要（1.0.0 行为）。判定依据是 molnums。
+    # 为什么默认改成 inter：同组分接触（polymer×polymer、protein×protein）里，
+    # 同一分子内的相邻原子天然满足 r < cutoff，会把"接触数"抬得虚高，也让
+    # "每个原子接触几个"变成"这个原子在自己分子里有几个邻居"。
+    ma = _molnums_for_filter(group_a)
+    mb = ma if same else _molnums_for_filter(group_b)
+    eff_mode = str(mode)
+    mode_note = ""
+    if eff_mode not in ("inter", "intra", "total"):
+        raise ValueError(f"未知的接触配对模式 {mode!r}；可用 inter / intra / total")
+    if eff_mode != "total" and (ma is None or mb is None):
+        eff_mode = "total"
+        mode_note = "体系没有分子编号（molnums），配对模式已退化为 total"
+
     times = np.asarray(selection.times_ps, dtype=float)
     n = times.size
     n_pairs = np.full(n, np.nan)
     n_atoms_a = np.full(n, np.nan)
     min_dist = np.full(n, np.nan)
     hit_count = np.zeros(na, dtype=float)
+    # 每个 A 原子累计接触到的 B 原子数（逐帧累加）——这是真正有区分度的量：
+    # "这个原子平均接触到几个 B 原子"。而"帧比例 > 0"这种概率在稠密体系里恒为 1。
+    contact_sum = np.zeros(na, dtype=float)
+    #: 瞬时配位数直方图：每个 A 原子在**每一帧**接触到几个 B 原子，对（原子×帧）汇总
+    cn_hist: np.ndarray | None = None
+    n_intra_pairs = 0
+    n_kept_pairs = 0
     min_dist_all = np.inf
+    # 接触对占据率：某一对 (i,j) 在多少帧里处于接触
+    track = bool(track_pairs) and n <= int(occupancy_max_frames)
+    occ_key: np.ndarray | None = None
+    occ_cnt: np.ndarray | None = None
+    nb_u = int(mdt.universe.atoms.n_atoms)
 
     for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
         pa = np.asarray(group_a.positions, dtype=float)
@@ -671,14 +987,66 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
         else:
             pairs, dist = capped_distance(pa, pb, max_cutoff=float(cutoff),
                                           box=u.dimensions, return_distances=True)
+        if pairs.size and eff_mode != "total" and ma is not None:
+            mi = ma[np.asarray(pairs[:, 0], dtype=np.int64)]
+            mj = (ma if same else mb)[np.asarray(pairs[:, 1], dtype=np.int64)]
+            same_mol = mi == mj
+            keep = same_mol if eff_mode == "intra" else ~same_mol
+            if not keep.all():
+                pairs, dist = pairs[keep], dist[keep]
+            n_intra_pairs += int(np.sum(same_mol[keep]))
+            n_kept_pairs += int(keep.sum())
+        else:
+            n_kept_pairs += int(pairs.shape[0])
+            if pairs.size and ma is not None:
+                mi = ma[np.asarray(pairs[:, 0], dtype=np.int64)]
+                mj = (ma if same else mb)[np.asarray(pairs[:, 1], dtype=np.int64)]
+                n_intra_pairs += int(np.sum(mi == mj))
         n_pairs[k] = pairs.shape[0]
         if pairs.size:
             # 同组时两个端点都属于 A，不能只看第 0 列
             uniq = np.unique(pairs) if same else np.unique(pairs[:, 0])
             n_atoms_a[k] = uniq.size
             hit_count[uniq] += 1.0
+            if same:
+                # 无序对：每个端点各算一次接触
+                np.add.at(contact_sum, np.asarray(pairs[:, 0], dtype=np.int64), 1.0)
+                np.add.at(contact_sum, np.asarray(pairs[:, 1], dtype=np.int64), 1.0)
+            else:
+                np.add.at(contact_sum, np.asarray(pairs[:, 0], dtype=np.int64), 1.0)
+            # 瞬时配位数（复用同一批配对，零额外距离计算）
+            _i0 = np.asarray(pairs[:, 0], dtype=np.int64)
+            cnt = np.bincount(_i0, minlength=na)
+            if same:
+                cnt = cnt + np.bincount(np.asarray(pairs[:, 1], dtype=np.int64),
+                                        minlength=na)
+            need = int(cnt.max()) + 1
+            if cn_hist is None:
+                cn_hist = np.zeros(max(8, need), dtype=float)
+            elif need > cn_hist.size:
+                cn_hist = np.concatenate([cn_hist, np.zeros(need - cn_hist.size)])
+            np.add.at(cn_hist, cnt, 1.0)
         else:
             n_atoms_a[k] = 0
+        if track and pairs.size:
+            gi = np.asarray(group_a.indices, dtype=np.int64)[np.asarray(pairs[:, 0], dtype=np.int64)]
+            if same:
+                gj = np.asarray(group_a.indices, dtype=np.int64)[
+                    np.asarray(pairs[:, 1], dtype=np.int64)]
+            else:
+                gj = np.asarray(group_b.indices, dtype=np.int64)[
+                    np.asarray(pairs[:, 1], dtype=np.int64)]
+            lo = np.minimum(gi, gj) * nb_u + np.maximum(gi, gj)
+            uk, uc = np.unique(lo, return_counts=True)
+            if occ_key is None:
+                occ_key, occ_cnt = uk, uc.astype(np.int64)
+            else:
+                allk = np.concatenate([occ_key, uk])
+                allc = np.concatenate([occ_cnt, uc.astype(np.int64)])
+                newk, inv = np.unique(allk, return_inverse=True)
+                acc = np.zeros(newk.size, dtype=np.int64)
+                np.add.at(acc, inv, allc)
+                occ_key, occ_cnt = newk, acc
         # 最小间距：**已经有接触时 np.min(dist) 就是全局最小**
         # （cutoff 之外的距离只会更大），无需再放大搜索一遍。
         # 只有"这一刻完全没接触"时才需要 min_distance 去放大截断距离找。
@@ -702,8 +1070,11 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
     res.panels = [
         Panel(xlabel=tlabel, ylabel="接触数", title="接触数随时间变化"),
         Panel(xlabel=tlabel, ylabel="最小原子间距 (Å)", title="最小原子间距随时间变化"),
-        Panel(xlabel="A 组原子序号", ylabel="接触概率", title="各原子的接触概率"),
+        Panel(xlabel="A 组原子序号（按接触数降序）", ylabel="平均接触数",
+              title="各原子的平均接触数（每个原子平均接触到几个 B 原子）"),
         Panel(xlabel="接触对数", ylabel="频数", title="接触对数分布"),
+        Panel(xlabel="A 组原子序号（按接触概率降序）", ylabel="接触概率",
+              title="各原子的接触概率"),
     ]
     res.add_curve("接触对数", tx, n_pairs, panel=0)
     res.add_curve(f"参与接触的 A 组原子数 (共 {na})", tx, n_atoms_a, panel=0)
@@ -730,15 +1101,103 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
             "（最小原子间距恒为 0），把接触对数翻倍，而且实测慢 5～7 倍。"
         )
 
-    # 单原子接触概率
+    # ------------------------------------------------ 单原子：平均接触数（主指标）
+    per_atom = contact_sum / float(n) if n else contact_sum
+    order_c = np.argsort(-per_atom)
+    nshow = int(top_n) if top_n and top_n > 0 else min(na, 400)
+    show_c = order_c[:nshow]
+    res.add_curve("平均接触数", np.arange(1, nshow + 1), per_atom[show_c],
+                  kind="bar", panel=2)
+    res.summary["平均接触数（每个 A 组原子）"] = (float(np.mean(per_atom))
+                                            if per_atom.size else float("nan"))
+    res.summary["单原子平均接触数 中位数"] = (float(np.median(per_atom))
+                                        if per_atom.size else float("nan"))
+    res.summary["单原子平均接触数 最大值"] = (float(np.max(per_atom))
+                                        if per_atom.size else float("nan"))
+    res.summary["平均接触数为 0 的 A 组原子数"] = int(np.sum(per_atom == 0))
+
+    # ------------------------------------------------ 单原子：接触概率（辅助指标）
     prob = hit_count / float(n) if n else hit_count
     order = np.argsort(-prob)
-    nshow = int(top_n) if top_n and top_n > 0 else min(na, 400)
-    show = order[:nshow]
-    res.add_curve("接触概率", np.arange(1, nshow + 1), prob[show], kind="bar", panel=2)
+    show = order[:min(nshow, prob.size)]
+    res.add_curve("接触概率", np.arange(1, show.size + 1), prob[show],
+                  kind="bar", panel=4)
     res.summary["原子接触概率平均值"] = float(np.mean(prob)) if prob.size else float("nan")
     res.summary["接触概率 > 0 的 A 组原子数"] = int(np.sum(prob > 0))
     res.summary["完全无接触的 A 组原子数"] = int(np.sum(prob == 0))
+    res.summary["接触概率恒为 1 的 A 组原子数"] = int(np.sum(prob >= 1.0))
+
+    # 饱和 QC：「存在接触的帧比例」在稠密体系里恒为 1，没有区分度，必须点明
+    any_contact = float(np.mean(n_pairs > 0)) if n else float("nan")
+    saturated = bool(n and np.isfinite(any_contact) and any_contact >= 1.0)
+    res.summary["接触概率是否饱和"] = "是（恒为 1，无区分度）" if saturated else "否"
+    if saturated:
+        res.add_notes(
+            f"⚠️「接触概率（存在接触的帧比例）」= 1.0：本体系里**每一帧**都至少存在"
+            f"一对距离 < {cutoff:g} Å 的 A–B 原子对（本组 {na}×{nb} 个原子对，"
+            f"每帧平均 {float(np.nanmean(n_pairs)):,.0f} 对）。这是稠密体系的必然结果，"
+            f"不是计算错误，但它对任何体系都恒为 1，**不能用来比较不同体系**。"
+            f"要看接触强度请用「平均接触数」（每个 A 原子平均接触到几个 B 原子，"
+            f"本体系为 {float(np.mean(per_atom)):.3g}）或下面的「接触对占据率」。")
+    if int(np.sum(prob >= 1.0)) == prob.size and prob.size:
+        res.add_notes(
+            "A 组**全部**原子在每一帧都至少有一次接触（接触概率恒为 1）："
+            "这时该指标同样没有区分度，请改看「平均接触数」的分布。")
+
+    # ------------------------------------------------ 接触对占据率（持续性）
+    if occ_key is not None and occ_key.size:
+        occ = occ_cnt.astype(float) / float(n)
+        n_pairs_seen = int(occ.size)
+        res.summary["出现过的不同接触对总数"] = n_pairs_seen
+        res.summary["接触对占据率平均值"] = float(np.mean(occ))
+        res.summary["始终接触（占据率 = 1）的接触对数"] = int(np.sum(occ >= 1.0))
+        res.summary["占据率 ≥ 0.5 的接触对数"] = int(np.sum(occ >= 0.5))
+        top = np.argsort(-occ)[:3]
+        atoms = u.atoms
+        for rank, idx in enumerate(top, start=1):
+            key = int(occ_key[idx])
+            ia, ib = divmod(key, nb_u)
+            ra, rb = atoms[int(ia)], atoms[int(ib)]
+            res.summary[f"最持久接触对 #{rank}"] = (
+                f"{ra.resname}{ra.resid}({ra.name}) – {rb.resname}{rb.resid}({rb.name})"
+                f"  占据率 {occ[idx]:.3f}")
+        # 占据率分布
+        e = np.linspace(0.0, 1.0, 21)
+        h, _ = np.histogram(occ, bins=e)
+        res.panels.append(Panel(xlabel="接触对占据率", ylabel="接触对数",
+                                title="接触对占据率分布（持续存在的配对）"))
+        res.add_curve("占据率分布", bin_edges_to_centers(e), h.astype(float),
+                      kind="bar", panel=5)
+        res.add_notes(
+            f"接触对占据率 = 某一对 (i∈A, j∈B) 处于接触的帧数 / 总帧数，"
+            f"共出现 {n_pairs_seen:,} 个不同的接触对，平均占据率 "
+            f"{float(np.mean(occ)):.3f}。这个量才是**有区分度的「概率」**："
+            f"它区分「始终黏在一起」与「偶发碰到」，而「存在接触的帧比例」做不到。")
+    elif track_pairs:
+        res.add_notes(
+            f"帧数 {n} 超过接触对占据率的统计上限 "
+            f"({int(occupancy_max_frames)} 帧)，已跳过该指标以保证速度；"
+            f"需要时可减少帧数或调大 occupancy_max_frames。")
+
+    # ------------------------------------------------ 配位数分布（瞬时接触数）
+    if cn_hist is not None and cn_hist.sum() > 0:
+        cn_vals = np.arange(cn_hist.size, dtype=float)
+        cn_p = cn_hist / cn_hist.sum()
+        cn_mean = float(np.sum(cn_p * cn_vals))
+        cn_std = float(np.sqrt(np.sum(cn_p * (cn_vals - cn_mean) ** 2)))
+        pidx = len(res.panels)                      # 面板号动态取，避免与占据率面板冲突
+        res.panels.append(Panel(xlabel="瞬时接触数（每个 A 原子每帧）",
+                                ylabel="概率",
+                                title="配位数分布（瞬时接触数）"))
+        res.add_curve("配位数分布", cn_vals, cn_p, kind="bar", panel=pidx)
+        res.summary["瞬时接触数 平均"] = cn_mean
+        res.summary["瞬时接触数 标准差"] = cn_std
+        res.summary["瞬时接触数 众数"] = float(cn_vals[int(np.argmax(cn_hist))])
+        res.add_notes(
+            "「配位数分布」= 每个 A 原子在**每一帧**的瞬时接触数，对（原子 × 帧）"
+            "汇总成直方图。它比「平均接触数」多出**分布宽度**这一维信息：标准差大"
+            "说明配位环境高度异质（一部分原子被完全包裹、一部分裸露），"
+            "只报平均值会掩盖这种差异。")
 
     finite = n_pairs[np.isfinite(n_pairs)]
     if finite.size:
@@ -749,7 +1208,26 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
                       kind="bar", panel=3)
 
     res.add_notes(f"接触判据：任意 A–B 原子对距离 < {cutoff:g} Å。")
+    _mode_txt = {
+        "inter": "只统计**不同分子之间**的原子对（同分子内的配对已剔除）",
+        "intra": "只统计**同一分子内部**的原子对（分子间接触已剔除）",
+        "total": "同时包含分子内与分子间配对（1.0.0 旧口径）",
+    }[eff_mode]
+    res.summary["配对模式"] = eff_mode
+    if n_kept_pairs:
+        res.summary["分子内配对占比"] = float(n_intra_pairs / n_kept_pairs)
+    res.add_notes(f"配对模式 = {eff_mode}：{_mode_txt}。"
+                  f"（1.0.0 没有这个开关，等价于 total。）")
+    if mode_note:
+        res.add_notes(f"注意：{mode_note}。")
+    if eff_mode == "inter" and n_kept_pairs == 0 and n_pairs.size:
+        res.add_notes(
+            "该组分对的全部原子对都属于**同一个分子**，分子间接触恒为空："
+            "若要看分子内的接触，请把配对模式改成 intra。")
     res.add_notes(f"A 组 {na} 个原子，B 组 {nb} 个原子，统计 {n} 帧。")
+    res.add_notes(
+        "「平均接触数」= 该原子在每一帧接触到的 B 原子数，对帧取平均；"
+        "它随配位环境连续变化，是描述接触强度的主指标。")
     return res
 
 
@@ -817,34 +1295,79 @@ def analyze_interface_width(mdt, groups: Mapping[str, object], selection: FrameS
     res.add_curve(f"{a_name} (归一化)", centers, fa, panel=1)
     res.add_curve(f"{b_name} (归一化)", centers, fb, panel=1)
 
+    # ---------------- 1D 台阶模型的适用性判据（阶段 5）
+    # 为什么必须判：均匀混合体系里 fa、fb 都只在 1 附近涨落，两条涨落曲线互相
+    # 穿越同样会产生"交点"，于是 1.0.0 会把密度涨落的特征尺度当成"界面宽度"——
+    # 实测 AdK 均匀溶液（根本没有界面）被判成「高（板层体系，检测到 2 个界面，
+    # erf 拟合通过）」，并报出 36.6 Å 的"界面宽度"（盒长才 80 Å）。
+    L_axis = float("nan")
+    if centers.size > 1:
+        L_axis = float(centers[-1] - centers[0] + (centers[1] - centers[0]))
+    fmin_a = float(np.nanmin(fa)) if fa.size else float("nan")
+    fmax_a = float(np.nanmax(fa)) if fa.size else float("nan")
+    # 真实的分层台阶：ρ_A/ρ_bulk 必须同时接近 1（A 相内）与接近 0（B 相内）
+    demixed = bool(np.isfinite(fmin_a) and fmin_a < 0.15 and fmax_a > 0.85)
+    w_meas = float(info.get("界面宽度 10-90 (Å)", np.nan)) if info else float("nan")
+    too_wide = bool(np.isfinite(w_meas) and np.isfinite(L_axis)
+                    and w_meas > 0.25 * L_axis)
+    slab_ok = bool(demixed and not too_wide)
+
     if info:
         res.summary.update(info)
         res.summary["组分 A"] = a_name
         res.summary["组分 B"] = b_name
-        fit_ok = "界面宽度 10-90 (erf 拟合) (Å)" in info
-        n_cross = info.get("检测到的界面交点数", 0)
-        if fit_ok and n_cross <= 1:
-            res.summary["界面判据可靠性"] = "高（存在台阶状界面，erf 拟合通过）"
-        elif fit_ok and n_cross <= 2:
-            res.summary["界面判据可靠性"] = (
-                f"高（板层体系，检测到 {n_cross} 个界面，均已单独测量，erf 拟合通过）")
-        elif fit_ok:
-            res.summary["界面判据可靠性"] = f"中（检测到 {n_cross} 个交点，需人工确认）"
+        res.summary["1D 台阶模型是否适用"] = "是" if slab_ok else "否"
+        if not slab_ok:
+            # 拒绝套用 1D 模型：宽度与位置一律不给，数值只作为"涨落尺度"如实保留
+            diag = float(res.summary.get("界面宽度 10-90 (Å)", float("nan")))
+            for key in [k for k in list(res.summary)
+                        if "界面宽度" in k or "界面位置" in k]:
+                res.summary.pop(key, None)
+            res.summary["界面宽度是否可用"] = "否"
+            res.summary["界面位置是否可用"] = "否"
+            if np.isfinite(diag):
+                res.summary["密度涨落特征尺度 (Å)（不是界面宽度）"] = diag
+            if not demixed:
+                why = (f"该方向两组分**没有分层**：归一化密度只在 1 附近涨落"
+                       f"（{a_name} 的 ρ/ρ_bulk 跨度仅 {fmax_a - fmin_a:.2f}，"
+                       f"没有同时接近 0 与 1）")
+            else:
+                why = (f"测得的过渡尺度 {w_meas:.1f} Å 超过盒长的 1/4"
+                       f"（{0.25 * L_axis:.1f} Å），不是局部界面")
+            res.summary["界面判据可靠性"] = f"不适用——{why}；已拒绝套用 1D 台阶模型"
+            res.add_notes(
+                f"**未给出界面宽度与界面位置**：{why}。此时曲线上的「交点」只是"
+                f"两组分密度涨落互相穿越，交点间的间距没有界面含义——这正是"
+                f"1.0.0 的问题（实测 AdK 均匀溶液会给出 36.6 Å 的「界面宽度」）。")
+            res.add_notes(
+                "界面宽度只在体系**确实沿该方向分层**时才有定义（板层、液滴、"
+                "真空/液面等）。请先看密度分布曲线是否呈台阶状；若不呈台阶，"
+                "请改看密度分布本身或换一个方向。")
         else:
-            res.summary["界面判据可靠性"] = (
-                "低——该方向不存在台阶状界面，上面的「界面宽度」只是密度涨落的"
-                "特征尺度，不能解释为真实界面宽度"
-            )
-        w0 = info.get("界面宽度 10-90 (Å)", float("nan"))
-        parts = [f"界面位置 x₀ = {info['界面位置 (Å)']:.3f} Å",
-                 f"界面宽度（10–90%）= {w0:.3f} Å" if np.isfinite(w0)
-                 else "界面宽度（10–90%）无法直接测量"]
-        if n_cross > 1 and "界面2 界面位置 (Å)" in info:
-            w1 = info.get("界面2 界面宽度 10-90 (Å)", float("nan"))
-            parts.append(
-                f"第二个界面 x₀ = {info['界面2 界面位置 (Å)']:.3f} Å、"
-                + (f"宽度 = {w1:.3f} Å" if np.isfinite(w1) else "宽度不可测"))
-        res.add_notes("；".join(parts) + f"；检测到 {n_cross} 个密度交点。")
+            fit_ok = "界面宽度 10-90 (erf 拟合) (Å)" in info
+            n_cross = info.get("检测到的界面交点数", 0)
+            if fit_ok and n_cross <= 1:
+                res.summary["界面判据可靠性"] = "高（存在台阶状界面，erf 拟合通过）"
+            elif fit_ok and n_cross <= 2:
+                res.summary["界面判据可靠性"] = (
+                    f"高（板层体系，检测到 {n_cross} 个界面，均已单独测量，erf 拟合通过）")
+            elif fit_ok:
+                res.summary["界面判据可靠性"] = f"中（检测到 {n_cross} 个交点，需人工确认）"
+            else:
+                res.summary["界面判据可靠性"] = (
+                    "低——该方向不存在台阶状界面，上面的「界面宽度」只是密度涨落的"
+                    "特征尺度，不能解释为真实界面宽度"
+                )
+            w0 = info.get("界面宽度 10-90 (Å)", float("nan"))
+            parts = [f"界面位置 x₀ = {info['界面位置 (Å)']:.3f} Å",
+                     f"界面宽度（10–90%）= {w0:.3f} Å" if np.isfinite(w0)
+                     else "界面宽度（10–90%）无法直接测量"]
+            if n_cross > 1 and "界面2 界面位置 (Å)" in info:
+                w1 = info.get("界面2 界面宽度 10-90 (Å)", float("nan"))
+                parts.append(
+                    f"第二个界面 x₀ = {info['界面2 界面位置 (Å)']:.3f} Å、"
+                    + (f"宽度 = {w1:.3f} Å" if np.isfinite(w1) else "宽度不可测"))
+            res.add_notes("；".join(parts) + f"；检测到 {n_cross} 个密度交点。")
     else:
         res.add_notes("未能从密度分布中识别出界面（两个组分密度没有明显的过渡区）。")
 

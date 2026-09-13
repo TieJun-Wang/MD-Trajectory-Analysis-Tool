@@ -15,6 +15,7 @@ export { default as ExportPanel, DirPicker } from './src/components/ExportPanel.
 export { default as LogPanel } from './src/components/LogPanel.jsx'
 export {
   SelectionBlock,
+  FrameBlock,
   ParamBlock,
   FunctionBlock,
   RunBlock,

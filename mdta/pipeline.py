@@ -46,7 +46,8 @@ DEFAULT_PARAMS: dict = {
     "rdf": {"rmax": 12.0, "nbins": 120, "compare_halves": False},
     "contact": {"cutoff": 5.0},
     "interface": {"axis": 2, "nbins": 120},
-    "orientation": {"mode": "backbone", "stride": 1},
+    # 取向链段默认取**化学重复单元**（1.0.1 起；1.0.0 为几何骨架 "backbone"）
+    "orientation": {"mode": "repeat", "stride": 1},
     "order": {},
     "msd": {},
 }
@@ -74,15 +75,29 @@ ANALYSIS_TITLES = {
 #: 与「图表导航」的分层都从这里生成，不会各写一份导致对不上。
 ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("链构象", ("rg", "ree", "dihedral")),
-    ("界面", ("density", "rdf", "contact", "interface")),
-    ("结晶", ("orientation", "order")),
-    ("辅助", ("msd",)),
+    ("空间结构", ("density", "rdf", "contact", "interface")),
+    ("取向与结晶", ("orientation", "order")),
+    ("动力学与输运", ("msd",)),
 ]
+
+#: 分组在**快捷按钮行**上用的 2 字缩写。
+#:
+#: 为什么需要：快捷行要求「全选 + 各分组的仅选按钮」在**一行内**放下（用户明确要求），
+#: 而 `webapp/_css_check.py` 会用真实 CSS 字号做静态宽度估算。分组名改长之后
+#: 「仅动力学与输运」这类按钮会把整行挤爆，所以按钮用缩写、完整名放在 tooltip 与
+#: 分组标题上。改分组名时**必须同步更新这张表**（有测试盯着）。
+GROUP_SHORT: dict[str, str] = {
+    "链构象": "构象",
+    "空间结构": "结构",
+    "取向与结晶": "取向",
+    "动力学与输运": "输运",
+}
 
 
 def analysis_groups() -> list[dict]:
-    """给界面用的分组结构：``[{"label": 模块名, "names": [...]}, ...]``。"""
-    return [{"label": label, "names": list(names)} for label, names in ANALYSIS_GROUPS]
+    """给界面用的分组结构：``[{"label": 模块名, "short": 按钮缩写, "names": [...]}, ...]``。"""
+    return [{"label": label, "short": GROUP_SHORT.get(label, label[:2]),
+             "names": list(names)} for label, names in ANALYSIS_GROUPS]
 
 
 class Analyzer:
@@ -239,11 +254,13 @@ class Analyzer:
                                                pair=tuple(pair),
                                                verbose=verbose, **p)
         if name == "orientation":
-            return cry.analyze_orientation(self.trajectory, self.primary, sel,
-                                           label=label, verbose=verbose, **p)
+            ag, lab = self._orientation_target()
+            return cry.analyze_orientation(self.trajectory, ag, sel,
+                                           label=lab, verbose=verbose, **p)
         if name == "order":
-            return cry.analyze_structural_order(self.trajectory, self.primary, sel,
-                                                label=label, verbose=verbose, **p)
+            ag, lab = self._orientation_target()
+            return cry.analyze_structural_order(self.trajectory, ag, sel,
+                                                label=lab, verbose=verbose, **p)
         if name == "msd":
             groups = self._msd_groups()
             if not groups:
@@ -365,6 +382,40 @@ class Analyzer:
         if len(names) == 1:
             return self.components[names[0]], self.components[names[0]]
         return None, None
+
+    def _orientation_target(self):
+        """取向/有序度的分析对象：**整个组分**（含该组分的全部分子）。
+
+        为什么改：1.0.0 只把"最大的一条链"（``self.primary``）交给取向与有序度
+        分析，却用整个体系/组分的名义输出——典型症状就是"只算一条链却命名整个
+        膜"。取向与有序度都是**集成量**，必须对该类分子的全部实例做集合平均；
+        结果里会写明链段来自多少个分子。
+
+        选法：取与主链原子重叠最多的那个组分；没有组分信息时退回主链。
+        """
+        import numpy as _np
+
+        if self.components and self.primary is not None:
+            pset = {int(a) for a in _np.asarray(self.primary.indices)}
+            best_name = None
+            best_ag = None
+            best_ov = -1
+            for nm, ag in self.components.items():
+                if ag is None or ag.n_atoms == 0:
+                    continue
+                ov = len(pset & {int(a) for a in _np.asarray(ag.indices)})
+                if ov > best_ov:
+                    best_name, best_ag, best_ov = nm, ag, ov
+            if best_ag is not None and best_ov > 0:
+                try:
+                    from .analysis.conformation import molecule_slices
+
+                    ms = molecule_slices(best_ag)
+                    n_mol = len(ms[1]) if ms is not None else 1
+                except Exception:  # noqa: BLE001
+                    n_mol = 1
+                return best_ag, (f"{best_name}（{n_mol} 个分子，{best_ag.n_atoms:,} 原子）")
+        return self.primary, self.primary_label
 
     def _msd_groups(self) -> "OrderedDict[str, object]":
         out: "OrderedDict[str, object]" = OrderedDict()

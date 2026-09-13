@@ -7,6 +7,10 @@
 
 const BASE = '/api'
 
+/** 「文件读取」进度的 SSE 地址（EventSource 只能 GET，故单独开流） */
+export const openStreamUrl = (token) =>
+  `${BASE}/session/open/stream?token=${encodeURIComponent(token)}`
+
 async function request(path, options = {}) {
   const res = await fetch(BASE + path, {
     headers: { 'Content-Type': 'application/json' },
@@ -26,6 +30,50 @@ async function request(path, options = {}) {
   return data
 }
 
+/**
+ * **流式**订阅「文件读取」进度：服务端在阶段变化时立即推送（SSE），
+ * 不必轮询；流断了或环境不支持 EventSource 时自动退回 400ms 轮询，
+ * 保证任何情况下都有反馈。本地秒表则一直跑，避免"看起来卡死"。
+ * 返回 ``stop()``，打开结束时调用。
+ */
+export function streamOpenProgress(token, { onStage, onTick } = {}) {
+  let es = null
+  let timer = null
+  let stopped = false
+  const startPoll = () => {
+    if (stopped || timer) return
+    timer = setInterval(async () => {
+      onTick?.()
+      try {
+        const p = await api.openProgress(token)
+        if (p && !p.unknown) onStage?.(p)
+      } catch { /* 轮询失败不打断打开流程 */ }
+    }, 400)
+  }
+  const stop = () => {
+    stopped = true
+    if (es) { try { es.close() } catch { /* ignore */ } es = null }
+    if (timer) { clearInterval(timer); timer = null }
+  }
+  timer = setInterval(() => onTick?.(), 400)     // 本地秒表（两条路径都用）
+  if (typeof EventSource === 'undefined') { startPoll(); return stop }
+  try {
+    es = new EventSource(openStreamUrl(token))
+    es.onmessage = (ev) => {
+      try { onStage?.(JSON.parse(ev.data)) } catch { /* 忽略坏消息 */ }
+    }
+    es.addEventListener('end', () => stop())
+    es.onerror = () => {                          // 流断了 → 退回轮询
+      if (stopped) return
+      if (es) { try { es.close() } catch { /* ignore */ } es = null }
+      startPoll()
+    }
+  } catch {
+    startPoll()
+  }
+  return stop
+}
+
 export const api = {
   health: () => request('/health'),
   analyses: () => request('/analyses'),
@@ -34,10 +82,13 @@ export const api = {
   files: (dir) => request(`/files${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`),
 
   /** 打开体系（读取 tpr/xtc），返回 sid 与体系信息 */
-  open: (topology, trajectory) =>
+  open: (topology, trajectory, progressToken) =>
     request('/session', {
       method: 'POST',
-      body: JSON.stringify({ topology, trajectory: trajectory || null }),
+      // progress_token 走**请求体**（后端从 payload 取）；前端在 POST 进行中
+      // 并发轮询 /session/open/progress?token= 显示文件读取进度
+      body: JSON.stringify({ topology, trajectory: trajectory || null,
+        progress_token: progressToken || null }),
     }),
 
   info: (sid) => request(`/session/${sid}/info`),
@@ -61,6 +112,10 @@ export const api = {
   /** 拉取运行状态 + 客户端尚未收到的结果（after = 已收到的条数） */
   runProgress: (sid, after = 0) =>
     request(`/session/${sid}/run/progress?after=${after}`),
+
+  /** 「文件读取」进度（打开文件时并发轮询，token 由前端生成） */
+  openProgress: (token) =>
+    request(`/session/open/progress?token=${encodeURIComponent(token)}`),
 
   /** 请求取消：当前这项算完即停，已完成的结果保留 */
   runCancel: (sid) =>

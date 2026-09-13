@@ -10,7 +10,8 @@ import ChartView from './ChartView'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
 
 export default function ChartPanel({ run, chart, setChart, live, titles = {},
-                                    current = null, panelIndex = 0, groups }) {
+                                    current = null, panelIndex = 0, groups,
+                                    onVisibleChange }) {
   const results = run?.results || {}
   const order = useMemo(() => Object.keys(results), [results])
   const pending = live?.pending || []
@@ -111,7 +112,7 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
           )}
         </div>
         <div className="chartnav-list">
-          {/* 两层：大纲模块（链构象 / 界面 / 结晶 / 辅助）→ 分析项 → 各张图。
+          {/* 两层：大纲模块（链构象 / 空间结构 / 取向与结晶 / 动力学与输运）→ 分析项 → 各张图。
               模块只显示"已经有结果"的项，所以实时运行时模块会一项项长出来。 */}
           {groupPresent(order, normalizeGroups(groups)).map(([modLabel, names]) => {
             const modOpen = !closedModules.has(modLabel)
@@ -188,7 +189,8 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
               </div>
             </div>
 
-            <ChartView result={current} panelIndex={panelIndex} />
+            <ChartView result={current} panelIndex={panelIndex}
+                       onVisibleChange={onVisibleChange} />
           </>
         )}
       </section>

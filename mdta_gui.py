@@ -71,6 +71,7 @@ from mdta.pipeline import (                              # noqa: E402
 )
 from mdta.plotting import set_agg_backend                # noqa: E402
 from mdta.selection import select                        # noqa: E402
+from mdta.systeminfo import info_tables                  # noqa: E402
 
 # 本界面不显示 matplotlib 图，只在导出时把图存成文件，
 # 因此统一用非交互的 Agg 后端，避免和 Tk 事件循环互相干扰。
@@ -249,19 +250,16 @@ class MDTAGui:
         outer.pack(fill="both", expand=True)
 
         # ---------------- 底部按钮栏
+        # 按用户要求，桌面版**只做基础数据展示 + 基础数据文件导出**：
+        # 导出只保留 CSV（数据文件），不再提供 PNG / Excel 导出 ——
+        # 出图与汇总表交给 Web 版或命令行 mdta_cli.py。
         bottom = ttk.Frame(outer)
         bottom.pack(side="bottom", fill="x", pady=(6, 0))
-        ttk.Button(bottom, text="导出全部结果", command=self.export_all,
-                   width=16).pack(side="left", padx=2)
+        ttk.Button(bottom, text="导出全部数据 CSV", command=self.export_all,
+                   width=18).pack(side="left", padx=2)
         self.btn_csv = ttk.Button(bottom, text="导出当前分析 CSV",
-                                  command=lambda: self.export_current("csv"), width=20)
+                                  command=lambda: self.export_current("csv"), width=18)
         self.btn_csv.pack(side="left", padx=2)
-        self.btn_png = ttk.Button(bottom, text="保存当前图片 PNG",
-                                  command=lambda: self.export_current("png"), width=20)
-        self.btn_png.pack(side="left", padx=2)
-        self.btn_xlsx = ttk.Button(bottom, text="导出汇总 Excel",
-                                   command=lambda: self.export_current("excel"), width=18)
-        self.btn_xlsx.pack(side="left", padx=2)
         ttk.Button(bottom, text="打开输出目录", command=self.open_outdir,
                    width=14).pack(side="left", padx=2)
         ttk.Label(bottom, text="输出目录:").pack(side="left", padx=(16, 2))
@@ -329,15 +327,28 @@ class MDTAGui:
         ttk.Label(row, text="（只给拓扑文件时会自动寻找同名 .xtc）",
                   foreground="#666").pack(side="left", padx=4)
 
-        # ---- 2. 体系信息
-        f2 = ttk.LabelFrame(inner, text="2. 体系信息", padding=8)
+        # ---- 2. 体系信息：**表格**展示（与 Web 版同一份 info_tables）
+        f2 = ttk.LabelFrame(inner, text="2. 体系信息（表格）", padding=8)
         f2.pack(fill="x", pady=4)
-        self.txt_info = tk.Text(f2, height=13, width=46, wrap="none",
-                                font=self._mono_font())
-        isb = ttk.Scrollbar(f2, orient="vertical", command=self.txt_info.yview)
-        self.txt_info.configure(yscrollcommand=isb.set)
-        self.txt_info.pack(side="left", fill="both", expand=True)
+        self.lbl_info_head = ttk.Label(f2, text="尚未读取体系", foreground="#666")
+        self.lbl_info_head.pack(anchor="w", pady=(0, 4))
+        wrap = ttk.Frame(f2)
+        wrap.pack(fill="both", expand=True)
+        # 用 Treeview：每行 = 一条信息，允许直接框选复制
+        self.info_tree = ttk.Treeview(
+            wrap, columns=("item", "value"), show="headings", height=14,
+            selectmode="extended")
+        self.info_tree.heading("item", text="项目")
+        self.info_tree.heading("value", text="值")
+        self.info_tree.column("item", width=150, anchor="center", stretch=False)
+        self.info_tree.column("value", width=230, anchor="center")
+        isb = ttk.Scrollbar(wrap, orient="vertical", command=self.info_tree.yview)
+        self.info_tree.configure(yscrollcommand=isb.set)
+        self.info_tree.pack(side="left", fill="both", expand=True)
         isb.pack(side="right", fill="y")
+        # 完整文本报告作为兜底（以后端 info_tables 为准，这里只是可选项）
+        self.txt_info = tk.Text(f2, height=6, width=46, wrap="none",
+                                font=self._mono_font())
 
         # ---- 3. 选择
         f3 = ttk.LabelFrame(inner, text="3. 分析对象选择", padding=8)
@@ -438,6 +449,40 @@ class MDTAGui:
                                                                      padx=(4, 0))
 
     # ---------------------------------------------------------- 右侧区域
+    def _fill_info_tables(self, az) -> None:
+        """把体系信息填成表格（与 Web 版共用 :func:`mdta.systeminfo.info_tables`）。
+
+        每个小节是一组行，小节名写在「项目」列并加粗感（用前缀 ▍ 区分），
+        这样一张表就能把全部小节列完，不用来回切页。
+        """
+        try:
+            sections = info_tables(az.info, max_chain_types=25)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"体系信息表格生成失败，回退文本报告: {exc}")
+            return
+        tree = self.info_tree
+        tree.delete(*tree.get_children())
+        n_rows = 0
+        for sec in sections:
+            title = str(sec.get("title", ""))
+            cols = sec.get("columns") or []
+            tree.insert("", "end", values=(f"▍{title}", f"{len(cols)} 列"),
+                        tags=("section",))
+            for row in sec.get("rows", []):
+                # 第一列当作"项目"，其余列拼成"值"
+                item = str(row[0]) if row else ""
+                value = " · ".join(str(c) for c in row[1:]) if len(row) > 1 else ""
+                tree.insert("", "end", values=(item, value))
+                n_rows += 1
+            if sec.get("note"):
+                tree.insert("", "end", values=("", str(sec["note"])),
+                            tags=("note",))
+        tree.tag_configure("section", background="#eef2f7")
+        tree.tag_configure("note", foreground="#666666")
+        self.lbl_info_head.configure(
+            text=f"共 {len(sections)} 个小节 / {n_rows} 行"
+                 f"（{az.info.n_atoms:,} 原子，{az.info.n_residues:,} 残基）")
+
     def _build_right(self, parent: ttk.Frame) -> None:
         self.nb = ttk.Notebook(parent)
         self.nb.pack(fill="both", expand=True)
@@ -582,6 +627,7 @@ class MDTAGui:
 
         self.txt_info.delete("1.0", "end")
         self.txt_info.insert("1.0", az.info_text(max_chain_types=25))
+        self._fill_info_tables(az)
 
         # 填充主链下拉框
         options = ["自动（最大链）"]
@@ -973,28 +1019,21 @@ class MDTAGui:
         cur = self._current_result()
         outdir = self.var_outdir.get().strip() or "analysis_results"
         try:
-            from mdta.export import export_all, export_csv, export_png, export_excel
+            # 桌面版只导出**数据文件**（CSV）
+            from mdta.export import export_csv
 
-            if kind == "excel":
-                path = export_excel(list(self.results.values()),
-                                    os.path.join(outdir, "summary.xlsx"))
-                self.log(f"已导出汇总表: {path}")
-                messagebox.showinfo("导出完成", path)
-                return
             targets = [cur] if cur else list(self.results.items())
-            if kind == "csv":
-                for name, res in targets:
-                    for p in export_csv(res, outdir):
-                        self.log(f"已导出: {p}")
-            elif kind == "png":
-                for name, res in targets:
-                    p = export_png(res, outdir)
+            n = 0
+            for name, res in targets:
+                for p in export_csv(res, outdir):
                     self.log(f"已导出: {p}")
-            self.set_status(f"已导出到 {os.path.abspath(outdir)}")
+                    n += 1
+            self.set_status(f"已导出 {n} 个 CSV 到 {os.path.abspath(outdir)}")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("导出失败", f"{type(exc).__name__}: {exc}")
 
     def export_all(self) -> None:
+        """导出全部结果的**数据文件**（CSV）。"""
         if not self.results:
             messagebox.showwarning("提示", "还没有可导出的结果。")
             return
@@ -1003,14 +1042,14 @@ class MDTAGui:
             from mdta.export import export_all
 
             out = export_all(list(self.results.values()), outdir,
-                             formats=("csv", "png"), excel=True)
+                             formats=("csv",), excel=False)
             self.log(f"全部导出完成: {out['dir']}")
             self.set_status(f"已导出到 {out['dir']}")
             messagebox.showinfo("导出完成",
-                                f"CSV: {len(out['csv'])} 个\n"
-                                f"PNG: {len(out['png'])} 个\n"
-                                f"Excel: {os.path.basename(out['excel'] or '')}\n\n"
-                                f"目录: {out['dir']}")
+                                f"CSV: {len(out['csv'])} 个\n\n"
+                                f"目录: {out['dir']}\n\n"
+                                f"（需要 PNG 图或 Excel 汇总请用 Web 版或 "
+                                f"mdta_cli.py）")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror("导出失败", f"{type(exc).__name__}: {exc}")
 

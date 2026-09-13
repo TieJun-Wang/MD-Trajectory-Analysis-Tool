@@ -50,9 +50,14 @@ assert a.get("groups"), "缺少 groups（大纲模块分组）"
 assert sorted(_group_flat) == sorted(a["order"]), (
     "groups 未恰好覆盖 order", sorted(_group_flat), sorted(a["order"]))
 assert len(_group_flat) == len(set(_group_flat)), "groups 里有重复项"
-assert [g["label"] for g in a["groups"]] == ["链构象", "界面", "结晶", "辅助"], \
-    "模块名或顺序与设计大纲不符"
-P("      groups 覆盖全部 order 且无重复、模块名正确")
+assert [g["label"] for g in a["groups"]] == [
+    "链构象", "空间结构", "取向与结晶", "动力学与输运"], "模块名或顺序与分组定义不符"
+# 快捷按钮用的缩写必须每个分组都有、且足够短（那一行要求单行放下，
+# 见 webapp/_css_check.py 的静态宽度估算：完整名会让整行溢出）
+_short = [g.get("short") for g in a["groups"]]
+assert all(isinstance(s, str) and 1 <= len(s) <= 3 for s in _short), _short
+assert len(set(_short)) == len(_short), f"缩写重复: {_short}"
+P("      groups 覆盖全部 order 且无重复、模块名与按钮缩写正确")
 
 # 2) 文件选择器
 f = show(client.get("/api/files", params={"dir": str(ROOT)}), "GET /api/files")

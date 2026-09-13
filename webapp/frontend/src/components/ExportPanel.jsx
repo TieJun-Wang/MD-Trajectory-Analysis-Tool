@@ -14,6 +14,39 @@ const FORMATS = [
   ['excel', 'Excel 汇总'],
 ]
 
+/**
+ * 列出某个分析在当前格式设置下**会产出哪些文件**。
+ * 命名规则与 mdta/export.py 保持一致：
+ *   单面板 → ``rg.csv`` / ``rg.png``；多面板 → ``rg__panel0.csv``；
+ *   每面板单独出图 → ``rg__p1.png``；汇总 → ``summary.xlsx``。
+ */
+export function filesFor(res, name, formats, panelPngs) {
+  const panels = res.panels || []
+  const n = panels.length || 1
+  const multi = n > 1
+  const out = []
+  if (formats.includes('csv')) {
+    if (multi) {
+      for (let i = 0; i < n; i += 1) {
+        out.push({ file: `${name}__panel${i}.csv`, kind: 'CSV',
+                   label: panels[i]?.title || `面板 ${i + 1}` })
+      }
+    } else {
+      out.push({ file: `${name}.csv`, kind: 'CSV', label: '数据表' })
+    }
+  }
+  if (formats.includes('png')) {
+    out.push({ file: `${name}.png`, kind: 'PNG', label: `合并图（${n} 张面板）` })
+    if (panelPngs) {
+      for (let i = 0; i < n; i += 1) {
+        out.push({ file: `${name}__p${i + 1}.png`, kind: 'PNG',
+                   label: `单图 · ${panels[i]?.title || `面板 ${i + 1}`}` })
+      }
+    }
+  }
+  return out
+}
+
 /** 目标目录选择器：复用 /api/files 的目录浏览能力 */
 export function DirPicker({ value, onPick, onClose }) {
   const [cur, setCur] = useState(null)
@@ -84,6 +117,8 @@ export default function ExportPanel({ run, sid, log, groups }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [last, setLast] = useState(null)
+  // 逐文件勾选：存"取消勾选的"，这样格式一变、新出现的文件默认是勾上的
+  const [offFiles, setOffFiles] = useState(() => new Set())
 
   // 模块勾选默认全开；新出现的模块也自动勾上
   const modOn = (label) => whichMods[label] !== false
@@ -92,15 +127,42 @@ export default function ExportPanel({ run, sid, log, groups }) {
   const toggleFormat = (f) => setFormats((s) => (
     s.includes(f) ? s.filter((x) => x !== f) : [...s, f]))
 
+  // ---- 当前格式下每个模块会产出的文件（按大纲模块分板块展示）
+  const fileMods = mods
+    .filter(([label]) => modOn(label))
+    .map(([label, ns]) => [label, ns.flatMap((n) => filesFor(
+      results[n], n, formats,
+      // 每面板单独出图只对 PNG 有意义
+      panelPngs,
+    ).map((f) => ({ ...f, name: n })))])
+
+  const excelFile = formats.includes('excel')
+    ? [{ file: 'summary.xlsx', kind: 'EXCEL', label: '全部统计量汇总', name: '__excel' }]
+    : []
+  const allFiles = [...fileMods.flatMap(([, fs]) => fs), ...excelFile]
+  const fileOn = (f) => !offFiles.has(f)
+  const toggleFile = (f) => setOffFiles((s) => {
+    const next = new Set(s)
+    if (next.has(f)) next.delete(f); else next.add(f)
+    return next
+  })
+  const setModFiles = (fs, on) => setOffFiles((s) => {
+    const next = new Set(s)
+    fs.forEach((f) => (on ? next.delete(f.file) : next.add(f.file)))
+    return next
+  })
+  const chosenFiles = allFiles.filter((f) => fileOn(f.file)).map((f) => f.file)
+
   const doExport = async () => {
     if (!sid) return
     if (!chosenNames.length) { setError('请至少勾选一个导出模块'); return }
     if (!formats.length) { setError('请至少选择一种文件形式'); return }
+    if (!chosenFiles.length) { setError('请至少勾选一个要导出的文件'); return }
     setBusy(true); setError('')
     try {
       const data = await api.export(sid, {
         formats, dpi: Number(dpi) || 200, panel_pngs: panelPngs,
-        which: chosenNames, outdir: outdir || null,
+        which: chosenNames, outdir: outdir || null, files: chosenFiles,
       })
       setLast(data)
       log?.(`已导出到 ${data.dir}（CSV ${data.n_csv}，PNG ${data.n_png}）`)
@@ -208,6 +270,71 @@ export default function ExportPanel({ run, sid, log, groups }) {
               {last.excel ? ` / ${String(last.excel).split(/[\\/]/).pop()}` : ''}）
             </span>
           </div>
+        )}
+      </div>
+
+      {/* 可选文件：按大纲模块分板块（与「统计量」页同一套分组与视觉），
+          逐个文件勾选，导出时只产出勾上的那些。 */}
+      <div className="filetabs">
+        <span className="filetabs-title">选择要导出的文件</span>
+        <span className="dim">
+          已选 {chosenFiles.length} / {allFiles.length}
+        </span>
+        <button className="mini" onClick={() => setOffFiles(new Set())}>全选</button>
+        <button className="mini"
+                onClick={() => setOffFiles(new Set(allFiles.map((f) => f.file)))}>
+          全不选
+        </button>
+      </div>
+
+      <div className="stattabbody">
+        {!allFiles.length ? (
+          <div className="tabhint">
+            当前没有可导出的文件 —— 请先在上面勾选「文件形式」。
+          </div>
+        ) : (
+          <>
+            {[...fileMods, ...(excelFile.length
+              ? [['汇总表', excelFile]] : [])].map(([label, fs]) => {
+              const onCount = fs.filter((f) => fileOn(f.file)).length
+              return (
+                <section key={label} className="filegroup">
+                  <div className="filegroup-head">
+                    <strong>{label}</strong>
+                    <span className="dim">{onCount} / {fs.length}</span>
+                    <button className="mini"
+                            onClick={() => setModFiles(fs, true)}>全选</button>
+                    <button className="mini"
+                            onClick={() => setModFiles(fs, false)}>全不选</button>
+                  </div>
+                  <table className="stats filetable">
+                    <thead>
+                      <tr>
+                        <th style={{ width: '46px' }}>选择</th>
+                        <th>文件名</th>
+                        <th style={{ width: '74px' }}>类型</th>
+                        <th>内容</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {fs.map((f) => (
+                        <tr key={f.file}>
+                          <td>
+                            <input type="checkbox" checked={fileOn(f.file)}
+                                   onChange={() => toggleFile(f.file)}
+                                   aria-label={f.file} />
+                          </td>
+                          <td><code>{f.file}</code></td>
+                          <td>{f.kind}</td>
+                          <td>{f.label}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </section>
+              )
+            })}
+          </>
         )}
       </div>
     </div>

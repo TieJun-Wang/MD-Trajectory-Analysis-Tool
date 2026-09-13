@@ -11,11 +11,25 @@
  */
 import SummaryView from './SummaryView'
 
-export default function NotesPanel({ result, panelIndex = 0 }) {
+export default function NotesPanel({ result, panelIndex = 0, visibleCurves = null }) {
   if (!result) return null
   const panel = result.panels?.[panelIndex]
   const nPanels = result.panels?.length || 1
-  const notes = result.notes || []
+  const allNotes = result.notes || []
+  const meta = result.note_meta || []
+  // **说明按作用域动态过滤**：全局说明始终显示；归属于某条曲线的说明，只在该曲线
+  // 仍显示在当前图表上时才显示（图例点选会实时改变它）。RDF 跑了 10 个配对、
+  // 图例里只勾了 1 个 → 说明区就只留那 1 个配对的说明。
+  const inPanel = (result.panels?.[panelIndex]?.curves) || []
+  const active = (visibleCurves && visibleCurves.length) ? visibleCurves : inPanel
+  const keep = (i) => {
+    const c = meta[i] && meta[i].curve
+    if (!c) return true                      // 全局说明
+    if (!active.length) return true          // 拿不到曲线清单 → 不过滤，宁多勿漏
+    return active.some((v) => v === c || v.startsWith(c))
+  }
+  const notes = allNotes.filter((_, i) => keep(i))
+  const hiddenN = allNotes.length - notes.length
   const nStats = Object.keys(result.summary || {}).length
 
   return (
@@ -38,7 +52,7 @@ export default function NotesPanel({ result, panelIndex = 0 }) {
           <div className="sect-title" style={{ marginTop: 0 }}>
             图表说明
             <span className="dim" style={{ fontWeight: 400 }}>
-              {' '}（{notes.length} 条）
+              {' '}（{notes.length} 条{hiddenN > 0 ? `，已隐藏 ${hiddenN} 条其它曲线的说明` : ''}）
             </span>
           </div>
           {notes.length > 0 ? (

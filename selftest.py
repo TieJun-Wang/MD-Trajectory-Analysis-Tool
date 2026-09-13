@@ -57,12 +57,14 @@ def _run_native_phi_psi(atomgroup, kind: str):
     return np.asarray(Dihedral(groups).run().results.angles, dtype=float)
 
 from mdta.analysis import conformation as conf              # noqa: E402
+from mdta.analysis import crystallinity as cry              # noqa: E402
 from mdta.analysis import dynamics as dyn                   # noqa: E402
 from mdta.analysis import interface as ifc                  # noqa: E402
 from mdta.analysis.base import positions_for                # noqa: E402
 from mdta.io import MDTrajectory, load_trajectory           # noqa: E402
 from mdta.preprocess import select_frames                   # noqa: E402
 from mdta.selection import classify_residues, select        # noqa: E402
+from mdta.systeminfo import describe_system                 # noqa: E402
 
 TOP_DEFAULT = "adk_oplsaa.tpr"
 XTRAJ_DEFAULT = "adk_oplsaa.xtc"
@@ -539,13 +541,18 @@ def test_interface_width_two_interfaces_are_measured_locally():
 
 
 def test_end_to_end_distance_manual():
-    """端到端距离：与手工计算的首尾原子间距一致。"""
+    """（已废弃，保留为兼容壳）端到端距离的口径已改为键图/主链端基。
+
+    1.0.0 的这条测试断言"结果 == 首尾原子间距"，即把 ``ag[[0, -1]]`` 当作链端。
+    该定义本身是错的（见 ``test_end_to_end_distance_uses_bond_graph_ends``），
+    所以这里改为复现旧口径，确保 ``ends="selection"`` 仍能给出与旧版完全相同的数。
+    """
     d = _ctx()
     mdt = d["mdt"]
     prot = d["protein"]
     sel = d["sel"]
-    res = conf.analyze_end_to_end(mdt, prot, sel)
     u = mdt.universe
+    res = conf.analyze_end_to_end(mdt, prot, sel, ends="selection")
     manual = np.empty(len(sel.indices))
     for k, i in enumerate(sel.indices):
         u.trajectory[int(i)]
@@ -554,7 +561,8 @@ def test_end_to_end_distance_manual():
     mine = res.curves_of(0)[0].y
     worst = float(np.abs(mine - manual).max())
     assert worst < 1e-9, worst
-    return f"逐帧最大偏差 {worst:.2e} Å，平均值 {mine.mean():.3f} Å"
+    return (f"旧口径（ends='selection'）逐帧最大偏差 {worst:.2e} Å，"
+            f"平均值 {mine.mean():.3f} Å —— 与 1.0.0 完全一致")
 
 
 def test_frame_selection_semantics():
@@ -885,6 +893,887 @@ def test_contact_min_distance_not_rescanned():
 
 
 # ==================================================================== 运行器
+def _curve_of(res, label: str):
+    """按标签取一条曲线（找不到就报出全部标签，便于定位）。"""
+    for c in res.curves:
+        if c.label == label:
+            return c
+    raise AssertionError(f"找不到曲线 {label!r}；现有曲线：{[c.label for c in res.curves]}")
+
+
+def test_rdf_modes_partition_pairs_exactly():
+    """RDF 三模式：inter/intra 必须**穷尽且互斥**地划分全部原子对。
+
+    合成体系：8 个双原子分子（键长 1.0 Å），分子间距 9 Å，于是 1.0 Å 处的
+    计数只可能来自分子内配对，分子间配对全部 ≥ 8 Å——两类配对在距离上完全分开。
+    断言：手算配对数成立、逐 bin 有 hist_total == hist_inter + hist_intra、
+    键长峰只出现在 intra、归一化分母用的是该模式的真实配对数。
+    """
+    n_mol, spacing, bond = 8, 9.0, 1.0
+    pos = []
+    for m in range(n_mol):
+        base = np.array([m * spacing, 0.0, 0.0])
+        pos += [base, base + np.array([bond, 0.0, 0.0])]
+    block = np.asarray(pos, dtype=np.float32)[None, :, :]           # (1, 16, 3)
+    u = mda.Universe.empty(2 * n_mol, n_residues=n_mol,
+                           atom_resindex=[m for m in range(n_mol) for _ in range(2)],
+                           trajectory=True)
+    u.add_TopologyAttr("masses", [12.0] * (2 * n_mol))
+    u.add_TopologyAttr("molnums", np.arange(n_mol, dtype=int))       # 残基级
+    u.trajectory = mda.coordinates.memory.MemoryReader(
+        block, order="fac",
+        dimensions=np.array([400.0, 400.0, 400.0, 90.0, 90.0, 90.0], dtype=np.float32))
+    mdt = MDTrajectory.from_universe(u)
+    sel = select_frames(np.array([0.0]))
+
+    counts, why = ifc.mode_pair_counts(u.atoms, u.atoms, True)
+    assert counts is not None, why
+    assert counts["total"] == 16 * 15, counts
+    assert counts["intra"] == n_mol * 2, counts                   # 每个分子 2×1 个有序对
+    assert counts["inter"] + counts["intra"] == counts["total"], counts
+
+    edges = np.linspace(0.0, 12.0, 121)
+    hist = {}
+    for mode in ("inter", "intra", "total"):
+        h, nu, _ = ifc._rdf_accumulate(u, u.atoms, u.atoms, edges, [0], True, mode=mode)
+        assert nu == 1
+        hist[mode] = h
+    assert np.array_equal(hist["inter"] + hist["intra"], hist["total"]), "三模式未穷尽划分"
+    k = int(np.searchsorted(edges, bond) - 1)
+    assert hist["intra"][k] == n_mol * 2, (hist["intra"][k], "键长峰未完整落在 intra")
+    assert hist["intra"].sum() == n_mol * 2, "intra 出现多余的近距离配对"
+    assert hist["inter"][:k + 2].sum() == 0, "分子间配对里混入了近程配对"
+
+    res = ifc.analyze_rdf(mdt, {"X": u.atoms}, sel, rmax=12.0, nbins=120, mode="inter")
+    assert res.summary["X-X 配对模式"] == "inter", res.summary
+    assert res.summary["X-X 归一化分母 (有序原子对)"] == counts["inter"], res.summary
+    assert res.summary["X-X 分子内配对占比"] == 0.0, res.summary
+    return (f"三模式穷尽互斥：total {counts['total']:.0f} = 分子间 {counts['inter']:.0f}"
+            f" + 分子内 {counts['intra']:.0f}；键长峰仅见于 intra")
+
+
+def test_rdf_inter_equals_total_for_single_atom_molecules():
+    """单原子分子（水氧）：inter 与 total 必须逐点相同——口径改动对它零影响。
+
+    每个水分子只贡献 1 个 OW，既无分子内 OW–OW 配对，两种模式的配对数也相同
+    （N²−Σ1² = N(N−1)）。这既验证分母推导，也说明对"每分子单原子"的
+    日常情形（水氧、离子等）本改动不改变任何数值。
+    """
+    d = _ctx()
+    mdt = d["mdt"]
+    ow = d["water"].select_atoms("name OW")
+    if ow.n_atoms == 0:
+        return "跳过：体系中找不到水的 OW 原子"
+    sel = select_frames(mdt.times_ps, max_frames=3)
+    a = ifc.analyze_rdf(mdt, {"OW": ow}, sel, rmax=9.0, nbins=90, mode="inter")
+    b = ifc.analyze_rdf(mdt, {"OW": ow}, sel, rmax=9.0, nbins=90, mode="total")
+    ca, cb = _curve_of(a, "OW-OW"), _curve_of(b, "OW-OW")
+    worst = float(np.abs(ca.y - cb.y).max())
+    assert worst < 1e-12, (worst, "单原子分子的 inter 与 total 不一致")
+    na = a.summary["OW-OW 归一化分母 (有序原子对)"]
+    nb = b.summary["OW-OW 归一化分母 (有序原子对)"]
+    assert na == nb, (na, nb)
+    return f"单原子分子 inter≡total（最大差 {worst:.1e}），配对数 {na:,.0f}"
+
+
+def test_rdf_inter_mode_excludes_covalent_bond():
+    """真实水体系：分子间 RDF 里**不应**出现 O–H 共价键峰。
+
+    这是 1.0.0 的口径错误——total 模式把同一水分子内的 O–H（~1.0 Å）计进了
+    g(r)，于是"分子间结构"曲线上冒出一个纯共价键尖峰。改口径后 inter 在
+    r<1.4 Å 必须严格为 0，而这部分计数完整地出现在 intra 里。
+    """
+    d = _ctx()
+    mdt = d["mdt"]
+    w = d["water"]
+    if w is None or w.n_atoms == 0:
+        return "跳过：体系中找不到水"
+    sel = select_frames(mdt.times_ps, max_frames=3)
+    rmax, nbins = 6.0, 120
+    tot = ifc.analyze_rdf(mdt, {"W": w}, sel, rmax=rmax, nbins=nbins, mode="total")
+    itr = ifc.analyze_rdf(mdt, {"W": w}, sel, rmax=rmax, nbins=nbins, mode="inter")
+    ina = ifc.analyze_rdf(mdt, {"W": w}, sel, rmax=rmax, nbins=nbins, mode="intra")
+    ct, ci, cn = _curve_of(tot, "W-W"), _curve_of(itr, "W-W"), _curve_of(ina, "W-W")
+    r = ct.x
+    near = r < 1.4                                   # 共价 O–H 键长区间
+    assert ct.y[near].max() > 1.0, ("total 应含共价键峰", float(ct.y[near].max()))
+    assert float(ci.y[near].max()) == 0.0, ("分子间 RDF 混入了共价键峰",
+                                            float(ci.y[near].max()))
+    assert cn.y[near].max() > 1.0, "intra 应含共价键峰"
+    first = int(np.argmax(ci.y > 0))
+    return (f"inter 在 r<1.4 Å 严格为 0（total 该处 g_max={ct.y[near].max():.1f}），"
+            f"分子间配对自 r={r[first]:.2f} Å 起出现；"
+            f"intra 含键峰 g_max={cn.y[near].max():.1f}")
+
+
+def test_msd_fft_matches_brute_force_and_tidynamics():
+    """MSD 的 FFT 快速算法必须与暴力 (t₀,τ) 双重求和、tidynamics 逐点一致。
+
+    为什么值得单测：``msd_fft`` 是重写后的核心，它一次对成百上千个粒子做批量
+    FFT；而 ``tidynamics.msd`` 把第二轴当**空间分量**求和，只能逐粒子调用。
+    两者数值必须一致，否则"FFT 加速"就成了换算法的借口。
+    """
+    rng = np.random.default_rng(7)
+    n, P = 60, 25
+    xyz = np.cumsum(rng.normal(scale=0.5, size=(n, P, 3)), axis=0)
+
+    got = dyn.msd_fft(xyz[:, :, 0].copy())                     # 单轴、多粒子
+    bf = np.array([float(np.mean((xyz[k:, :, 0] - xyz[:n - k, :, 0]) ** 2))
+                   for k in range(n)])
+    w1 = float(np.abs(got - bf).max())
+    assert w1 < 1e-9 * max(1.0, float(np.abs(bf).max())), (w1, "与暴力法不一致")
+
+    import tidynamics
+    # ⚠️ tidynamics.msd 的输入是"单个粒子、多分量"，它把第二轴当**空间分量**求和，
+    #    所以它给出的是三维 MSD；要跟它比就必须比"三轴之和/粒子数"，不能比单轴。
+    acc = np.zeros(n)
+    for p in range(P):                                          # 逐粒子调 tidynamics
+        acc += np.asarray(tidynamics.msd(xyz[:, p, :].copy()))
+    tid = acc / P
+    tot = sum(dyn.msd_fft(xyz[:, :, i].copy()) for i in range(3))
+    w2 = float(np.abs(tot - tid).max())
+    assert w2 < 1e-9 * max(1.0, float(np.abs(tid).max())), (w2, "与 tidynamics 不一致")
+
+    bf3 = np.array([float(np.mean(np.sum((xyz[k:] - xyz[:n - k]) ** 2, axis=2)))
+                    for k in range(n)])
+    w3 = float(np.abs(tot - bf3).max())
+    assert w3 < 1e-9 * max(1.0, float(np.abs(bf3).max())), (w3, "三轴之和与全维不一致")
+    return (f"FFT 与暴力法最大偏差 {w1:.2e}、与 tidynamics {w2:.2e}、"
+            f"三轴之和与全维 {w3:.2e} Å²（{n} 帧 × {P} 粒子）")
+
+
+def test_msd_molecule_com_excludes_internal_motion():
+    """分子质心 MSD：刚体平动时质心 MSD 只含平动，原子 MSD 会多出内部运动。
+
+    合成体系：6 个双原子分子整体匀速平移（v=0.5 Å/帧），同时分子内键长按
+    cos 振荡（纯内部运动）。于是
+    1. 质心 MSD 必须精确等于 v²τ²；
+    2. 原子 MSD ≥ 质心 MSD（多出的就是内部运动）；
+    3. 全部分子位移完全相同时，去漂移会把质心 MSD 减到 0（漂移=整体平移）。
+    """
+    n_frames, n_mol, box, v = 8, 6, 80.0, 0.5
+    pos = np.zeros((n_frames, n_mol * 2, 3))
+    for k in range(n_frames):
+        for m in range(n_mol):
+            base = np.array([10.0 + m * 5.0 + v * k, 10.0, 10.0])
+            sep = 3.0 * float(np.cos(0.4 * k))                  # 键长振荡
+            pos[k, 2 * m] = base + np.array([sep / 2.0, 0.0, 0.0])
+            pos[k, 2 * m + 1] = base - np.array([sep / 2.0, 0.0, 0.0])
+    u = mda.Universe.empty(n_mol * 2, n_residues=n_mol,
+                           atom_resindex=[m for m in range(n_mol) for _ in range(2)],
+                           trajectory=True)
+    u.add_TopologyAttr("masses", [12.0] * (n_mol * 2))
+    u.add_TopologyAttr("molnums", np.arange(n_mol, dtype=int))
+    u.trajectory = mda.coordinates.memory.MemoryReader(
+        pos, order="fac",
+        dimensions=np.array([box, box, box, 90.0, 90.0, 90.0], dtype=np.float32))
+    mdt = MDTrajectory.from_universe(u)
+    sel = select_frames(np.arange(n_frames, dtype=float) * 10.0)
+
+    lag, m_com, diag = dyn.compute_msd(mdt, u.atoms, sel, object="molecule",
+                                       remove_drift=False)
+    _, m_atom, _ = dyn.compute_msd(mdt, u.atoms, sel, object="atom",
+                                   remove_drift=False)
+    _, m_drift, _ = dyn.compute_msd(mdt, u.atoms, sel, object="molecule",
+                                    remove_drift=True)
+    assert diag["对象"] == "molecule", diag
+    assert diag["粒子数"] == n_mol, diag
+    # v 是 Å/**帧**，lag 是 ps：每帧 10 ps，故期望 MSD = (v·k)² = (v·τ/10)²
+    dt = 10.0
+    expect = (v * np.asarray(lag, dtype=float) / dt) ** 2
+    w = float(np.abs(m_com - expect).max())
+    assert w < 1e-6, (m_com, expect, w)
+    gain = float(np.nanmax(m_atom - m_com))
+    assert gain > 1e-3, (gain, "原子 MSD 应比质心 MSD 多出内部运动")
+    assert float(np.nanmax(np.abs(m_drift))) < 1e-9, m_drift
+    return (f"质心 MSD 与 v²τ² 最大偏差 {w:.1e} Å²；原子 MSD 额外含内部运动 "
+            f"(最大 +{gain:.3f} Å²)；完全同向平移时去漂移后 MSD≈0")
+
+
+def test_msd_anisotropy_reports_in_plane_vs_normal():
+    """各向异性：给定 D_x=D_y=4·D_z 的随机行走，D∥/D⊥ 应还原为 4。
+
+    这是"各向异性"这个数的**定义级**校验：MSD∥=MSD_x+MSD_y 按 2 维拟合
+    （MSD∥=4D∥t），MSD⊥=MSD_z 按 1 维拟合（MSD⊥=2D⊥t）。
+    """
+    rng = np.random.default_rng(5)
+    n, P = 600, 1000
+    step = rng.normal(scale=np.array([1.0, 1.0, 0.5]), size=(n, P, 3))
+    xyz = np.cumsum(step, axis=0).astype(np.float32)
+    u = mda.Universe.empty(P, n_residues=P, atom_resindex=list(range(P)),
+                           trajectory=True)
+    u.add_TopologyAttr("masses", [12.0] * P)
+    u.add_TopologyAttr("molnums", np.arange(P, dtype=int))
+    u.trajectory = mda.coordinates.memory.MemoryReader(
+        xyz, order="fac",
+        dimensions=np.array([2000.0, 2000.0, 2000.0, 90.0, 90.0, 90.0],
+                            dtype=np.float32))
+    mdt = MDTrajectory.from_universe(u)
+    sel = select_frames(np.arange(n, dtype=float) * 1.0)
+    res = dyn.analyze_msd(mdt, {"X": u.atoms}, sel, object="molecule",
+                          remove_drift=False, fit_fraction=(0.05, 0.5))
+    ratio = float(res.summary["X 各向异性 D∥/D⊥"])
+    rel = abs(ratio - 4.0) / 4.0
+    assert rel < 0.08, (ratio, "D∥/D⊥ 应约为 4")
+    return (f"σ=(1,1,0.5) 的随机行走 → D∥/D⊥ = {ratio:.2f}（期望 4.0，"
+            f"相对偏差 {rel * 100:.1f}%）")
+
+
+def test_contact_average_number_is_meaningful_and_probability_is_saturated():
+    """接触指标：`存在接触的帧比例` 恒为 1（无区分度），真正的量是「平均接触数」。
+
+    问题：该值定义为 ``mean(每帧接触对数 > 0)``。稠密体系里几万个原子对中永远
+    至少有一对落在 cutoff 内，因此它对任何体系都恒为 1（实测 AdK / 糖蛋白 / 46
+    三个体系全部为 1），**没有区分度**——不是算错了，是这个定义不成立。
+    断言：
+    1. 稠密体系中该值 == 1 且被显式标记为饱和、给出说明；
+    2. 新增的「平均接触数」与手工逐原子统计**完全一致**；
+    3. 「接触对占据率」覆盖的接触对数与手工统计一致，取值落在 (0, 1]。
+    """
+    d = _ctx()
+    mdt = d["mdt"]
+    u = mdt.universe
+    prot, wat = d["protein"], d["water"]
+    if prot.n_atoms == 0 or wat.n_atoms == 0:
+        return "跳过：体系中缺少蛋白或水"
+    sel = select_frames(mdt.times_ps, max_frames=4)
+    res = ifc.analyze_contacts(mdt, prot, wat, sel, cutoff=5.0)
+    assert float(res.summary["接触概率（存在接触的帧比例）"]) == 1.0, res.summary
+    assert str(res.summary["接触概率是否饱和"]).startswith("是"), res.summary
+    assert any("不能用来比较不同体系" in n for n in res.notes), res.notes
+
+    from MDAnalysis.lib.distances import capped_distance
+
+    from mdta.analysis.base import frame_iterator
+    n_all = int(u.atoms.n_atoms)
+    acc = np.zeros(prot.n_atoms)
+    seen: dict[int, int] = {}
+    nfr = 0
+    for _f, _t in frame_iterator(mdt, sel):
+        pa = np.asarray(prot.positions, dtype=float)
+        pb = np.asarray(wat.positions, dtype=float)
+        pr, _dd = capped_distance(pa, pb, max_cutoff=5.0, box=u.dimensions,
+                                  return_distances=True)
+        if pr.size:
+            np.add.at(acc, pr[:, 0], 1)
+            gi = (np.asarray(prot.indices)[pr[:, 0]] * n_all
+                  + np.asarray(wat.indices)[pr[:, 1]])
+            for key in np.unique(gi).tolist():
+                seen[int(key)] = seen.get(int(key), 0) + 1
+        nfr += 1
+    manual = acc / nfr
+    got = float(res.summary["平均接触数（每个 A 组原子）"])
+    assert abs(got - float(manual.mean())) < 1e-9, (got, float(manual.mean()))
+    assert int(res.summary["平均接触数为 0 的 A 组原子数"]) == int(np.sum(manual == 0))
+    n_seen = int(res.summary["出现过的不同接触对总数"])
+    assert n_seen == len(seen), (n_seen, len(seen))
+    n_full = sum(1 for v in seen.values() if v == nfr)
+    assert int(res.summary["始终接触（占据率 = 1）的接触对数"]) == n_full, n_full
+    assert n_full < n_seen, "不应所有接触对都始终存在（否则占据率同样无区分度）"
+    return (f"存在接触的帧比例={res.summary['接触概率（存在接触的帧比例）']}（已标记饱和）；"
+            f"平均接触数={got:.3f} 与手工完全一致；"
+            f"接触对 {n_seen:,} 个，其中始终接触 {n_full:,} 个")
+
+
+def test_end_to_end_distance_uses_bond_graph_ends():
+    """端到端距离：链端必须由键连接图/主链端基确定，而不是"首尾原子"。
+
+    旧口径取 ``ag[[0, -1]]``（所选原子组里索引最小与最大的两个原子）。对蛋白它是
+    文件里的第一个原子与最后一个原子（碰巧接近端基，但纯属偶然）；对含多个分子的
+    组分则完全没有意义。断言：
+    1. 识别出的链端与"首尾原子"可以是不同的原子（并报出两者差异）；
+    2. 新的 R_ee 与手工按识别出的端原子算出的距离**逐帧一致**；
+    3. ``ends="selection"`` 能复现旧口径（接口兼容）。
+    """
+    d = _ctx()
+    mdt = d["mdt"]
+    u = mdt.universe
+    prot = d["protein"]
+    sel = d["sel"]
+    info = conf.bond_graph_ends(prot)
+    assert info["ok"] and info["ends"] is not None, info
+    e1, e2 = int(info["ends"][0]), int(info["ends"][1])
+
+    res = conf.analyze_end_to_end(mdt, prot, sel)
+    mine = res.curves_of(0)[0].y
+    pair = u.atoms[[e1, e2]]
+    manual = np.empty(len(sel.indices))
+    for k, i in enumerate(sel.indices):
+        u.trajectory[int(i)]
+        p = positions_for(pair, unwrap=True)
+        manual[k] = np.linalg.norm(p[1] - p[0])
+    worst = float(np.abs(mine - manual).max())
+    assert worst < 1e-9, worst
+
+    # 旧口径（首尾原子）作为对照：两者是**不同**的原子对，数值也不同
+    old_pair = (int(prot.indices[0]), int(prot.indices[-1]))
+    res_old = conf.analyze_end_to_end(mdt, prot, sel, ends="selection")
+    old = float(np.nanmean(res_old.curves_of(0)[0].y))
+    new = float(np.nanmean(mine))
+    assert res.summary["链端来源"] != res_old.summary["链端来源"]
+    return (f"链端 {info.get('method')}：{res.summary.get('链端原子')} → "
+            f"R_ee={new:.3f} Å；旧口径（首尾原子 {old_pair[0]}/{old_pair[1]}）"
+            f"={old:.3f} Å（差 {abs(new - old) / old * 100:.1f}%）；"
+            f"逐帧与手工最大偏差 {worst:.1e} Å")
+
+
+def test_rg_per_molecule_for_multi_molecule_group():
+    """Rg 按分子：多分子组分的"整组 Rg"不是"分子有多大"。
+
+    合成体系：3 个正方形刚性分子（边长 a、2a、3a），各自 Rg = 边长/√2，
+    分子之间相距 100 Å。于是
+    1. 逐分子 Rg 必须精确等于解析值 (a+2a+3a)/√2/… 的平均；
+    2. 整组 Rg 远大于单分子 Rg（这就是 1.0.0 会把两者混为一谈的地方）。
+    """
+    a = 2.0
+    centers = [0.0, 100.0, 200.0]
+    pos = []
+    res_expected = []
+    for m, (c, side) in enumerate(zip(centers, (a, 2 * a, 3 * a))):
+        s = side
+        pos += [[c, 0.0, 0.0], [c + s, 0.0, 0.0], [c + s, s, 0.0], [c, s, 0.0]]
+        res_expected.append(side / np.sqrt(2.0))
+    n_atoms = len(pos)
+    n_mol = 3
+    block = np.asarray(pos, dtype=np.float32)[None, :, :]
+    u = mda.Universe.empty(n_atoms, n_residues=n_mol,
+                           atom_resindex=[m for m in range(n_mol) for _ in range(4)],
+                           trajectory=True)
+    u.add_TopologyAttr("masses", [12.0] * n_atoms)
+    u.add_TopologyAttr("molnums", np.arange(n_mol, dtype=int))
+    u.add_TopologyAttr("bonds", [(4 * m + i, 4 * m + (i + 1) % 4)
+                                 for m in range(n_mol) for i in range(4)])
+    u.trajectory = mda.coordinates.memory.MemoryReader(
+        np.repeat(block, 2, axis=0), order="fac",
+        dimensions=np.array([500.0, 500.0, 500.0, 90.0, 90.0, 90.0], dtype=np.float32))
+    mdt = MDTrajectory.from_universe(u)
+    sel = select_frames(np.array([0.0, 1.0]))
+    res = conf.analyze_rg(mdt, u.atoms, sel, label="X")
+
+    assert int(res.summary["分子数"]) == n_mol, res.summary
+    got = float(res.summary["单分子 Rg 平均 (Å)"])
+    expect = float(np.mean(res_expected))
+    assert abs(got - expect) < 1e-5, (got, expect)
+    whole = float(res.summary["Rg mean"])
+    assert whole > 5.0 * got, (whole, got, "整组 Rg 应远大于单分子 Rg")
+    assert len(res.curves_of(2)) >= 1, "缺少逐分子 Rg 面板"
+    return (f"3 个分子（边长 {a:g}/{2 * a:g}/{3 * a:g} Å）：单分子 Rg 平均 "
+            f"{got:.4f} Å（解析值 {expect:.4f}）；整组 Rg {whole:.2f} Å "
+            f"= 单分子的 {whole / got:.1f} 倍")
+
+
+def test_ree_refuses_ring_and_handles_linear_chain():
+    """R_ee 的边界：线形链给出精确端距；**环状分子必须拒绝**而不是硬算。
+
+    合成体系：① 5 原子直链（键 0-1-2-3-4），两端相距 8 Å；
+    ② 6 元环（键 0-1-…-5-0），每个原子度均为 2 → 没有端基。
+    断言：直链 R_ee == 8 Å 且端原子就是 0 与 4；环状体系
+    「R_ee 是否可定义」= 否、没有 R_ee 曲线、原因里说明是环状。
+    """
+    # ---- 直链
+    lin = np.array([[0.0, 0, 0], [2.0, 0, 0], [4.0, 0, 0], [6.0, 0, 0], [8.0, 0, 0]],
+                   dtype=np.float32)
+    u1 = mda.Universe.empty(5, n_residues=1, atom_resindex=[0] * 5, trajectory=True)
+    u1.add_TopologyAttr("masses", [12.0] * 5)
+    u1.add_TopologyAttr("molnums", [0])
+    u1.add_TopologyAttr("bonds", [(0, 1), (1, 2), (2, 3), (3, 4)])
+    u1.trajectory = mda.coordinates.memory.MemoryReader(
+        lin[None, :, :], order="fac",
+        dimensions=np.array([100.0, 100.0, 100.0, 90.0, 90.0, 90.0], dtype=np.float32))
+    mdt1 = MDTrajectory.from_universe(u1)
+    sel1 = select_frames(np.array([0.0]))
+    info1 = conf.bond_graph_ends(u1.atoms)
+    assert info1["ok"] and list(info1["ends"]) == [0, 4], info1
+    r1 = conf.analyze_end_to_end(mdt1, u1.atoms, sel1)
+    v1 = float(r1.curves_of(0)[0].y[0])
+    assert abs(v1 - 8.0) < 1e-5, v1
+
+    # ---- 6 元环（正六边形，边长 1.5 Å）
+    ang = np.arange(6) * (np.pi / 3.0)
+    ring = np.stack([1.5 * np.cos(ang), 1.5 * np.sin(ang), np.zeros(6)], axis=1)
+    u2 = mda.Universe.empty(6, n_residues=1, atom_resindex=[0] * 6, trajectory=True)
+    u2.add_TopologyAttr("masses", [12.0] * 6)
+    u2.add_TopologyAttr("molnums", [0])
+    u2.add_TopologyAttr("bonds", [(i, (i + 1) % 6) for i in range(6)])
+    u2.trajectory = mda.coordinates.memory.MemoryReader(
+        ring.astype(np.float32)[None, :, :], order="fac",
+        dimensions=np.array([100.0, 100.0, 100.0, 90.0, 90.0, 90.0], dtype=np.float32))
+    mdt2 = MDTrajectory.from_universe(u2)
+    info2 = conf.bond_graph_ends(u2.atoms)
+    assert not info2["ok"], info2
+    assert "环状" in str(info2["reason"]), info2
+    r2 = conf.analyze_end_to_end(mdt2, u2.atoms, select_frames(np.array([0.0])))
+    assert r2.summary["R_ee 是否可定义"] == "否", r2.summary
+    assert len(r2.curves) == 0, "环状分子不应给出 R_ee 曲线"
+    return (f"直链 R_ee = {v1:.3f} Å（端原子 {list(info1['ends'])}）；"
+            f"6 元环：度为 1 的原子 {info2['n_degree1']} 个 → 拒绝给出 R_ee"
+            f"（{r2.summary['原因'][:28]}…）")
+
+
+def _synth_chain(n_res: int, n_mol: int = 1, *, alternate: bool = False):
+    """合成"每残基 2 个连接原子"的链：残基 i 的连接原子对是 (2i, 2i+1)。
+
+    ``alternate=True`` 时奇数残基的矢量沿 y、偶数沿 x（用于构造已知 S 的分布）。
+    """
+    import MDAnalysis as mda
+
+    pos = []
+    for m in range(n_mol):
+        y0 = 50.0 * m
+        for i in range(n_res):
+            if alternate and (i % 2 == 1):
+                pos += [[i * 2.0, y0, 0.0], [i * 2.0, y0 + 1.0, 0.0]]
+            else:
+                pos += [[i * 2.0, y0, 0.0], [i * 2.0 + 1.0, y0, 0.0]]
+    n_at = n_res * n_mol * 2
+    u = mda.Universe.empty(n_at, n_residues=n_res * n_mol,
+                           atom_resindex=[r for r in range(n_res * n_mol)
+                                          for _ in range(2)], trajectory=True)
+    u.add_TopologyAttr("masses", [12.0] * n_at)
+    u.add_TopologyAttr("elements", ["C"] * n_at)
+    u.add_TopologyAttr("resnames", ["MONO"] * (n_res * n_mol))
+    u.add_TopologyAttr("molnums", np.repeat(np.arange(n_mol), n_res))
+    bonds = []
+    for m in range(n_mol):
+        base = m * n_res * 2
+        for i in range(n_res):
+            bonds.append((base + 2 * i, base + 2 * i + 1))          # 残基内
+            if i + 1 < n_res:
+                bonds.append((base + 2 * i + 1, base + 2 * i + 2))  # 跨残基
+    u.add_TopologyAttr("bonds", bonds)
+    u.trajectory = mda.coordinates.memory.MemoryReader(
+        np.asarray(pos, dtype=np.float32)[None, :, :], order="fac",
+        dimensions=np.array([400.0, 400.0, 400.0, 90.0, 90.0, 90.0], dtype=np.float32))
+    return MDTrajectory.from_universe(u), u
+
+
+def test_orientation_uses_chemical_repeat_units():
+    """取向链段默认必须是**化学重复单元**，且 S 在已知分布上给出理论值。
+
+    合成体系：14 个残基的链，每个残基 2 个"连接原子"（连着相邻残基），
+    于是中间的 12 个残基各给一个重复单元矢量。
+    1. 链段原子对必须**精确等于**手算的连接原子对 (2i, 2i+1)；
+    2. 全部平行 → S = 1；奇偶残基互相垂直 → S = 0.25（取向张量的解析值）。
+    """
+    mdt, u = _synth_chain(14)
+    sel = select_frames(np.array([0.0]))
+    pairs, info = cry.repeat_unit_pairs(u.atoms)
+    expect = np.array([[2 * i, 2 * i + 1] for i in range(1, 13)], dtype=int)
+    assert np.array_equal(pairs, expect), (pairs.tolist(), expect.tolist())
+    assert info["n_skipped_terminal"] == 2, info
+
+    r = cry.analyze_orientation(mdt, u.atoms, sel, label="合成")
+    assert r.summary["链段来源"] == "chemical repeat unit", r.summary
+    assert int(r.summary["链段数"]) == 12, r.summary
+    s_align = float(r.summary["S mean"])
+    assert abs(s_align - 1.0) < 1e-6, s_align
+
+    mdt2, u2 = _synth_chain(14, alternate=True)
+    r2 = cry.analyze_orientation(mdt2, u2.atoms, select_frames(np.array([0.0])), label="合成")
+    s_alt = float(r2.summary["S mean"])
+    assert abs(s_alt - 0.25) < 1e-6, (s_alt, "奇偶垂直分布的 S 应为 0.25")
+    return (f"链段 = 化学重复单元（{pairs.shape[0]} 个，与手算连接原子对完全一致）；"
+            f"全平行 S = {s_align:.4f}；奇偶垂直 S = {s_alt:.4f}（解析值 0.25）")
+
+
+def test_orientation_ensemble_and_refuses_meaningless_cases():
+    """取向必须做**多分子集合平均**；链段不足时拒绝给数而不是给假值。
+
+    1. 2 个分子 × 14 残基 → 24 个链段、报告分子数 = 2（不是"只算一条链"）；
+    2. 独立小分子（无跨残基连接键）→ 取向**拒绝给数**，多分量有序度指数
+       也必须为 nan 且标记"不可定义"（不能给 0，0 会被读成"完全无序"）。
+    """
+    mdt, u = _synth_chain(14, n_mol=2)
+    r = cry.analyze_orientation(mdt, u.atoms, select_frames(np.array([0.0])), label="双分子")
+    assert int(r.summary["链段所属分子数"]) == 2, r.summary
+    assert int(r.summary["链段数"]) == 24, r.summary
+    assert any("集合平均" in n for n in r.notes), r.notes
+
+    # 独立小分子：每个分子 3 个原子、分子之间没有键
+    import MDAnalysis as mda
+    pos = []
+    for m in range(4):
+        pos += [[20.0 * m, 0.0, 0.0], [20.0 * m + 1.5, 0.0, 0.0], [20.0 * m, 1.5, 0.0]]
+    u2 = mda.Universe.empty(12, n_residues=12,
+                            atom_resindex=list(range(12)), trajectory=True)
+    u2.add_TopologyAttr("masses", [12.0] * 12)
+    u2.add_TopologyAttr("elements", ["C"] * 12)
+    u2.add_TopologyAttr("resnames", ["SOLV"] * 12)
+    u2.add_TopologyAttr("molnums", list(range(12)))
+    u2.add_TopologyAttr("bonds", [(3 * m, 3 * m + 1) for m in range(4)]
+                        + [(3 * m, 3 * m + 2) for m in range(4)])
+    u2.trajectory = mda.coordinates.memory.MemoryReader(
+        np.asarray(pos, dtype=np.float32)[None, :, :], order="fac",
+        dimensions=np.array([200.0, 200.0, 200.0, 90.0, 90.0, 90.0], dtype=np.float32))
+    mdt2 = MDTrajectory.from_universe(u2)
+    sel2 = select_frames(np.array([0.0]))
+    r2 = cry.analyze_orientation(mdt2, u2.atoms, sel2, label="小分子")
+    assert r2.summary["取向分析是否可定义"] == "否", r2.summary
+    assert "S mean" not in r2.summary, r2.summary
+    assert len(r2.curves) == 0, "拒绝时应没有曲线"
+
+    o2 = cry.analyze_structural_order(mdt2, u2.atoms, sel2, label="小分子")
+    assert o2.summary["指数是否可定义"] == "否", o2.summary
+    val = o2.summary.get("多分量有序度指数 平均")
+    assert val is None or (isinstance(val, float) and np.isnan(val)), val
+    return (f"2 分子 × 14 残基 → {r.summary['链段数']} 个链段、"
+            f"{r.summary['链段所属分子数']} 个分子（集合平均）；"
+            f"独立小分子：取向与指数均标记不可定义、无曲线、指数为 nan")
+
+
+def _synth_two_component(*, mixed: bool, n: int = 40, box: float = 80.0):
+    """沿 z 方向的两组分体系：``mixed=True`` 均匀交错，``False`` 上下分层。"""
+    import MDAnalysis as mda
+
+    za = np.linspace(1.0, box - 1.0, n)
+    pos_a = np.stack([np.full(n, 10.0), np.full(n, 10.0), za], axis=1)
+    if mixed:
+        # 均匀交错：B 平移半个格点 → 两组分沿 z 都是平分布
+        zb = za + (box / n) / 2.0
+    else:
+        # 上下分层：A 占下半盒、B 占上半盒 → 真正的台阶
+        zb = np.linspace(box / 2.0 + 1.0, box - 1.0, n)
+        za = np.linspace(1.0, box / 2.0 - 1.0, n)
+        pos_a = np.stack([np.full(n, 10.0), np.full(n, 10.0), za], axis=1)
+    pos_b = np.stack([np.full(n, 20.0), np.full(n, 10.0), zb], axis=1)
+    pos = np.concatenate([pos_a, pos_b], axis=0)
+    n_at = 2 * n
+    u = mda.Universe.empty(n_at, n_residues=n_at,
+                           atom_resindex=list(range(n_at)), trajectory=True)
+    u.add_TopologyAttr("masses", [12.0] * n_at)
+    u.add_TopologyAttr("elements", ["C"] * n_at)
+    u.add_TopologyAttr("resnames", ["A"] * n + ["B"] * n)
+    u.add_TopologyAttr("molnums", list(range(n_at)))
+    u.trajectory = mda.coordinates.memory.MemoryReader(
+        pos.astype(np.float32)[None, :, :], order="fac",
+        dimensions=np.array([box, box, box, 90.0, 90.0, 90.0], dtype=np.float32))
+    mdt = MDTrajectory.from_universe(u)
+    return mdt, u
+
+
+def test_interface_width_refuses_uniform_mixture():
+    """界面宽度：**未分层**的体系必须拒绝套用 1D 台阶模型，真台阶仍给数。
+
+    1.0.0 的问题：均匀混合体系里两组分密度都只在体相值附近涨落，涨落曲线互相
+    穿越同样产生"交点"，于是把涨落尺度当成界面宽度报出来（实测 AdK 均匀溶液
+    被报成「高（板层体系…）」并给出 36.6 Å，而盒长只有 80 Å）。
+    断言：均匀交错 → 判不适用、宽度/位置键被移除、只留如实标注的涨落尺度；
+    同样两组分上下分层 → 判适用并给出正常量级的宽度。
+    """
+    sel = select_frames(np.array([0.0]))
+    mdt_mix, u_mix = _synth_two_component(mixed=True)
+    r_mix = ifc.analyze_interface_width(mdt_mix, {"A": u_mix.select_atoms("resname A"),
+                                                 "B": u_mix.select_atoms("resname B")},
+                                        sel, pair=("A", "B"), axis=2, nbins=80,
+                                        mode="number")
+    assert r_mix.summary["1D 台阶模型是否适用"] == "否", r_mix.summary
+    assert r_mix.summary["界面宽度是否可用"] == "否", r_mix.summary
+    assert not any(k == "界面宽度 10-90 (Å)" for k in r_mix.summary), r_mix.summary
+    assert not any(k.startswith("界面位置 (Å)") for k in r_mix.summary), r_mix.summary
+    assert "不适用" in str(r_mix.summary["界面判据可靠性"]), r_mix.summary
+
+    mdt_slab, u_slab = _synth_two_component(mixed=False)
+    r_slab = ifc.analyze_interface_width(mdt_slab, {"A": u_slab.select_atoms("resname A"),
+                                                    "B": u_slab.select_atoms("resname B")},
+                                         sel, pair=("A", "B"), axis=2, nbins=80,
+                                         mode="number")
+    assert r_slab.summary["1D 台阶模型是否适用"] == "是", r_slab.summary
+    w = float(r_slab.summary["界面宽度 10-90 (Å)"])
+    assert np.isfinite(w) and 0.0 < w < 0.25 * 80.0, w
+    return (f"均匀交错体系：判「不适用」、宽度与位置键已移除；"
+            f"分层体系：判「适用」，界面宽度 {w:.2f} Å")
+
+
+def test_density_labels_its_own_convention():
+    """密度：结果里必须自带口径标注（质量密度 g/cm³ 还是数密度 1/Å³）。
+
+    两种口径数值差一个摩尔质量量级（水的体相：0.997 g/cm³ vs 0.0334 个/Å³），
+    导出成表以后只看"体相密度 0.168"无法分辨，因此口径必须写进结果本身。
+    """
+    d = _ctx()
+    mdt = d["mdt"]
+    sel = select_frames(mdt.times_ps, max_frames=2)
+    groups = {"water": d["water"]}
+    r_mass = ifc.analyze_density(mdt, groups, sel, axis=2, nbins=40, mode="mass")
+    r_num = ifc.analyze_density(mdt, groups, sel, axis=2, nbins=40, mode="number")
+    assert r_mass.summary["密度口径"].startswith("质量密度"), r_mass.summary
+    assert r_num.summary["密度口径"].startswith("数密度"), r_num.summary
+    assert r_mass.summary["密度单位"] == "g/cm³", r_mass.summary
+    assert r_num.summary["密度单位"] == "1/Å³", r_num.summary
+    bm = float(r_mass.summary["water 体相密度"])
+    bn = float(r_num.summary["water 体相密度"])
+    assert 0.9 < bm < 1.1, bm
+    # 数密度 ×（该组的**每原子平均质量**）/ N_A 应回到质量密度。
+    # 注意这里要按原子平均质量换算：water 组是"水分子里的全部原子"，不是分子数密度。
+    m_avg = float(np.mean(np.asarray(d["water"].masses, dtype=float)))
+    conv = bn * m_avg / 0.602214076
+    assert abs(conv - bm) / bm < 0.02, (conv, bm, m_avg)
+    return (f"质量密度 {bm:.4f} g/cm³ ↔ 数密度 {bn:.4f} 1/Å³"
+            f"（按每原子平均质量 {m_avg:.3f} u 换算，相对偏差 "
+            f"{abs(conv - bm) / bm * 100:.2f}%），口径与单位已写入结果")
+
+
+def test_contact_modes_partition_pairs_exactly():
+    """接触配对模式：inter / intra 必须**穷尽且互斥**，且 total = inter + intra。
+
+    用"水×水"做验证最干净：4 点水模型每个原子有 3 个同分子邻居、且都在 cutoff 内，
+    因此 intra 模式下「每个原子的平均接触数」必须**恰好等于 3.000**——这是一个
+    可精确预期的物理量，而不是"看起来差不多"。
+    """
+    d = _ctx()
+    mdt = d["mdt"]
+    w = d["water"]
+    if w is None or w.n_atoms == 0:
+        return "跳过：体系中找不到水"
+    sel = select_frames(mdt.times_ps, max_frames=2)
+    out = {}
+    for name in ("inter", "intra", "total"):
+        r = ifc.analyze_contacts(mdt, w, w, sel, cutoff=5.0, mode=name)
+        out[name] = (float(r.summary["平均接触对数"]),
+                     float(r.summary["平均接触数（每个 A 组原子）"]),
+                     float(r.summary["分子内配对占比"]))
+        assert r.summary["配对模式"] == name, r.summary
+    assert abs(out["inter"][2]) < 1e-12, out["inter"]
+    assert abs(out["intra"][2] - 1.0) < 1e-12, out["intra"]
+    recon = out["inter"][0] + out["intra"][0]
+    assert abs(recon - out["total"][0]) / out["total"][0] < 1e-9, (recon, out["total"])
+    assert abs(out["intra"][1] - 3.0) < 1e-9, (out["intra"][1], "分子内邻居数应为 3")
+    return (f"inter {out['inter'][0]:,.0f} + intra {out['intra'][0]:,.0f} = "
+            f"total {out['total'][0]:,.0f} 对/帧（精确相加）；"
+            f"intra 模式每个原子平均接触数 = {out['intra'][1]:.3f}（4 点水模型应恰为 3）")
+
+
+def test_diffusion_coefficient_reports_trustworthy_error_bar():
+    """扩散系数必须带**标准误**，而且这个标准误要真的覆盖真值。
+
+    合成布朗运动：每步每轴方差 σ²、步长 dt → ``D_true = σ²/(2·dt)``（三维下
+    MSD = 6Dt）。断言：
+    1. |D − D_true| ≤ 3×报出的标准误（误差棒必须"够用"）；
+    2. 标准误来自**分块平均**（经验散布），不是只有拟合协方差；
+    3. 只用 OLS 协方差会**低估**（这正是加误差棒的理由）；
+    4. 相对标准误随分块数/轨迹长度是合理量级（0 < 相对标准误 < 100%）。
+    """
+    import MDAnalysis as mda
+
+    n_f, P, dt, sigma = 400, 300, 1.0, 0.2
+    rng = np.random.default_rng(4)
+    steps = rng.normal(scale=sigma, size=(n_f, P, 3))
+    xyz = np.cumsum(steps, axis=0).astype(np.float32)
+    u = mda.Universe.empty(P, n_residues=P, atom_resindex=list(range(P)),
+                           trajectory=True)
+    u.add_TopologyAttr("masses", [12.0] * P)
+    u.add_TopologyAttr("molnums", np.arange(P, dtype=int))
+    u.trajectory = mda.coordinates.memory.MemoryReader(
+        xyz, order="fac",
+        dimensions=np.array([2000.0, 2000.0, 2000.0, 90.0, 90.0, 90.0],
+                            dtype=np.float32))
+    mdt = MDTrajectory.from_universe(u)
+    sel = select_frames(np.arange(n_f, dtype=float) * dt)
+    res = dyn.analyze_msd(mdt, {"X": u.atoms}, sel, object="molecule",
+                          remove_drift=False, fit_fraction=(0.1, 0.9))
+
+    d_true = sigma ** 2 / (2.0 * dt) * 1e-8      # Å²/ps → m²/s
+    d = float(res.summary["X D (m²/s)"])
+    se = float(res.summary["X D 标准误 (m²/s)"])
+    rel = float(res.summary["X D 相对标准误"])
+    src = str(res.summary["X 标准误来源"])
+    assert np.isfinite(d) and d > 0, d
+    assert np.isfinite(se) and se > 0, se
+    assert "分块" in src, src
+    z = abs(d - d_true) / se
+    assert z <= 3.0, (d, d_true, se, z, "误差棒没覆盖真值")
+    assert 0.0 < rel < 1.0, rel
+
+    # OLS 协方差（残差独立假设）应明显小于分块经验散布 —— 这就是要加修正的理由
+    fit_ols = dyn.diffusion_coefficient(
+        np.arange(n_f, dtype=float) * dt,
+        np.asarray(res.curves_of(0)[0].y, dtype=float),
+        fit_fraction=(0.1, 0.9), dim=3, fit_method="ols", block_curves=None)
+    se_ols = float(fit_ols["D 标准误 (m²/s)"])
+    assert se_ols < se, (se_ols, se, "OLS 协方差应当低估")
+    return (f"D = {d:.4e} ± {se:.1e} m²/s（真值 {d_true:.4e}，偏差 {z:.2f}σ）；"
+            f"来源={src}，相对标准误 {rel * 100:.1f}%；"
+            f"OLS 协方差只给 {se_ols:.1e}（低估 {se / se_ols:.1f} 倍）")
+
+
+def test_contact_coordination_distribution_is_exact():
+    """配位数分布：水（4 点模型）在 intra 模式下必须是**恰好在 3 上的 δ 分布**。
+
+    每个水分子的原子恰有 3 个同分子邻居（OW/HW1/HW2/MW 两两相连），且都在 cutoff
+    内，所以「瞬时接触数」只能取 3 → 平均值 3.000、标准差 0.000、众数 3。
+    分子间模式则应是展宽的分布（标准差 > 0）。这把"分布"这一维信息锁死：
+    只报平均值时，两种完全不同的配位环境（均一 vs 高度异质）看起来一样。
+    """
+    d = _ctx()
+    mdt = d["mdt"]
+    w = d["water"]
+    if w is None or w.n_atoms == 0:
+        return "跳过：体系中找不到水"
+    sel = select_frames(mdt.times_ps, max_frames=2)
+    r_in = ifc.analyze_contacts(mdt, w, w, sel, cutoff=5.0, mode="intra")
+    r_bt = ifc.analyze_contacts(mdt, w, w, sel, cutoff=5.0, mode="inter")
+    assert abs(float(r_in.summary["瞬时接触数 平均"]) - 3.0) < 1e-9, r_in.summary
+    assert float(r_in.summary["瞬时接触数 标准差"]) < 1e-9, r_in.summary
+    assert abs(float(r_in.summary["瞬时接触数 众数"]) - 3.0) < 1e-9, r_in.summary
+    assert float(r_bt.summary["瞬时接触数 标准差"]) > 1.0, r_bt.summary
+    return (f"分子内：分布是 δ(3) → 平均 {r_in.summary['瞬时接触数 平均']:.3f}、"
+            f"标准差 {r_in.summary['瞬时接触数 标准差']:.2e}；"
+            f"分子间：平均 {r_bt.summary['瞬时接触数 平均']:.1f}、"
+            f"标准差 {r_bt.summary['瞬时接触数 标准差']:.1f}（明显展宽）")
+
+
+def test_notes_are_scoped_to_their_curve():
+    """说明信息按作用域归属：RDF 每对的说明必须标到对应曲线，全局说明不标。
+
+    为什么要这个：说明区现在是**动态**的——只显示与当前图表可见曲线相关的说明
+    （RDF 跑了 10 个配对、图例只勾 1 个 → 只显示那 1 个的说明）。前提是后端先把
+    "这条说明属于哪条曲线"标出来，否则前端只能把 10 份说明全堆出来。
+    """
+    from webapp.backend.serialize import result_to_json
+
+    d = _ctx()
+    mdt = d["mdt"]
+    w = d["water"]
+    ow = w.select_atoms("name OW")
+    if ow.n_atoms == 0:
+        return "跳过：体系中找不到水的 OW 原子"
+    sel = select_frames(mdt.times_ps, max_frames=3)
+    # 两个组分 → 三条配对曲线，说明天然会混在一起
+    res = ifc.analyze_rdf(mdt, {"W": w, "OW": ow}, sel, rmax=6.0, nbins=60, mode="total")
+    scope = res.notes_with_scope()
+    assert len(scope) == len(res.notes), (len(scope), len(res.notes))
+    tags = {s["curve"] for s in scope if s.get("curve")}
+    assert len(tags) >= 2, f"说明没有归属到多条曲线: {tags}"
+    for t, s in zip(res.notes, scope):
+        if s.get("curve"):
+            assert t.startswith(s["curve"]), (t[:40], s["curve"])
+    assert any(s.get("curve") is None for s in scope), "全局说明不该被标上曲线"
+    j = result_to_json(res)
+    assert len(j.get("note_meta", [])) == len(j["notes"]), "作用域没有随结果下发"
+    n_tag = sum(1 for s in scope if s.get("curve"))
+    return (f"{n_tag} 条说明归属到曲线 {sorted(tags)}，"
+            f"{len(scope) - n_tag} 条为全局说明；作用域已随结果下发")
+
+
+# ------------------------------------------------- 时间轴：快路径与副作用
+class _FakeTS:
+    """替身 TimeStep：只提供 ``time`` / ``frame``。"""
+
+    def __init__(self, time_, frame):
+        self.time = float(time_)
+        self.frame = int(frame)
+
+
+class _FakeTraj:
+    """替身 trajectory：**记录被访问过哪些帧**，用来证明"没有全扫"。"""
+
+    def __init__(self, times, dt):
+        self._t = [float(x) for x in times]
+        self.dt = float(dt)
+        self.ts = _FakeTS(self._t[0], 0)
+        self.reads = []
+
+    def __getitem__(self, i):
+        self.reads.append(int(i))
+        self.ts = _FakeTS(self._t[int(i)], int(i))
+        return self.ts
+
+    def __len__(self):
+        return len(self._t)
+
+
+class _FakeUniverse:
+    def __init__(self, times, dt):
+        self.trajectory = _FakeTraj(times, dt)
+
+
+def _fake_mdt(times, dt):
+    mdt = MDTrajectory(topology=None, trajectory=None)
+    mdt._universe = _FakeUniverse(times, dt)
+    return mdt
+
+
+def test_time_range_is_constant_cost_and_exact():
+    """首末时刻必须 O(1) 拿到，且调用后当前帧要复原。
+
+    XTC 的 reader 没有 ``.times``，取一次时刻要读一整帧坐标：
+    46 体系（10001 帧 / 1.7 GB）逐帧要 28 s。早期 ``total_time_ps``
+    每次都走这条路，"读取完成"后静默 50 s 才返回，就是要在这里挡住。
+    """
+    times = np.arange(0.0, 100010.0, 10.0)          # 10001 帧
+    mdt = _fake_mdt(times, 10.0)
+    assert mdt.n_frames == 10001, mdt.n_frames
+    rng = mdt.time_range_ps()
+    assert rng == (0.0, 100000.0), rng
+    reads = list(mdt.universe.trajectory.reads)
+    assert len(reads) <= 8, f"读了 {len(reads)} 帧（{reads[:12]}…），说明不是 O(1)"
+    assert mdt.total_time_ps == 100000.0, mdt.total_time_ps
+    # 副作用：调用前停在哪一帧，调用后还得在哪一帧
+    m2 = _fake_mdt(times, 10.0)
+    m2.universe.trajectory[123]
+    m2.time_range_ps()
+    assert m2.universe.trajectory.ts.frame == 123, m2.universe.trajectory.ts.frame
+    return (f"首末时刻只读 {len(reads)} 帧即得 ({rng[0]:g}, {rng[1]:g}) ps，"
+            f"调用后当前帧复原")
+
+
+def test_times_fast_path_equals_full_scan():
+    """均匀时间轴走解析构造，结果必须与逐帧读出的**完全一致**，并命中缓存。"""
+    times = np.arange(0.0, 101.0, 10.0)
+    mdt = _fake_mdt(times, 10.0)
+    fast = np.array(mdt.times_ps, dtype=float)
+    assert np.array_equal(fast, times), (fast, times)
+    assert len(mdt.universe.trajectory.reads) <= 10, mdt.universe.trajectory.reads
+    n_before = len(mdt.universe.trajectory.reads)
+    assert mdt.times_ps is mdt.times_ps
+    assert len(mdt.universe.trajectory.reads) == n_before, "第二次访问不该再读帧"
+    return f"{fast.size} 帧解析构造与逐帧一致，二次访问零读取"
+
+
+def test_times_rejects_nonuniform_grid():
+    """非等差时间轴必须挡下并回退精确逐帧，否则帧选择会整体错位。"""
+    bad = [0.0, 10.0, 20.0, 30.0, 100.0]            # 末帧与 dt 不自洽
+    m1 = _fake_mdt(bad, 10.0)
+    assert np.array_equal(np.array(m1.times_ps, dtype=float), np.array(bad))
+    assert m1._uniform_times_ps(0.0, 100.0) is None
+
+    jump = [0.0, 10.0, 55.0, 30.0, 40.0]            # 首末自洽、中间跳变
+    m2 = _fake_mdt(jump, 10.0)
+    assert m2._uniform_times_ps(0.0, 40.0) is None, "中间跳变被误采信"
+    assert np.array_equal(np.array(m2.times_ps, dtype=float), np.array(jump))
+
+    ok = [0.0, 10.0, 20.0, 30.0, 40.0]              # 真正均匀 -> 采信
+    m3 = _fake_mdt(ok, 10.0)
+    got = m3._uniform_times_ps(0.0, 40.0)
+    assert got is not None and np.array_equal(got, np.array(ok))
+
+    m4 = _fake_mdt([7.5], 10.0)                     # 单帧
+    assert list(m4.times_ps) == [7.5]
+    return "末帧不自洽/中间跳变被挡下并回退逐帧，均匀与单帧正确"
+
+
+def test_systeminfo_time_range_matches_full_scan():
+    """体系信息的首末时刻来自 O(1) 快路径，且与逐帧读出的一致。"""
+    mdt = _load()["mdt"]
+    rng = mdt.time_range_ps()
+    if rng is None:
+        return "跳过：轨迹没有时间列"
+    exact = np.asarray([ts.time for ts in mdt.universe.trajectory], dtype=float)
+    if exact.size == 0:
+        return "跳过：轨迹没有时间列"
+    dev = float(np.max(np.abs(np.array([rng[0], rng[1]], dtype=float)
+                              - np.array([exact[0], exact[-1]], dtype=float))))
+    # XTC 的时间按 float32 存，10⁵ ps 量级的量化台阶约 0.008 ps
+    assert dev < 1e-3, f"首末时刻偏差 {dev:.3e} ps"
+    info = describe_system(mdt)
+    assert info.first_time_ps == rng[0] and info.last_time_ps == rng[1], (
+        info.first_time_ps, info.last_time_ps, rng
+    )
+    assert abs(mdt.total_time_ps - (exact[-1] - exact[0])) < 1e-3
+    return (f"{mdt.n_frames} 帧：快路径首末与逐帧一致（偏差 {dev:.1e} ps），"
+            f"总时长 {mdt.total_time_ps:.1f} ps")
+
+
 def main(argv: list[str] | None = None) -> int:
     global _CLI_ARGS
     try:

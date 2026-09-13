@@ -8,7 +8,8 @@ import { useEffect, useRef } from 'react'
 import * as echarts from 'echarts'
 import { buildOption } from '../chartOption'
 
-export default function ChartView({ result, panelIndex, height = '100%' }) {
+export default function ChartView({ result, panelIndex, height = '100%',
+                                   onVisibleChange }) {
   const boxRef = useRef(null)
   const chartRef = useRef(null)
 
@@ -16,6 +17,11 @@ export default function ChartView({ result, panelIndex, height = '100%' }) {
   useEffect(() => {
     if (!boxRef.current) return undefined
     const chart = echarts.init(boxRef.current, null, { renderer: 'canvas' })
+    // 图例点选 → 上报"当前可见的曲线"，供右侧说明区动态过滤
+    chart.on('legendselectchanged', (ev) => {
+      const vis = Object.entries(ev.selected || {}).filter(([, v]) => v).map(([k]) => k)
+      onVisibleChange?.(vis)
+    })
     chartRef.current = chart
 
     // 折叠操作台时容器会连续变化 ~240ms，ResizeObserver 每帧都会回调。
@@ -51,6 +57,7 @@ export default function ChartView({ result, panelIndex, height = '100%' }) {
     if (!chart || !result) return
     chart.clear()
     chart.setOption(buildOption(result, panelIndex), true)
+    onVisibleChange?.(null)   // 换图/换面板时清掉上一次的图例筛选
   }, [result, panelIndex])
 
   return <div ref={boxRef} className="chart-box" style={{ height }} />

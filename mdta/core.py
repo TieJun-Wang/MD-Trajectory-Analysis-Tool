@@ -64,6 +64,11 @@ class AnalysisResult:
     curves: list[Curve] = field(default_factory=list)
     summary: "OrderedDict[str, Any]" = field(default_factory=OrderedDict)
     notes: list[str] = field(default_factory=list)
+    #: 与 ``notes`` 一一对应的**作用域标签**：``{"panel": int|None, "curve": str|None}``。
+    #: 前端据此只显示与"当前图表可见曲线"相关的说明——例如 RDF 跑了 10 个配对、
+    #: 图例里只勾了 1 个，说明区就只显示那 1 个配对的说明，而不是堆 10 份。
+    #: 未显式指定时由 :meth:`notes_with_scope` 按**曲线标签前缀**自动归属。
+    note_meta: list[dict] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
 
     # ---------------------------------------------------------------- 构造
@@ -83,8 +88,42 @@ class AnalysisResult:
     def add_summary(self, key: str, value: Any) -> None:
         self.summary[key] = value
 
-    def add_notes(self, *lines: str) -> None:
-        self.notes.extend(str(x) for x in lines)
+    def add_notes(self, *lines: str, panel: int | None = None,
+                  curve: str | None = None) -> None:
+        """追加说明。``panel`` / ``curve`` 指定这条说明属于哪张图 / 哪条曲线；
+        不指定时视为**全局说明**（与具体曲线无关，任何图表下都显示）。"""
+        for x in lines:
+            self.notes.append(str(x))
+            self.note_meta.append({"panel": panel, "curve": curve})
+
+    def notes_with_scope(self) -> list[dict]:
+        """返回与 ``notes`` 等长的作用域标签（缺省项按曲线标签前缀自动归属）。
+
+        为什么用自动归属：说明的写法基本都是"以曲线标签开头"
+        （``W-W 在 r ≤ 6 Å 内没有显著的结构峰…``、``W 的扩散是近似各向同性的…``），
+        逐个调用点手写作用域既啰嗦又容易漏。这里统一按标签前缀匹配，
+        并且**先试长标签**（``W-W`` 优先于 ``W``），避免短标签抢走长标签的说明。
+        曲线标签形如 ``W (分子质心, 11,084 个)`` 时，同时试它的"短形式"（去掉括号部分）。
+        """
+        cands: list[tuple[str, str]] = []
+        for c in self.curves:
+            lb = str(c.label)
+            cands.append((lb, lb))
+            short = lb.split(" (")[0]
+            if short and short != lb:
+                cands.append((short, lb))
+        cands.sort(key=lambda kv: -len(kv[0]))
+        out: list[dict] = []
+        for i, t in enumerate(self.notes):
+            meta = dict(self.note_meta[i]) if i < len(self.note_meta) \
+                else {"panel": None, "curve": None}
+            if not meta.get("curve"):
+                for key, full in cands:
+                    if t.startswith(key):
+                        meta["curve"] = full
+                        break
+            out.append(meta)
+        return out
 
     # ---------------------------------------------------------------- 查询
     @property
