@@ -63,6 +63,7 @@ from mdta.analysis import interface as ifc                  # noqa: E402
 from mdta.analysis.base import positions_for                # noqa: E402
 from mdta.io import MDTrajectory, load_trajectory           # noqa: E402
 from mdta.preprocess import select_frames                   # noqa: E402
+from mdta.pipeline import Analyzer, sort_by_estimate         # noqa: E402
 from mdta.selection import classify_residues, select        # noqa: E402
 from mdta.systeminfo import describe_system                 # noqa: E402
 
@@ -1772,6 +1773,82 @@ def test_systeminfo_time_range_matches_full_scan():
     assert abs(mdt.total_time_ps - (exact[-1] - exact[0])) < 1e-3
     return (f"{mdt.n_frames} 帧：快路径首末与逐帧一致（偏差 {dev:.1e} ps），"
             f"总时长 {mdt.total_time_ps:.1f} ps")
+
+
+def test_estimate_times_is_measured_and_side_effect_free():
+    """预估用时：两点实测的算术要正确，噪声时偏保守，且不污染分析状态。
+
+    这里用**假计时**替换真实探测，把外推公式钉死；再用真实小体系验证
+    "帧数太少就拒绝预估"这条门槛（AdK 只有 10 帧，预估要跑 4 帧，
+    占比过高，不如直接跑）。
+    """
+    top, xtc = _CLI_ARGS[0] or TOP_DEFAULT, _CLI_ARGS[1] or XTRAJ_DEFAULT
+    az_ = Analyzer(top, xtc)
+    az_.auto_setup()
+    sel_before = az_.require_frames()
+    res_before = dict(az_.results)
+    n = az_.require_frames().n_frames
+
+    # (a) 真实小体系：应当拒绝预估（否则预估成本会超过分析本身）
+    real = az_.estimate_times(["rg", "msd"])
+    for nm in ("rg", "msd"):
+        assert real[nm]["est_sec"] is None, real[nm]
+        assert "帧" in real[nm]["note"], real[nm]
+    assert real["rg"]["probe_frames"] == 0, real["rg"]
+
+    # (b) 外推公式：t1=0.5s(2 帧)、tk=2.0s(5 帧) → 每帧 0.5s，固定 0 → 10 帧 ≈ 5.0s
+    az_.ESTIMATE_MIN_FRAMES = 0                     # 实例属性覆盖，强制走数字路径
+    seq = [0.5, 2.0]
+    az_._time_one = lambda name, params, sel: seq.pop(0) if seq else 2.0
+    est = az_.estimate_times(["rg"], probe_frames=4)["rg"]
+    assert est["probe_frames"] == 5, est
+    assert abs(est["per_frame_sec"] - 0.5) < 1e-9, est
+    assert abs(est["est_sec"] - 0.5 * n) < 1e-6, est
+    assert est["fixed_sec"] == 0.0, est
+
+    # (c) 固定开销为正：t1=3.0s、tk=3.6s → 每帧 0.2s，固定 2.6s
+    seq[:] = [3.0, 3.6]
+    est2 = az_.estimate_times(["rg"], probe_frames=4)["rg"]
+    assert abs(est2["fixed_sec"] - 2.6) < 1e-6, est2
+    assert abs(est2["est_sec"] - (2.6 + 0.2 * n)) < 1e-6, est2
+
+    # (d) 噪声（tk < t1）：不能报"每帧 0ms"把这一项判成最快，要用平均代价兜底
+    seq[:] = [2.0, 1.0]
+    est3 = az_.estimate_times(["rg"], probe_frames=4)["rg"]
+    assert est3["per_frame_sec"] > 0, est3
+    assert abs(est3["est_sec"] - 1.0 / 5 * n) < 1e-6, est3
+
+    # (e) 探测不该改动任何分析状态
+    assert az_.frames is sel_before, "estimate_times 改动了帧选择"
+    assert az_.results == res_before, "estimate_times 污染了结果集"
+    assert az_.current == "", f"current 未复原: {az_.current!r}"
+    return (f"小体系（{n} 帧）正确拒绝预估；两点外推 5.0/{2.6 + 0.2 * n:.1f}/"
+            f"噪声兜底 {1.0 / 5 * n:.1f} s 全部正确；状态未被污染")
+
+
+def test_shortest_first_scheduling():
+    """按预估用时短→长执行；估不出来的排最后，其余保持原相对次序。"""
+    got = sort_by_estimate(["rg", "rdf", "msd", "contact"],
+                           {"rg": 30, "rdf": 2, "msd": 9})
+    assert got == ["rdf", "msd", "rg", "contact"], got
+
+    top, xtc = _CLI_ARGS[0] or TOP_DEFAULT, _CLI_ARGS[1] or XTRAJ_DEFAULT
+    az_ = Analyzer(top, xtc)
+    az_.auto_setup()
+    az_.require_frames()
+    seen = []
+    real_run = az_.run
+    az_.run = lambda name, **kw: (seen.append(name), object())[1]
+    try:
+        az_.run_all(["rg", "rdf", "msd"], order="shortest",
+                    estimates={"rg": 30, "rdf": 2, "msd": 9},
+                    on_result=lambda name, *a: None,
+                    verbose=False, raise_errors=False)
+    finally:
+        az_.run = real_run
+    assert seen == ["rdf", "msd", "rg"], seen
+    assert az_.run_order == ["rdf", "msd", "rg"], az_.run_order
+    return f"排序 {got}；实际执行顺序 {seen}（run_order 一致）"
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -235,6 +235,7 @@ def make_dihedral_indices(path_atoms: np.ndarray) -> np.ndarray:
 
 def compute_dihedral_series(mdt, indices: np.ndarray, selection: FrameSelection, *,
                             unwrap_group=None, verbose: bool = False,
+                            notes: list | None = None,
                             progress=None) -> np.ndarray:
     """逐帧计算二面角，返回 ``(n_frames, n_dihedrals)`` 的角度数组（度）。
 
@@ -247,6 +248,9 @@ def compute_dihedral_series(mdt, indices: np.ndarray, selection: FrameSelection,
         形状 ``(n, 4)`` 的**绝对原子索引**数组。
     unwrap_group
         用于 PBC 展开的原子组（通常是整条链）。``None`` 时只用涉及到的原子。
+    notes
+        传一个 list 时，会把"展开组被自动扩充"这类情况写成说明追加进去
+        （界面会显示），而不是静默处理。
     """
     indices = np.asarray(indices, dtype=int)
     if indices.ndim != 2 or indices.shape[1] != 4:
@@ -261,6 +265,34 @@ def compute_dihedral_series(mdt, indices: np.ndarray, selection: FrameSelection,
     from MDAnalysis.lib.distances import calc_dihedrals
 
     group = unwrap_group if unwrap_group is not None else u.atoms[np.unique(indices)]
+    have = {int(a) for a in np.asarray(group.indices)}
+    missing = sorted({int(a) for a in np.unique(indices)} - have)
+    if missing:
+        # 二面角跨出了分析对象：典型例子是**糖基化/带帽残基的 ψ** ——
+        # 它需要"下一个 residue 的 N"，而那个 residue 属于另一条分子
+        # （实测 md_biopolymer_nowater：protein 组分 3035 个原子，
+        #  ψ 要用到糖基的原子 3042）。此时两种选择：
+        #   (a) 丢掉这些二面角 —— 静默少算数据，二面角分布在链端就错了；
+        #   (b) 把缺失原子所在的**整个共价分子**并入展开组 —— 展开本来就是
+        #       按分子做的，共价相连的另一半并进来才是物理上正确的。
+        # 这里选 (b)。若体系没有键信息，fragments 退化为单原子，等价于
+        # 把这些原子自己加进来，不会引入跨分子的错误展开。
+        try:
+            extra = u.atoms[missing].fragments
+            add = np.concatenate([np.asarray(f.indices, dtype=int) for f in extra])
+        except Exception:  # noqa: BLE001
+            add = np.asarray(missing, dtype=int)
+        merged = np.union1d(np.asarray(group.indices, dtype=int), add)
+        group = u.atoms[merged]
+        if notes is not None:
+            notes.append(
+                f"二面角有 {len(missing)} 个原子落在分析对象之外（如糖基化残基的 ψ "
+                f"需要下一个 residue 的 N），已把其所在的整个共价分子并入 PBC 展开组"
+                f"（展开原子 {len(have)} → {group.n_atoms} 个）")
+        if verbose:
+            print(f"[二面角] 展开组已扩充：+{len(missing)} 个越界原子 → "
+                  f"{group.n_atoms} 个原子")
+
     abs_to_local = {int(a): i for i, a in enumerate(np.asarray(group.indices))}
     try:
         sel = np.array([[abs_to_local[int(x)] for x in row] for row in indices], dtype=int)
@@ -851,17 +883,20 @@ def analyze_dihedrals(mdt, ag, selection: FrameSelection, *,
 
     if mode == "phi_psi":
         series_phi = compute_dihedral_series(mdt, phi_idx, selection,
-                                             unwrap_group=ag, verbose=verbose) \
+                                             unwrap_group=ag, notes=note,
+                                             verbose=verbose) \
             if phi_idx.size else np.zeros((times.size, 0))
         series_psi = compute_dihedral_series(mdt, psi_idx, selection,
-                                             unwrap_group=ag, verbose=verbose) \
+                                             unwrap_group=ag, notes=note,
+                                             verbose=verbose) \
             if psi_idx.size else np.zeros((times.size, 0))
         series = np.concatenate([series_phi, series_psi], axis=1) if (
             series_phi.size or series_psi.size) else np.zeros((times.size, 0))
         groups = {"phi": series_phi, "psi": series_psi}
     else:
         series = compute_dihedral_series(mdt, idx, selection,
-                                         unwrap_group=ag, verbose=verbose)
+                                         unwrap_group=ag, notes=note,
+                                         verbose=verbose)
         groups = {"dihedral": series}
 
     tx, tlabel = time_axis(times)

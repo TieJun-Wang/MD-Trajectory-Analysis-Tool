@@ -100,6 +100,23 @@ def analysis_groups() -> list[dict]:
              "names": list(names)} for label, names in ANALYSIS_GROUPS]
 
 
+def sort_by_estimate(names: Sequence[str],
+                     estimates: Mapping[str, float | None] | None) -> list[str]:
+    """按**预估用时从短到长**稳定排序（估不出来的排最后、其余保持原次序）。
+
+    ``run_all(order="shortest")`` 与 Web 端的队列显示共用这一个函数，
+    避免两处各写一套排序而慢慢跑偏。
+    """
+    base = {n: i for i, n in enumerate(names)}
+    est = dict(estimates or {})
+
+    def _key(n: str):
+        e = est.get(n)
+        return (float(e) if e is not None else float("inf"), base.get(n, 0))
+
+    return sorted(names, key=_key)
+
+
 class Analyzer:
     """一次完整的分析会话。"""
 
@@ -112,6 +129,12 @@ class Analyzer:
         self.extra_components: "OrderedDict[str, object]" = OrderedDict()
         self.results: "OrderedDict[str, AnalysisResult]" = OrderedDict()
         self._info: SystemInfo | None = None
+        #: **正在计算的**分析名（``run_all`` 逐项设置）。界面靠它显示
+        #: "当前分析项：xxx"，不必去解析进度文字（那种做法一改文案就失效）。
+        self.current: str = ""
+        #: 上一次 ``run_all`` 的**实际执行顺序**（``order="shortest"`` 时会与
+        #: 传入顺序不同），用于自检与界面显示。
+        self.run_order: list[str] = []
 
     # ------------------------------------------------------------ 基本信息
     @property
@@ -235,10 +258,15 @@ class Analyzer:
                 return None
             return ifc.analyze_rdf(self.trajectory, groups, sel, verbose=verbose, **p)
         if name == "contact":
-            a, b = self._contact_pair()
+            a, b, la, lb = self._contact_pair()
             if a is None:
                 return None
-            return ifc.analyze_contacts(self.trajectory, a, b, sel, verbose=verbose, **p)
+            res = ifc.analyze_contacts(self.trajectory, a, b, sel, verbose=verbose, **p)
+            if res is not None and la:
+                res.add_notes(f"配对对象：{la} × {lb}"
+                              f"（A={a.n_atoms} 原子，B={b.n_atoms} 原子）。"
+                              f"选组规则：A 取最大组分，B 取与 A 不同分子的最大组分。")
+            return res
         if name == "interface":
             if len(self.components) < 2:
                 return None
@@ -268,6 +296,99 @@ class Analyzer:
             return dyn.analyze_msd(self.trajectory, groups, sel, verbose=verbose, **p)
         raise KeyError(f"未知分析项: {name!r}")
 
+    #: 预估用时：探测帧数（先测 2 帧、再测 k 帧，用来分离固定开销与每帧代价）
+    ESTIMATE_PROBE_FRAMES = 4
+    #: 帧数少于这个数就不预估 —— 预估本身要跑 ``k`` 帧，小体系里这笔开销
+    #: 可能比正式分析还大（AdK 10 帧实测：预估 12 s，正式跑 18 s）。
+    #: 大体系（46 体系 10001 帧）预估算 17 s，占预计总时长不到 0.2%，非常划算。
+    ESTIMATE_MIN_FRAMES = 40
+
+    def _time_one(self, name: str, params: Mapping, sel) -> float:
+        """把帧选择临时换成 ``sel``，跑一次并计时（**结果丢弃**）。"""
+        self.frames = sel
+        t0 = time.time()
+        self.run(name, params=params.get(name), verbose=False)
+        return time.time() - t0
+
+    def estimate_times(self, which: Sequence[str] | None = None, *,
+                       params: Mapping[str, Mapping] | None = None,
+                       probe_frames: int | None = None,
+                       cancel: "threading.Event | None" = None,
+                       on_item: Callable | None = None) -> dict[str, dict]:
+        """先跑几帧，实测每项分析的用时并外推整段跑完要多久。
+
+        为什么不是"按体系规模套公式"：各项分析的常数因子相差好几个量级
+        （RDF/接触要建 CSR 邻居表、MSD 要解包裹坐标、取向要按重复单元重组），
+        拍系数必然错。这里改成**两点实测**，把固定开销和每帧代价分开：
+
+            per_frame = (t_k - t_1) / (k - n1)      n1 = min(2, k)
+            fixed     = t_1 - per_frame * n1
+            est       = fixed + per_frame * n_frames
+
+        代价是每项多跑约 ``k`` 帧 —— 对 10001 帧的体系不到千分之一。
+        返回 ``{name: {"probe_frames", "fixed_sec", "per_frame_sec",
+        "est_sec", "n_frames", "note"}}``；某项估不出来时 ``est_sec=None``
+        （帧数太少、组分缺失或直接报错），界面据此显示"—"。
+
+        探测**不写入** ``self.results``，并保证恢复 ``self.frames`` 与
+        ``self.current`` —— 预估只是量个速度，不能改动分析状态。
+        """
+        names = list(which) if which else list(DEFAULT_ORDER)
+        params = dict(params or {})
+        k = int(self.ESTIMATE_PROBE_FRAMES if probe_frames is None else probe_frames)
+        sel_full = self.require_frames()
+        n = sel_full.n_frames
+        keep_frames, keep_current = self.frames, self.current
+        out: dict[str, dict] = {}
+        try:
+            if n < max(int(self.ESTIMATE_MIN_FRAMES), 2 * (k + 1)):
+                # 体系太小：预估要跑 k 帧，占比过高，直接跑更省事
+                note = (f"只有 {n} 帧，预估本身的成本已不可忽略"
+                        f"（要跑 {k} 帧），直接开跑")
+                for name in names:
+                    out[name] = {"probe_frames": 0, "n_frames": n, "fixed_sec": None,
+                                 "per_frame_sec": None, "est_sec": None, "note": note}
+                return out
+            if n > k:
+                probe = sel_full[::max(1, int(round(n / max(k, 1))))]
+            else:
+                probe = sel_full
+            pk = probe.n_frames
+            n1 = min(2, pk)
+            for i, name in enumerate(names):
+                if cancel is not None and cancel.is_set():
+                    break
+                if on_item:
+                    on_item(i, len(names), name)
+                rec = {"probe_frames": pk, "n_frames": n, "fixed_sec": None,
+                       "per_frame_sec": None, "est_sec": None, "note": ""}
+                try:
+                    t1 = self._time_one(name, params, probe.head(n1))
+                    tk = self._time_one(name, params, probe)
+                except Exception as exc:  # noqa: BLE001
+                    rec["note"] = f"估不出来（{type(exc).__name__}: {exc}）"
+                    out[name] = rec
+                    continue
+                per_raw = (tk - t1) / max(pk - n1, 1)
+                if per_raw <= 0:
+                    # 两次测量没测出差异（固定开销主导或噪声）：**不能**因此报
+                    # "每帧 0 ms" 去外推 —— 那会把这一项判成最快，排到队首却跑很久。
+                    # 退一步用"平均每帧代价"（含固定开销）兜底，结果偏保守。
+                    per, fixed = tk / max(pk, 1), 0.0
+                else:
+                    per = per_raw
+                    fixed = max(0.0, t1 - per * n1)
+                est = fixed + per * n
+                rec["fixed_sec"] = round(fixed, 3)
+                rec["per_frame_sec"] = round(per, 6)
+                rec["est_sec"] = round(est, 2)
+                rec["note"] = (f"按 {pk} 帧实测外推：固定 {fixed:.2f}s + "
+                               f"每帧 {per * 1000:.1f}ms × {n} 帧")
+                out[name] = rec
+        finally:
+            self.frames, self.current = keep_frames, keep_current
+        return out
+
     def run_all(self, which: Sequence[str] | None = None, *,
                 params: Mapping[str, Mapping] | None = None,
                 outdir: str | None = None, formats: Sequence[str] = ("csv", "png"),
@@ -276,6 +397,8 @@ class Analyzer:
                 raise_errors: bool = False,
                 progress: Callable | None = None,
                 on_result: Callable | None = None,
+                order: str = "given",
+                estimates: Mapping[str, float | None] | None = None,
                 cancel: "threading.Event | None" = None) -> "OrderedDict[str, AnalysisResult]":
         """依次运行多项分析，可选直接导出。
 
@@ -286,15 +409,23 @@ class Analyzer:
         回调，在**每一项分析算完后立即**调用 —— Web 版靠它把已算好的结果
         实时推给页面，而不必等全部跑完。
 
+        ``order="shortest"`` 且给了 ``estimates``（:meth:`estimate_times` 的结果）
+        时，按**预估用时从短到长**执行，好让结果尽早出现在页面上；估不出来的项
+        排在最后，其余保持原有相对次序（稳定排序）。默认 ``"given"`` 保持
+        CLI / 桌面版的原行为不变。
+
         ``cancel`` 传入一个 :class:`threading.Event` 时，会在**每项分析开始前**
         检查它；已置位则停止并把已完成的项作为结果返回。
         ``panel_pngs=True`` 时额外为每个面板单独导出一张 PNG。
         """
         names = list(which) if which else list(DEFAULT_ORDER)
         params = dict(params or {})
+        if order == "shortest" and estimates:
+            names = sort_by_estimate(names, estimates)
         self.results = OrderedDict()
         #: ``{分析名: 耗时秒数}``，供界面显示"哪一项最慢"
         self.timings: dict[str, float] = {}
+        self.run_order: list[str] = list(names)
         sel = self.require_frames()
         if verbose:
             print(f"[帧选择] {sel.describe()}")
@@ -302,6 +433,7 @@ class Analyzer:
                 print(f"          {n}")
         total = max(len(names), 1)
         self.cancelled = False
+        self.current = ""
         for i, name in enumerate(names):
             if cancel is not None and cancel.is_set():
                 self.cancelled = True
@@ -309,6 +441,7 @@ class Analyzer:
                     print("[取消] 收到取消请求，停止后续分析")
                 break
             title = ANALYSIS_TITLES.get(name, name)
+            self.current = name                    # 供界面显示"当前分析项"
             if progress:
                 progress(i / total, f"正在计算：{title}")
             t0 = time.time()
@@ -376,12 +509,27 @@ class Analyzer:
         return out
 
     def _contact_pair(self):
-        names = list(self.components)
-        if len(names) >= 2:
-            return self.components[names[0]], self.components[names[1]]
-        if len(names) == 1:
-            return self.components[names[0]], self.components[names[0]]
-        return None, None
+        """接触分析的 A/B 两组。
+
+        选法：A = 原子数最多的组分；B = **与 A 不在同一批分子里**的、原子数最多的
+        组分；都不满足时退回同组自接触。
+
+        为什么不能直接取"前两个组分"（1.0.0 的做法）：遇到"糖基被单独识别成一个
+        组分"的糖蛋白（protein + sugar 共价相连）时，A/B 会选成一对**同分子**的
+        组分，inter 口径下接触恒为 0 —— 实测 md_biopolymer_nowater 报出的
+        "平均接触对数 = 0" 而最小原子间距只有 1.39 Å（N-糖苷键长），是个毫无意义
+        的数。返回 ``(group_a, group_b, name_a, name_b)``。
+        """
+        from .analysis.interface import shares_one_molecule
+
+        items = sorted(self.components.items(), key=lambda kv: -kv[1].n_atoms)
+        if not items:
+            return None, None, "", ""
+        name_a, a = items[0]
+        for name_b, b in items[1:]:
+            if not shares_one_molecule(a, b):
+                return a, b, name_a, name_b
+        return a, a, name_a, name_a
 
     def _orientation_target(self):
         """取向/有序度的分析对象：**整个组分**（含该组分的全部分子）。

@@ -534,7 +534,7 @@ def analyze_structural_order(mdt, ag, selection: FrameSelection, *,
         else:
             raise ValueError(f"未知的二面角模式: {mode_used!r}")
         series = compute_dihedral_series(mdt, idx, selection, unwrap_group=ag,
-                                         verbose=verbose)
+                                         notes=notes, verbose=verbose)
         dname = "dihedral"
 
     s_tors = np.full(n_f, np.nan)

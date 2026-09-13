@@ -363,6 +363,47 @@ ok(h.includes('bar'), 'RunBlock 显示进度条')
 ok(h.includes('取消') && h.includes('保留已算完的'), 'RunBlock 说明取消会保留已完成结果')
 ok(!h.includes('丢弃本次请求'), 'RunBlock 不再说"丢弃本次请求"')
 
+// ---------------------------------------- 预估用时 + 按短→长跑（新）
+h = flat(render(() => React.createElement(M.RunBlock, {
+  busy: false, progress: 0, onRun: () => {}, onCancel: () => {},
+  estimateOn: true, setEstimateOn: () => {}, lastLine: '', onOpenLog: () => {},
+})))
+ok(h.includes('先预估用时') && h.includes('长跑'), 'RunBlock 有「先预估用时并按短 → 长跑」开关')
+
+const liveEst = {
+  ...live,
+  current: 'msd',
+  phase: 'run',
+  estimateNote: '预估完成',
+  estimates: { rdf: 4076.1, contact: 2148.6, msd: 99.7, orientation: 380.9 },
+}
+h = flat(render(() => React.createElement(M.RunBlock, {
+  busy: true, progress: 0.1, onRun: () => {}, onCancel: () => {}, live: liveEst,
+  which: ['msd', 'rdf', 'contact', 'orientation'],
+  titles: { msd: '均方位移 MSD', rdf: '径向分布函数 RDF',
+            contact: '接触分析', orientation: '链段取向分析' },
+  lastLine: '', onOpenLog: () => {},
+})))
+ok(h.includes('预估用时'), 'RunBlock 显示「预估用时」区块')
+ok(h.includes('预估完成'), 'RunBlock 显示预估说明（方法/结论）')
+ok(h.includes('已按短 → 长排序'), 'RunBlock 说明已按短→长排序')
+ok(h.includes('≈1 min 40 s') || h.includes('≈99.7 s'),
+   'RunBlock 用可读单位显示预估秒数', h.match(/≈[^<"]+/)?.[0] || '')
+ok(h.indexOf('均方位移 MSD') < h.indexOf('径向分布函数 RDF'),
+   '预估列表按用时短→长排列（MSD 在 RDF 之前）')
+ok(h.includes('est-list') && h.includes('cur'), '预估列表有列表结构且标出当前项')
+
+// 分析功能里每项直接标出预估用时
+h = flat(render(() => React.createElement(M.FunctionBlock, {
+  titles: { msd: '均方位移 MSD', rdf: '径向分布函数 RDF' },
+  order: ['msd', 'rdf'], which: ['msd', 'rdf'], setWhich: () => {},
+  groups: [['动力学与输运', ['msd', 'rdf'], '输运']],
+  estimates: { msd: 99.7, rdf: 4076.1 },
+})))
+ok(h.includes('est-tag'), '分析功能的分析项上标出预估用时')
+ok(h.includes('≈1 min 40 s') && h.includes('≈1 h 7 min'),
+   '分析项标签用可读单位（min/h）')
+
 // 实时运行时、第一项还没算完：不能说"还没有结果"
 h = flat(render(() => React.createElement(M.ChartPanel, {
   run: null, chart: { name: '', index: 0 }, setChart: () => {},

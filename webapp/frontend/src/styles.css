@@ -315,9 +315,20 @@ table.notes-table tr + tr td { border-top: 1px solid #f1f5f9; }
 }
 
 /* 顶栏里的实时进度（收起操作台后进度就靠它显示）
-   —— 底色是深靛紫，所以进度槽与文字都要按深底调 */
+   —— 底色是深靛紫，所以进度槽与文字都要按深底调。
+   两行：上面徽标+进度条+计数，下面「当前分析项」，所以这里是竖排。 */
 .topbar-live {
+  display: inline-flex; flex-direction: column; align-items: flex-start;
+  gap: 1px; min-width: 0;
+}
+.topbar-live .tbl-row {
   display: inline-flex; align-items: center; gap: 7px;
+}
+/* 第二行：当前正在算的那一项。名字可能很长（如「结构有序度分析」），
+   超长时省略但**保留完整内容在 tooltip 里**，不硬撑破顶栏。 */
+.topbar-cur {
+  font-size: 11px; color: #c7d2fe; white-space: nowrap;
+  max-width: 380px; overflow: hidden; text-overflow: ellipsis;
 }
 .topbar-live .tbl-bar {
   display: inline-block; width: 90px; height: 5px;
@@ -332,6 +343,31 @@ table.notes-table tr + tr td { border-top: 1px solid #f1f5f9; }
   font-size: 11px; color: #e0e7ff;
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
+
+/* ------------------------------------------------------- 预估用时（分析项） */
+/* 分析功能里每项后面的小标签：数值来自「开始分析」时的实测外推 */
+.est-tag {
+  margin-left: 6px; font-size: 11px; color: var(--dim, #6b7280);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+
+/* 运行区块里的预估用时表：按短→长排列，当前项高亮 */
+.est-box { margin-top: 6px; }
+.est-list {
+  list-style: none; margin: 2px 0 0; padding: 0;
+  max-height: 132px; overflow-y: auto;
+}
+.est-list li {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px; padding: 1px 0; font-size: 11.5px;
+}
+.est-list li.cur { color: #4338ca; font-weight: 600; }
+.est-list li.cur .est-name::before { content: '▶ '; font-size: 9px; }
+.est-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.est-sec {
+  flex: 0 0 auto; font-variant-numeric: tabular-nums; color: var(--dim, #6b7280);
+}
+.est-list li.cur .est-sec { color: #4338ca; }
 
 .acc { display: flex; flex-direction: column; min-height: 0; flex: 1 1 auto; }
 

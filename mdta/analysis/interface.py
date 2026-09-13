@@ -895,6 +895,21 @@ def _coordination_number(r: np.ndarray, g: np.ndarray, rmin: float | None,
 
 # ------------------------------------------------------------------ 接触分析
 @register("contact", "接触分析")
+def shares_one_molecule(ga, gb) -> bool:
+    """两组是否**整个落在同一个分子**里（如蛋白与它共价相连的糖基）。
+
+    这是"组分被切成了共价相连的两块"的判据：此时 ``mode="inter"``（只统计
+    不同分子之间的原子对）会**一对都不剩**，报出来的"接触数 = 0"是假象 ——
+    实测 md_biopolymer_nowater 里 protein×sugar 就是这种情形，最小原子间距
+    其实只有 1.39 Å（N-糖苷键）。没有分子编号时返回 ``False``（无从判断）。
+    """
+    ma, mb = _molnums_for_filter(ga), _molnums_for_filter(gb)
+    if ma is None or mb is None:
+        return False
+    sa, sb = np.unique(ma), np.unique(mb)
+    return bool(sa.size == 1 and sb.size == 1 and sa[0] == sb[0])
+
+
 def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
                      cutoff: float = 5.0, top_n: int = 0,
                      mode: str = "inter",
@@ -956,6 +971,14 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
     if eff_mode != "total" and (ma is None or mb is None):
         eff_mode = "total"
         mode_note = "体系没有分子编号（molnums），配对模式已退化为 total"
+    if eff_mode == "inter" and shares_one_molecule(group_a, group_b):
+        # 两组是同一个分子被切成的两块（蛋白 + 共价糖基是典型）：
+        # inter 会把**所有**配对都剔除，于是"平均接触对数 = 0"—— 这不是物理
+        # 结论，而是口径造成的假象。此时改用 total 并写明，绝不报 0。
+        eff_mode = "total"
+        mode_note = ("两组的原子落在**同一个分子**里（如蛋白与共价相连的糖基被"
+                     "识别成两个组分），分子间配对恒为空；已自动改用 total 口径"
+                     "统计，若只想看分子间接触请自行换一组配对")
 
     times = np.asarray(selection.times_ps, dtype=float)
     n = times.size

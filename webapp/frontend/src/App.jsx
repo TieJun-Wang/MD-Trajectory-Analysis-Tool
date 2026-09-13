@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api'
 import { normalizeGroups } from './analysisGroups'
+import { fmtSec } from './format'
 import OpenPanel from './components/OpenPanel'
 import InfoPanel from './components/InfoPanel'
 import DataPanel from './components/DataPanel'
@@ -75,6 +76,8 @@ export default function App() {
   const [chart, setChart] = useState({ name: '', index: 0 })
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
+  //: 开跑前先预估各项用时（每项先跑几帧实测），再按短→长排序
+  const [estimateOn, setEstimateOn] = useState(true)
   const [live, setLive] = useState(null)
   const [error, setError] = useState('')
   const [opsCollapsed, setOpsCollapsed] = useState(false)
@@ -147,6 +150,8 @@ export default function App() {
 
     const body = {
       which,
+      // 先跑几帧预估各项用时，再按短→长排序开跑（可在「运行」里关掉）
+      estimate: estimateOn,
       frames: {
         start_ps: frames.start_ps || null,
         stop_ps: frames.stop_ps || null,
@@ -205,6 +210,10 @@ export default function App() {
       setLive({
         status: p.status, message: p.message, nDone: p.n_done,
         nTotal: p.n_total, pending: p.pending || [], elapsed: p.elapsed_sec,
+        current: p.current || '',
+        phase: p.phase || '',
+        estimates: p.estimates || {},
+        estimateNote: p.estimate_note || '',
       })
     }
 
@@ -284,6 +293,11 @@ export default function App() {
       (result.panels?.length || 1) - 1))
     return { result, panelIndex }
   }, [run, chart])
+  // 顶栏第二行「当前分析项」：取后端记录的**分析名**再用标题表翻译成中文，
+  // 不去解析进度文字（那种做法一改文案就失效）。排队数放在同一行的括号里。
+  const curTitle = live?.current
+    ? ((run?.titles || {})[live.current] || live.current) : ''
+
   const sections = [
     { id: SEC_FILE, title: '1. 文件读取', hint: sess ? sess.info.topology.split(/[\\/]/).pop() : '' },
     {
@@ -308,17 +322,30 @@ export default function App() {
         </div>
         {/* 右对齐：运行状态 + 版本 */}
         <div className="status">
-          {/* 收起操作台后进度条在那边就看不见了 —— 顶栏这里始终显示 */}
+          {/* 收起操作台后进度条在那边就看不见了 —— 顶栏这里始终显示。
+              两行：第一行徽标 + 进度条 + n/N·耗时；第二行「当前分析项」。 */}
           {busy && (
-            <span className="topbar-live" title={live?.message || '正在计算…'}>
-              <span className="badge-live">● 实时更新中</span>
-              <span className="tbl-bar">
-                <span className="tbl-fill"
-                      style={{ width: `${Math.round((live?.frac ?? progress) * 100)}%` }} />
+            <span className="topbar-live"
+                  title={`${live?.message || '正在计算…'}`
+                    + (live?.pending?.length
+                      ? `\n排队中：${live.pending
+                        .map((n) => (run?.titles || {})[n] || n).join('、')}` : '')}>
+              <span className="tbl-row">
+                <span className="badge-live">● 实时更新中</span>
+                <span className="tbl-bar">
+                  <span className="tbl-fill"
+                        style={{ width: `${Math.round((live?.frac ?? progress) * 100)}%` }} />
+                </span>
+                <span className="tbl-text">
+                  {live?.nDone ?? 0}/{live?.nTotal ?? which.length}
+                  {live?.elapsed ? ` · ${live.elapsed.toFixed(0)}s` : ''}
+                </span>
               </span>
-              <span className="tbl-text">
-                {live?.nDone ?? 0}/{live?.nTotal ?? which.length}
-                {live?.elapsed ? ` · ${live.elapsed.toFixed(0)}s` : ''}
+              <span className="topbar-cur">
+                当前分析项：{curTitle || '准备中…'}
+                {curTitle && live?.estimates?.[live.current] != null
+                  ? `（预计 ${fmtSec(live.estimates[live.current])}）` : ''}
+                {live?.pending?.length ? ` · 排队 ${live.pending.length} 项` : ''}
               </span>
             </span>
           )}
@@ -376,12 +403,15 @@ export default function App() {
                           <FrameBlock frames={frames} setFrames={setFrames} />
                           <FunctionBlock titles={titles} order={order}
                                          which={which} setWhich={setWhich}
-                                         groups={groups} />
+                                         groups={groups}
+                                         estimates={live?.estimates} />
                           <ParamBlock params={params} setParams={setParams}
                                       which={which} />
                           <RunBlock busy={busy} progress={progress} onRun={doRun}
                                     onCancel={cancelRun} live={live}
                                     which={which} titles={titles} run={run}
+                                    estimateOn={estimateOn}
+                                    setEstimateOn={setEstimateOn}
                                     lastLine={lastLine}
                                     onOpenLog={() => setTab('log')} />
                           {error && <div className="error">{error}</div>}

@@ -4,6 +4,7 @@
  */
 import { api } from '../api'
 import { normalizeGroups } from '../analysisGroups'
+import { fmtSec } from '../format'
 
 //: 运行日志留一小条在设置板块底部，完整日志在右侧「运行日志」标签页
 export function SelectionBlock({ sess, primary, setPrimary, components, setComponents }) {
@@ -270,7 +271,7 @@ export function ParamBlock({ params, setParams, which = null }) {
 }
 
 export function FunctionBlock({ titles = {}, order = [], which = [], setWhich,
-                                groups }) {
+                                groups, estimates = {} }) {
   const toggle = (n) => setWhich(which.includes(n)
     ? which.filter((x) => x !== n) : [...which, n])
 
@@ -295,10 +296,18 @@ export function FunctionBlock({ titles = {}, order = [], which = [], setWhich,
           <span className="glabel">{group}</span>
           <div className="gitems">
             {names.map((n) => (
-              <label key={n} className="check">
+              <label key={n} className="check"
+                     title={estimates?.[n] != null
+                       ? `上次实测外推：预计约 ${fmtSec(estimates[n])}`
+                       : undefined}>
                 <input type="checkbox" checked={which.includes(n)}
                        onChange={() => toggle(n)} />
                 {titles[n] || n}
+                {/* 预估用时来自「开始分析」时的实测外推，直接标在分析项上，
+                    省得用户去别的区块里对名字 */}
+                {estimates?.[n] != null && (
+                  <span className="est-tag">≈{fmtSec(estimates[n])}</span>
+                )}
               </label>
             ))}
           </div>
@@ -321,11 +330,16 @@ export function FunctionBlock({ titles = {}, order = [], which = [], setWhich,
 }
 
 export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
-                          live, which = [], titles = {}, run }) {
+                          live, which = [], titles = {}, run,
+                          estimateOn = true, setEstimateOn = null }) {
   const done = live?.nDone ?? (run ? Object.keys(run.results || {}).length : 0)
   const total = live?.nTotal || which.length || 0
   const pending = live?.pending || []
   const pct = Math.round((busy ? (live?.frac ?? progress) : progress) * 100)
+  // 预估用时按短→长排列（这正是实际执行顺序），估不出来的项不列
+  const estRows = Object.entries(live?.estimates || {})
+    .filter(([, s]) => s != null)
+    .sort((a, b) => a[1] - b[1])
 
   return (
     <>
@@ -336,6 +350,15 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
       <button className="primary" onClick={onRun} disabled={busy}>
         {busy ? `分析中… ${done}/${total}` : '开始分析'}
       </button>
+      {setEstimateOn && (
+        <label className="check" style={{ marginTop: 4 }}
+               title={'开跑前每项先跑几帧实测，外推出各自用时，再按用时短→长执行，'
+                 + '让结果尽早出现；关掉则按勾选顺序直接开跑'}>
+          <input type="checkbox" checked={estimateOn} disabled={busy}
+                 onChange={(e) => setEstimateOn(e.target.checked)} />
+          先预估用时并按短 → 长跑
+        </label>
+      )}
 
       {busy && (
         <>
@@ -346,6 +369,26 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
             {live?.message || '准备中…'}
             {live?.elapsed ? `（已用 ${live.elapsed.toFixed(0)}s）` : ''}
           </div>
+          {/* 预估用时：后端在正式跑之前，每项先跑几帧实测再外推
+              （固定开销 + 每帧代价），这里按短→长列出来 —— 排序就是执行顺序 */}
+          {estRows.length > 0 && (
+            <div className="est-box">
+              <div className="hint" title={live?.estimateNote}>
+                <b>预估用时</b>
+                <span className="dim">
+                  {`（${live?.estimateNote || '按实测外推'}，已按短 → 长排序）`}
+                </span>
+              </div>
+              <ul className="est-list">
+                {estRows.map(([n, s]) => (
+                  <li key={n} className={n === live?.current ? 'cur' : ''}>
+                    <span className="est-name">{titles[n] || n}</span>
+                    <span className="est-sec">≈{fmtSec(s)}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           {pending.length > 0 && (
             <div className="hint dim" title={pending.map((n) => titles[n] || n).join('、')}>
               排队中：{pending.map((n) => titles[n] || n).join('、')}

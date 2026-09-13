@@ -61,7 +61,8 @@ class OpenProgress:
             "done": bool(self.done),
             "error": self.error,
         }
-from mdta.pipeline import ANALYSIS_TITLES, DEFAULT_ORDER, Analyzer
+from mdta.pipeline import (ANALYSIS_TITLES, DEFAULT_ORDER, Analyzer,
+                           sort_by_estimate)
 from mdta.selection import chains as _chains
 from mdta.selection import list_chains, select
 from mdta.systeminfo import info_tables
@@ -91,9 +92,14 @@ class RunJob:
     completion: list[str] = field(default_factory=list)
     timings: dict[str, float] = field(default_factory=dict)
     status: str = "running"            # running | done | error | cancelled
+    #: 子阶段：``estimate``（先跑几帧预估用时）→ ``run``（正式跑）
+    phase: str = ""
     frac: float = 0.0
     message: str = "准备中…"
     current: str = ""
+    #: ``{分析名: 预估秒数}``（只含估出来的项）
+    estimates: dict[str, float] = field(default_factory=dict)
+    estimate_note: str = ""
     error: str = ""
     last_result: str = ""
     started: float = field(default_factory=time.time)
@@ -260,7 +266,9 @@ class Session:
         params = {k: dict(v) for k, v in (req.get("params") or {}).items()
                   if isinstance(v, Mapping)}
         return {"sel_info": sel_info, "selection": selection,
-                "which": which, "params": params}
+                "which": which, "params": params,
+                # 先跑几帧预估用时（默认开）；传 false 可跳过
+                "estimate": bool(req.get("estimate", True))}
 
     def _payload(self, prep: Mapping[str, Any], *, extra: Mapping | None = None) -> dict:
         """组装返回给前端的运行结果（调用方须持有锁）。"""
@@ -322,6 +330,21 @@ class Session:
         th.start()
         return self.run_progress(0)
 
+    def _estimate_progress(self, i: int, n: int, name: str) -> None:
+        """预估阶段的进度：告诉用户正在量哪一项的速度。"""
+        job = self._job
+        if job is None:
+            return
+        with self._lock:
+            job.message = (f"正在预估用时 {i + 1}/{n}："
+                           f"{ANALYSIS_TITLES.get(name, name)}（先跑几帧实测）")
+            job.current = name
+
+    @staticmethod
+    def _shortest_first(which, estimates) -> list[str]:
+        """按预估用时短→长排序（估不出来的排最后），与 ``run_all`` 用同一函数。"""
+        return sort_by_estimate(list(which), estimates)
+
     def _run_worker(self, prep: Mapping[str, Any]) -> None:
         """后台线程：逐项分析，每算完一项就把结果写进结果集并通知轮询方。"""
         job = self._job
@@ -332,6 +355,11 @@ class Session:
                 with self._lock:
                     job.frac = max(job.frac, float(frac))
                     job.message = str(message)
+                    # 当前分析项：直接取 Analyzer 记录的名字（不解析进度文字，
+                    # 文案一改就失效）。收尾阶段（导出）名字为空时保留上一项，
+                    # 免得顶栏那一行闪成空白。
+                    if getattr(self.az, "current", ""):
+                        job.current = self.az.current
 
             def _on_result(name, res, elapsed, done, total):
                 payload = serialize.result_to_json(res)
@@ -343,9 +371,50 @@ class Session:
                     job.message = f"已完成 {done}/{total}：{ANALYSIS_TITLES.get(name, name)}"
                     job.last_result = name
 
+            # ---- 阶段一：先跑几帧，实测每项用时并外推；按短→长排好序 -----
+            estimates: dict[str, float | None] = {}
+            if prep.get("estimate", True) and len(prep["which"]) > 1:
+                with self._lock:
+                    job.phase = "estimate"
+                    job.message = "正在预估各分析项用时（每项先跑几帧实测）…"
+                try:
+                    est = self.az.estimate_times(
+                        prep["which"], params=prep["params"], cancel=job.cancel,
+                        on_item=lambda i, n, nm: self._estimate_progress(i, n, nm))
+                    estimates = {n: r.get("est_sec") for n, r in est.items()}
+                    with self._lock:
+                        job.estimates = {n: v for n, v in estimates.items()
+                                         if v is not None}
+                        if not job.estimates:
+                            # 一项都没估出来：直接把原因说清楚（通常是"帧数太少"）
+                            first = next(iter(est.values()), {})
+                            job.estimate_note = (first.get("note")
+                                                 or "没有可用的预估，按勾选顺序跑")
+                        else:
+                            missing = [n for n, v in estimates.items() if v is None]
+                            job.estimate_note = (
+                                "预估完成" if not missing else
+                                "预估完成（" + "、".join(
+                                    ANALYSIS_TITLES.get(m, m) for m in missing)
+                                + " 估不出来）")
+                        job.order = self._shortest_first(prep["which"], estimates)
+                        job.phase = "run"
+                        job.message = ("预估完成，按用时短 → 长依次计算…"
+                                       if job.estimates else "开始计算…")
+                except Exception as exc:  # noqa: BLE001 - 估不出来不该阻断分析
+                    with self._lock:
+                        job.estimate_note = f"预估失败，直接开跑（{exc}）"
+                        job.phase = "run"
+            else:
+                with self._lock:
+                    job.phase = "run"
+                    job.order = list(prep["which"])
+
             self.az.run_all(prep["which"], params=prep["params"], outdir=None,
                             verbose=False, raise_errors=False,
                             progress=_progress, on_result=_on_result,
+                            order="shortest" if estimates else "given",
+                            estimates=estimates,
                             cancel=job.cancel)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
@@ -380,6 +449,8 @@ class Session:
                         "completion": [], "results": {}, "summary_rows": [],
                         "titles": {k: ANALYSIS_TITLES.get(k, k) for k in DEFAULT_ORDER},
                         "message": "", "frac": 0.0, "current": "", "timings": {},
+                        "phase": "", "estimates": {}, "estimate_note": "",
+                        "order": [], "pending": [],
                         "elapsed_sec": 0.0, "error": ""}
             after = max(0, int(after))
             fresh = job.completion[after:]
@@ -388,9 +459,12 @@ class Session:
             elapsed = (job.finished or time.time()) - job.started
             return {
                 "status": job.status,
+                "phase": job.phase,
                 "frac": round(float(job.frac), 4),
                 "message": job.message,
                 "current": job.current,
+                "estimates": dict(job.estimates),
+                "estimate_note": job.estimate_note,
                 "after": after,
                 "n_total": len(job.order),
                 "n_done": len(job.completion),
