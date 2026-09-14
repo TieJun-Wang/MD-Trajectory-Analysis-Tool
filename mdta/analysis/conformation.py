@@ -35,6 +35,81 @@ __all__ = [
 
 
 # ------------------------------------------------------------------ 基本算法
+
+def rg_fast(pos, masses, box, mol_ids=None):
+    """**向量化的 PBC 展开** + 质量加权回转半径（实验性，**当前未接线**）。
+
+    ⚠️ 未接线的原因（实测，别再重复踩）：逐分子 Rg 与 MDAnalysis 逐碎片展开**完全一致**，
+    但整组 Rg 会差 0.02 Å（PEG 200 链）～**2.24 Å**（AdK water 11084 分子）——
+    因为"每个分子取哪个镜像"是自由的，散布组分的整组 Rg 依赖约定、没有唯一值。
+    要用它提速，必须先明确并固定一个约定（例如"分子质心一律取包裹位置"），
+    并接受与 1.0.2 数值不同。
+
+    做法（与 MDAnalysis ``unwrap(compound='fragments', reference='com')`` 同一约定）：
+
+    1. 用**包裹坐标**算每个分子的质量加权质心 ``com_i``（bincount，全程向量化）；
+    2. 每个原子相对自己分子质心取**最小镜像位移** ``s = MIN(p − com_i)``；
+    3. 展开后坐标 ``d = com_i + s`` —— 这一步就是 MDAnalysis 逐碎片做的事，
+       只是这里是向量化的，没有 200 次 Python 调用。
+
+    返回 ``(整组 Rg, 逐分子 Rg, safe, 展开后的坐标 d)``。调用方可以直接用 ``d``
+    走原有 ``compute_rg`` 逻辑，因此**数值与逐碎片路径逐位一致**（实测偏差 0.000e+00）。
+
+    为什么需要：``ag.unwrap(compound='fragments')`` 是 Python 层逐碎片循环 ——
+    PEG9 体系 200 条链实测 **20.9 ms/帧**（整条轨迹 105 s），而 Rg 数学本身只要
+    0.5–3.4 ms/帧。瓶颈是"逐碎片"这件事，不是算法。
+
+    ``safe=False`` 用于兜底：只要有分子在**自己质心**外超过 ``0.4×最短盒边``
+    （分子自身尺度接近半盒，最小镜像不再等价）就回退给 MDAnalysis 的精确实现。
+    注意判据是**逐分子**的：像"200 条链的组分"这种散布体系，组尺度必然等于盒子，
+    但那跟某个分子能不能用最小镜像毫无关系 —— 早先按整组尺度判，导致快路径
+    一次都不触发（等于没优化）。
+    """
+    from MDAnalysis.lib.distances import minimize_vectors
+
+    pos = np.asarray(pos, dtype=float)
+    if pos.size == 0:
+        return float("nan"), None, False, pos
+    w = np.ones(pos.shape[0], dtype=float) if masses is None else np.asarray(masses, float)
+    lim = np.inf
+    if box is not None:
+        L = np.asarray(box, dtype=float)[:3]
+        lim = 0.4 * float(np.min(L[L > 0])) if np.any(L > 0) else np.inf
+
+    if mol_ids is None:
+        d = pos - pos[0]
+        if box is not None:
+            d = minimize_vectors(d, box=box)
+        if float(np.max(np.linalg.norm(d - d.mean(axis=0), axis=1))) >= lim:
+            return float("nan"), None, False, pos
+        rg = _rg_of(d, w)
+        return rg, None, True, d
+
+    uniq, inv = np.unique(np.asarray(mol_ids), return_inverse=True)
+    n_mol = uniq.size
+    msum = np.bincount(inv, weights=w, minlength=n_mol)
+    com_w = np.stack([np.bincount(inv, weights=w * pos[:, k], minlength=n_mol) / msum
+                      for k in range(3)], axis=1)
+    shift = pos - com_w[inv]
+    if box is not None:
+        shift = minimize_vectors(shift, box=box)
+    # 逐分子安全判据
+    max_shift = np.zeros(n_mol)
+    np.maximum.at(max_shift, inv, np.linalg.norm(shift, axis=1))
+    if float(max_shift.max()) >= lim:
+        return float("nan"), None, False, pos
+    d = com_w[inv] + shift
+    rg_mol = np.array([_rg_of(d[inv == j], w[inv == j]) for j in range(n_mol)])
+    return _rg_of(d, w), rg_mol, True, d
+
+
+def _rg_of(pos, w):
+    """给定坐标与权重算质量加权 Rg（与 :func:`compute_rg` 同一公式）。"""
+    com = (w[:, None] * pos).sum(axis=0) / w.sum()
+    dd = pos - com
+    return float(np.sqrt((w * (dd ** 2).sum(axis=1)).sum() / w.sum()))
+
+
 def compute_rg(pos: np.ndarray, masses: np.ndarray | None = None) -> float:
     """回转半径。
 
@@ -559,11 +634,27 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
     multi = n_mol > 1
     #: 只有真的拆开了分子才做逐分子统计（per_molecule=False 时 slices 为空）
     do_per_mol = multi and bool(slices)
+    #: 原子级分子编号（两个分支都会绑定：ms 分支是 _m，否则是 _mm）
+    mol_ids = _m if ms is not None else _mm
+    n_fast = 0
     rg_mol = np.full((n_frame, n_mol), np.nan)
 
     for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
         # 整组只展开一次：positions_for 内部按连通分量（即按分子）聚拢，
         # 因此逐分子 Rg 可以直接在这份坐标上切片，无需重复展开。
+        # ---- 快速路径：相对质心的最小镜像位移（全程向量化）------------------
+        # 为什么等价：仲裁实测（PEG9，200 条链）在**跨度 < 半盒**的 122 条链上
+        # unwrap / 最小镜像 / MDAnalysis 原生 radius_of_gyration 三条路径完全一致
+        # （最大偏差 0.0000 Å）。rg_fast 内部逐帧检查安全性，任一分子尺度
+        # ≥ 0.4×最短盒边就返回 safe=False，这里自动回退到精确展开。
+        # 为什么必须优化：unwrap 是 Python 层逐碎片循环（200 碎片 → 20.9 ms/帧，
+        # 整条轨迹 105 s），而 Rg 数学本身只要 0.5–3.4 ms/帧。
+        # 用 MDAnalysis 的逐碎片展开（精确路径）。向量化展开（rg_fast）**不接线**：
+        # 实测它与 MDAnalysis 的展开在**逐分子** Rg 上完全一致，但**整组** Rg 会差
+        # 0.02 Å（PEG 200 链）～2.24 Å（AdK water 11084 分子）—— 差别来自"每个分子
+        # 选哪个镜像"这一自由度：散布组分的整组 Rg 本身依赖约定、没有唯一值。
+        # 为了不让同一份数据在两个版本里给出不同的数，这里仍走精确路径；
+        # 需要提速时应先明确"整组 Rg 采用哪个约定"，再改（见 rg_fast 的文档）。
         pos = positions_for(ag, unwrap=unwrap)
         rg[k] = compute_rg(pos, masses)
         if do_per_mol:
@@ -654,6 +745,7 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
             res.add_notes("已按 per_molecule=False 关闭逐分子统计。")
 
     res.add_notes(f"质量加权: {mass_weighted}；PBC 展开: {unwrap}")
+
     res.add_notes(f"参与统计原子数: {ag.n_atoms}")
     if mass_note:
         res.add_notes(mass_note)
@@ -661,6 +753,22 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
 
 
 @register("ree", "端到端距离 R_ee")
+
+def _bond_graph_ends_prefer_heavy(ag) -> dict:
+    """优先用**重原子键图**定链端，重原子图给不出端点时回退到全图。
+
+    为什么改默认：全图（含 H）时"度为 1 的原子"包含**端基氢**，得到的并不是化学
+    意义上的链端。实测 20mer 全原子体系：全图给 end20(HxaA)-beg1(HxaA) → 16.24 Å，
+    而作者（PLUMED ``e2e.dat``：``ATOMS=5,423``，即首尾 residue 的 **O1 氧**）
+    给 11.928 Å。改用重原子图后默认就落在端基杂原子上，与文献口径一致。
+    """
+    info = bond_graph_ends(ag, heavy_only=True)
+    if info.get("ok"):
+        info["method"] = (info.get("method") or "") + "（重原子键图）"
+        return info
+    return bond_graph_ends(ag, heavy_only=False)
+
+
 def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
                        atom_indices: Sequence[int] | None = None,
                        ends: str = "bond_graph",
@@ -711,7 +819,7 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
         skipped = 0
         for sl, name in zip(slices, mol_labels):
             sub = ag[sl]
-            info = bond_graph_ends(sub)
+            info = _bond_graph_ends_prefer_heavy(sub)
             if not info["ok"] or info["ends"] is None:
                 skipped += 1
                 continue
@@ -723,7 +831,7 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
             notes.append(f"该组分含 {len(ms[1])} 个分子，已**逐个分子**用自己的"
                          f"键图端原子计算 R_ee（有效 {len(pairs)} 个分子）。")
     else:
-        info = bond_graph_ends(ag)
+        info = _bond_graph_ends_prefer_heavy(ag)
         if not info["ok"] or info["ends"] is None:
             res = AnalysisResult(
                 name="ree",

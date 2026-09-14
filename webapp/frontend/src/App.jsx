@@ -72,6 +72,8 @@ export default function App() {
     ree_ends: 'bond_graph', ree_atoms: '',
     // BOO / 晶体识别：邻域半径留空 = 自动（按最近邻距离中位数推定）
     boo_cutoff: '', boo_averaged: true, q6_solid: 0.5, min_cluster: 10,
+    // 面内 RDF (2D) / 两组分质心距
+    rdf2d_rmax: 70, rdf2d_nbins: 140, slab_lo: '', slab_hi: '', comdist_pbc: false,
   })
   const [primary, setPrimary] = useState({ mode: 'auto' })
   const [components, setComponents] = useState([])
@@ -162,6 +164,13 @@ export default function App() {
     // 可选数值：留空 → null（后端按默认/自动处理），否则转成数字
     const optNum = (v) => (v === '' || v == null ? null : Number(v))
 
+    // 叶层范围：两个都填才生效（rdf2d 的 slab），任一留空 = 全盒
+    const slabRange = (() => {
+      const lo = optNum(params.slab_lo)
+      const hi = optNum(params.slab_hi)
+      return (lo === null || hi === null) ? null : [lo, hi]
+    })()
+
     const reeAtoms = (() => {
       const raw = String(params.ree_atoms ?? '').trim()
       if (!raw) return null
@@ -208,6 +217,13 @@ export default function App() {
         crystal: { cutoff: optNum(params.boo_cutoff),
                    q6_solid: Number(params.q6_solid) || 0.5,
                    min_cluster: Number(params.min_cluster) || 10 },
+        // 面内 RDF (2D)：slab 留空 = 全盒；两组分质心距：默认包裹坐标相减(与作者一致)
+        rdf2d: { plane_axis: Number(params.axis) ?? 2,
+                 rmax: Number(params.rdf2d_rmax) || 70,
+                 nbins: Number(params.rdf2d_nbins) || 140,
+                 slab: slabRange },
+        comdist: { axis: Number(params.axis) ?? 2,
+                   pbc: params.comdist_pbc === true },
       },
       selection: { primary, components },
     }

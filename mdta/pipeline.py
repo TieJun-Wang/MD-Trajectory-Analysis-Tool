@@ -44,6 +44,8 @@ DEFAULT_PARAMS: dict = {
     "dihedral": {"mode": "auto", "gauche_edge": 120.0},
     "density": {"axis": 2, "nbins": 100, "mode": "mass"},
     "rdf": {"rmax": 12.0, "nbins": 120, "compare_halves": False},
+    "rdf2d": {"plane_axis": 2, "rmax": 70.0, "nbins": 140},
+    "comdist": {"axis": 2, "pbc": False},
     "contact": {"cutoff": 5.0},
     "interface": {"axis": 2, "nbins": 120},
     # 取向链段默认取**化学重复单元**（1.0.1 起；1.0.0 为几何骨架 "backbone"）
@@ -72,6 +74,8 @@ ANALYSIS_TITLES = {
     "dihedral": "二面角分析",
     "density": "密度分布",
     "rdf": "径向分布函数 RDF",
+    "rdf2d": "面内径向分布 RDF (2D)",
+    "comdist": "两组分质心距",
     "contact": "接触分析",
     "interface": "界面宽度分析",
     "orientation": "链段取向分析",
@@ -86,7 +90,7 @@ ANALYSIS_TITLES = {
 #: 与「图表导航」的分层都从这里生成，不会各写一份导致对不上。
 ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("链构象", ("rg", "ree", "dihedral")),
-    ("空间结构", ("density", "rdf", "contact", "interface")),
+    ("空间结构", ("density", "rdf", "rdf2d", "comdist", "contact", "interface")),
     ("取向与结晶", ("orientation", "order", "boo", "crystal")),
     ("动力学与输运", ("msd",)),
 ]
@@ -241,6 +245,13 @@ class Analyzer:
 
         res = self._run_one(name, params=params, verbose=verbose)
         if res is not None:
+            # 把"拓扑能不能提供质量"这一信息随结果带下去，供 QC 判断
+            # （.gro/.pdb/.xyz 只有坐标：质量由元素/原子名**推断**，CG/联合原子
+            #  体系会算错 —— 实测 MARTINI 珠子 51 amu 被推成 9.0 amu，密度差 5.7×）
+            top = str(getattr(self.trajectory, "topology", "") or "")
+            ff = top.lower().endswith((".tpr", ".psf", ".prmtop", ".parm7", ".top"))
+            res.meta["拓扑文件"] = top.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
+            res.meta["拓扑含力场信息"] = bool(ff)
             qc.derive_checks(res)          # 统一把散落的判据变成结构化结论
         return res
 
@@ -278,6 +289,17 @@ class Analyzer:
             if len(groups) < 1:
                 return None
             return ifc.analyze_rdf(self.trajectory, groups, sel, verbose=verbose, **p)
+        if name == "rdf2d":
+            groups = self._rdf_groups()
+            if len(groups) < 1:
+                return None
+            return ifc.analyze_rdf_inplane(self.trajectory, groups, sel,
+                                           verbose=verbose, **p)
+        if name == "comdist":
+            if len(self.components) < 2:
+                return None
+            return ifc.analyze_com_distance(self.trajectory, self.components, sel,
+                                            verbose=verbose, **p)
         if name == "contact":
             a, b, la, lb = self._contact_pair()
             if a is None:

@@ -207,7 +207,10 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       {opts.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
     </select>
   )
-  const F = (key, label, kind, node, ph = '') => ({ key, label, span: spanOf(label, kind, ph), node })
+  // span 可显式覆盖：传 6 表示**独占一行**（用于让某项换行到下一行，
+  // 而不是被贪心装箱挤在同一行右侧）
+  const F = (key, label, kind, node, ph = '', span = null) =>
+    ({ key, label, span: span || spanOf(label, kind, ph), node })
 
   // 布尔开关：值必须是**真布尔**（后端按 bool 收），不能用上面 p() 的字符串写法
   const chk = (key, label, title = '', { disabled = false } = {}) => (
@@ -228,13 +231,29 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
   const singleMol = primaryMolecules === 1
 
   const GROUPS = [
+    ['面内 RDF (2D) / 两组分质心距', ['rdf2d', 'comdist'], [
+      F('axis', '法向轴', 'select',
+        sel('axis', [[2, 'c (2)'], [1, 'b (1)'], [0, 'a (0)']])),
+      F('rdf2d_rmax', '面内最大 r (Å)', 'input',
+        numInput('70', { step: 5, min: 1, ...p('rdf2d_rmax') }), '70'),
+      F('rdf2d_nbins', '面内 bin 数', 'input',
+        numInput('140', { step: 10, min: 10, ...p('rdf2d_nbins') }), '140'),
+      F('slab_lo', '叶层 z 下限 (Å)', 'input',
+        numInput('留空=全盒', { step: 1, ...p('slab_lo') }), '留空=全盒'),
+      F('slab_hi', '叶层 z 上限 (Å)', 'input',
+        numInput('留空=盒顶', { step: 1, ...p('slab_hi') }), '留空=盒顶'),
+      F('comdist_pbc', '质心距 PBC', 'check',
+        chk('comdist_pbc', '用最小镜像',
+          '关（默认）：包裹坐标直接相减，与文献 COM.py 一致；'
+          + '开：对质心差取最小镜像，适合质心跨盒边界的体系'), '用最小镜像', 6),
+    ]],
     ['键取向序 BOO / 晶体识别', ['boo', 'crystal'], [
       F('boo_cutoff', '邻域半径 (Å)', 'input',
         numInput('自动', { step: 0.1, min: 0, ...p('boo_cutoff') }), '自动'),
       F('boo_averaged', '用平均版 q̄_l', 'check',
         chk('boo_averaged', '是（推荐）',
           '开：Lechner–Dellago 平均版 q̄_l（先用邻居的 q_lm 平均再求模，识别固-液更稳）；'
-          + '关：单原子 q_l（液相里涨落大，判据会偏松）')),
+          + '关：单原子 q_l（液相里涨落大，判据会偏松）'), '是（推荐）'),
       F('q6_solid', '固相判据 q̄6 >', 'input',
         numInput('0.5', { step: 0.05, min: 0, max: 1, ...p('q6_solid') }),
         '0.5'),
@@ -244,7 +263,7 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     ['回转半径 Rg / 端到端距离 R_ee', ['rg', 'ree'], [
       F('mass_weighted', '质量加权 Rg', 'check',
         chk('mass_weighted', '用质量加权', '开：质量加权回转半径（默认）；'
-          + '关：等权（几何）口径，每个原子权重相同')),
+          + '关：等权（几何）口径，每个原子权重相同'), '用质量加权'),
       F('per_molecule', '逐分子统计', 'check',
         chk('per_molecule', '按分子分别算',
           singleMol
@@ -252,7 +271,7 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
             : '开（默认）：Rg/R_ee 逐分子计算后再对分子取平均（多分子组分才有'
               + '「单分子 Rg 平均」等统计量）；关：只给整组值（多分子组分的整组 '
               + 'Rg 接近盒子尺度，不是「分子有多大」）',
-          { disabled: singleMol })),
+          { disabled: singleMol }), '按分子分别算'),
       F('ree_ends', 'R_ee 链端来源', 'select', sel('ree_ends', [
         ['bond_graph', 'bond_graph（键连图端基，默认）'],
         ['selection', 'selection（所选原子组首尾原子）'],
@@ -410,6 +429,50 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
     .filter(([, s]) => s != null)
     .sort((a, b) => a[1] - b[1])
 
+  // 预估用时区块：**必须有东西可看**。
+  // 以前它整个套在 `{busy && …}` 里、且只在 `estRows.length > 0` 时才渲染 ——
+  // 于是"这次没预估出任何东西"时这块地方**一个字都不说**，看起来就像功能被删了。
+  // 而"没预估"其实有明确原因（帧数 < 40 / 只勾了 1 项 / 开关被关掉），后端都会
+  // 写在 estimate_note 里，这里必须把它显示出来；有名单时再列出短→长的顺序。
+  const estBox = (estRows.length > 0 || live?.estimateNote) ? (
+    <div className="est-box">
+      <div className="hint" title={live?.estimateNote}>
+        <b>预估用时</b>
+        <span className="dim">
+          {estRows.length
+            ? `（${busy ? (live?.estimateNote || '按实测外推')
+              : `上一次运行：${live?.estimateNote || '按实测外推'}`}，已按短 → 长排序）`
+            : `（${live?.estimateNote || '本次没有预估，按勾选顺序直接跑'}）`}
+        </span>
+      </div>
+      {estRows.length > 0 && (
+        <ul className="est-list">
+          {estRows.map(([n, s]) => {
+            // 算完的项显示**实测**秒数（后端的 timings），没算完才显示 ≈ 预估
+            const done = run?.timings?.[n]
+            return (
+              <li key={n} className={n === live?.current ? 'cur' : ''}>
+                <span className="est-name">{titles[n] || n}</span>
+                <span className={`est-sec${done != null ? ' done' : ''}`}>
+                  {done != null ? `实测 ${fmtSec(done)}` : `≈${fmtSec(s)}`}
+                </span>
+              </li>
+            )
+          })}
+          {/* 有实测但没进预估列表的项（例如关掉开关后估不出来、或分析被跳过）*/}
+          {Object.entries(run?.timings || {})
+            .filter(([n]) => !(n in (live?.estimates || {})))
+            .map(([n, s]) => (
+              <li key={`t-${n}`}>
+                <span className="est-name">{titles[n] || n}</span>
+                <span className="est-sec done">实测 {fmtSec(s)}</span>
+              </li>
+            ))}
+        </ul>
+      )}
+    </div>
+  ) : null
+
   return (
     <>
       <div className="sect-title" style={{ marginTop: 10 }}>
@@ -439,40 +502,9 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
             {live?.elapsed ? `（已用 ${live.elapsed.toFixed(0)}s）` : ''}
           </div>
           {/* 预估用时：后端在正式跑之前，每项先跑几帧实测再外推
-              （固定开销 + 每帧代价），这里按短→长列出来 —— 排序就是执行顺序 */}
-          {estRows.length > 0 && (
-            <div className="est-box">
-              <div className="hint" title={live?.estimateNote}>
-                <b>预估用时</b>
-                <span className="dim">
-                  {`（${live?.estimateNote || '按实测外推'}，已按短 → 长排序）`}
-                </span>
-              </div>
-              <ul className="est-list">
-                {estRows.map(([n, s]) => {
-                  // 算完的项显示**实测**秒数（后端的 timings），没算完才显示 ≈ 预估
-                  const done = run?.timings?.[n]
-                  return (
-                    <li key={n} className={n === live?.current ? 'cur' : ''}>
-                      <span className="est-name">{titles[n] || n}</span>
-                      <span className={`est-sec${done != null ? ' done' : ''}`}>
-                        {done != null ? `实测 ${fmtSec(done)}` : `≈${fmtSec(s)}`}
-                      </span>
-                    </li>
-                  )
-                })}
-                {/* 有实测但没进预估列表的项（例如关掉开关后估不出来、或分析被跳过）*/}
-                {Object.entries(run?.timings || {})
-                  .filter(([n]) => !(n in (live?.estimates || {})))
-                  .map(([n, s]) => (
-                    <li key={`t-${n}`}>
-                      <span className="est-name">{titles[n] || n}</span>
-                      <span className="est-sec done">实测 {fmtSec(s)}</span>
-                    </li>
-                  ))}
-              </ul>
-            </div>
-          )}
+              （固定开销 + 每帧代价），这里按短→长列出来 —— 排序就是执行顺序。
+              「没预估出东西」时也必须显示原因，见上面 estBox 的注释。 */}
+          {estBox}
           {pending.length > 0 && (
             <div className="hint dim" title={pending.map((n) => titles[n] || n).join('、')}>
               排队中：{pending.map((n) => titles[n] || n).join('、')}
@@ -483,6 +515,10 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
           )}
         </>
       )}
+
+      {/* 跑完之后这块**继续留着**：预估秒数变实测秒数，用户能核对
+          "关掉预估到底快没快"，也避免刚跑完就"这个模块不见了"的错觉。 */}
+      {!busy && estBox}
 
       {lastLine && !busy && (
         <div className="hint" title={lastLine}>

@@ -111,8 +111,8 @@ def health() -> dict:
 @app.get("/api/analyses")
 def analyses() -> dict:
     return {
-        "order": list(DEFAULT_ORDER),
-        "titles": {k: ANALYSIS_TITLES.get(k, k) for k in DEFAULT_ORDER},
+        "order": list(ANALYSIS_TITLES),
+        "titles": {k: ANALYSIS_TITLES.get(k, k) for k in ANALYSIS_TITLES},
         # 按大纲模块分组（链构象 / 空间结构 / 取向与结晶 / 动力学与输运）：
         # 前端「分析功能」预设按钮与「图表导航」分层都用这一份，
         # 避免前后端各维护一份分组表而对不上。

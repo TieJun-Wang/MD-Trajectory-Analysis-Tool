@@ -347,7 +347,13 @@ table.notes-table tr + tr td { border-top: 1px solid #f1f5f9; }
 /* 参数表里的布尔开关（如 Rg 的质量加权 / 逐分子统计）：与输入框同高、不换行 */
 .pchk {
   display: inline-flex; align-items: center; gap: 5px;
-  font-size: 12px; white-space: nowrap; cursor: pointer;
+  font-size: 12px; cursor: pointer;
+  /* 复选框与文字**必须同一行**：不允许在控件内部折行。
+     不溢出的保障改由"宽度估算"负责 —— 参数表计算跨度时已把复选框文字
+     （F(...) 的 ph 参数）算进去，最长的「质心距 PBC / 用最小镜像」还显式占了整行。
+     若以后新增长复选框，请同样把文字传给 ph（或直接给 span=6），不要靠换行兜底。 */
+  white-space: nowrap; flex-wrap: nowrap;
+  max-width: 100%; min-width: 0;
 }
 .pchk input { margin: 0; }
 /* 置灰的开关：单分子主链时「逐分子统计」无作用，灰掉但仍可见（说明原委） */
@@ -379,6 +385,24 @@ table.notes-table tr + tr td { border-top: 1px solid #f1f5f9; }
 /* 已算完的项显示实测秒数：用深一点的色，和 ≈ 预估区分开 */
 .est-sec.done { color: #166534; }
 .est-list li.cur .est-sec { color: #4338ca; }
+
+
+/* ------------------------------------------------- 复选框控件不许内部折行 */
+/* 要求：**复选框与它自己的文字必须在同一行**。
+   容器（一行胶囊、一行参数）当然可以换行，但一个"☑ 文字"控件本身不能拆成两行 ——
+   否则视觉上勾选框与文字会分家。
+   已核查的用法：
+     .pchk     参数表里的复选框（质量加权 / 逐分子统计 / 用平均版 q̄_l / 用最小镜像）
+     .check    分析功能勾选项、运行区的「先预估用时…」
+     .inline   导出区「每个面板单独出图」
+     .chinline 导出模块 / 文件形式的胶囊（CSV 数据表、PNG 图…）
+   最后一条 :has() 兜底：任何没写 class 的 label 只要里面是复选框，也强制单行。
+   ⚠️ 单行不等于会溢出 —— 参数表的跨度估算已把复选框文字宽度算进去
+   （见 SetupPanel 的 F(..., ph) 与 span 覆盖），新增控件请沿用同样做法。 */
+.pchk, .check, .inline, .chinline,
+label:has(> input[type="checkbox"]) {
+  white-space: nowrap;
+}
 
 /* ------------------------------------------------------------ 科研 QC 页 */
 /* 排版与「统计量」共用同一套：.statsview / .stattabs / .statblock / table.stats，

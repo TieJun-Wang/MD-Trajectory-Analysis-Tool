@@ -313,6 +313,11 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
                   "密度用时间窗口内的平均盒尺寸归一化。")
     res.add_notes("体相密度取分布上四分位区的中位数，作为归一化基准。")
     res.add_notes(
+        "⚠️ 本剖面是**时间平均**结果。若要统计**窄带**（±几 Å）内的原子数或密度，"
+        "必须**逐帧**用动态参考（膜质心/界面位置）重算，不能从时间平均剖面里取窄带 —— "
+        "实测某 CG 膜体系：逐帧膜质心得 0.515 个水珠子，用时间平均质心固定带得 7.76 个"
+        "（**15×**），因为膜质心 z 的波动 std 就有 5.53 Å（范围 20.6–46.3 Å）。")
+    res.add_notes(
         f"本次密度口径 = {res.summary['密度口径']}；"
         f"各组分的「体相密度」「平均密度」都按这个口径给出（质量密度与数密度"
         f"相差一个摩尔质量量级，不可直接互比）。用 mode=\"number\"/\"mass\" 切换。")
@@ -364,6 +369,11 @@ RDF_MODE_LABELS = {
     "intra": "分子内（同一分子）",
     "total": "总体（两者都含，1.0.0 旧行为）",
 }
+
+
+#: 剔除 1-2 成键配对的距离下限（Å）：比任何共价键都长
+#: （C–C 1.54 / C–O 1.43 / C–H 1.09），用于面内 RDF 的近邻过滤。
+_BOND_EXCLUDE = 2.2
 
 
 def _atom_molnums(ag) -> np.ndarray | None:
@@ -894,6 +904,195 @@ def _coordination_number(r: np.ndarray, g: np.ndarray, rmin: float | None,
 
 
 # ------------------------------------------------------------------ 接触分析
+@register("comdist", "两组分质心距")
+def analyze_com_distance(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
+                         pair: tuple | None = None, axis: int = 2, pbc: bool = False,
+                         verbose: bool = False) -> AnalysisResult:
+    """两个组分的**质心距**随时间（作者 ``COM.py`` 的量：聚合物–膜 z 距离）。
+
+    口径（默认与文献一致，可切换）：
+
+    - ``pair`` 默认取**原子数最多**的两个组分（作者：聚合物 vs 膜）；
+    - ``axis`` 给"沿该轴的分量"，同时输出总距离；
+    - ``pbc=False``（默认）按**包裹坐标直接相减**，与 ``COM.py`` 的
+      ``z_poly - z_mem`` 完全一致；``pbc=True`` 时对质心差取**最小镜像**，
+      适合质心本身跨越盒边界的体系。
+
+    ⚠️ 注意：这是**质心距**，不是界面宽度，也不能用来推"某窄带内的粒子数" ——
+    后者必须逐帧用**动态参考**（本函数逐帧取质心正是这个原因；实测膜质心 z 的
+    波动 std 可达 5 Å 量级，用时间平均参考会把 ±5 Å 窄带的计数算错一个数量级）。
+    """
+    names = list(groups.keys())
+    if len(names) < 2:
+        raise ValueError("质心距需要两个组分")
+    if pair is not None:
+        for nm in pair:
+            if nm not in groups:
+                raise ValueError(f"组分 {nm!r} 不存在；可用 {names}")
+        a_name, b_name = str(pair[0]), str(pair[1])
+    else:
+        ordered = sorted(groups.items(), key=lambda kv: -kv[1].n_atoms)
+        a_name, b_name = ordered[0][0], ordered[1][0]
+    from ..units import time_axis          # 本模块里 time_axis 是局部导入
+
+    ga, gb = groups[a_name], groups[b_name]
+
+    times = np.asarray(selection.times_ps, dtype=float)
+    n_f = times.size
+    d_tot = np.full(n_f, np.nan)
+    d_axis = np.full(n_f, np.nan)
+    ca = np.full((n_f, 3), np.nan)
+    cb = np.full((n_f, 3), np.nan)
+    for k, (_frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
+        pa = np.asarray(ga.center_of_mass(), dtype=float)
+        pb = np.asarray(gb.center_of_mass(), dtype=float)
+        diff = pa - pb
+        if pbc:
+            from MDAnalysis.lib.distances import minimize_vectors
+
+            diff = minimize_vectors(diff[None, :], box=mdt.universe.dimensions)[0]
+        ca[k], cb[k] = pa, pb
+        d_tot[k] = float(np.linalg.norm(diff))
+        d_axis[k] = float(diff[int(axis)])
+
+    tx, tlabel = time_axis(times)
+    res = AnalysisResult(
+        name="comdist",
+        title=f"两组分质心距 —— {a_name} vs {b_name}",
+        meta={"A": a_name, "B": b_name, "axis": int(axis), "pbc": bool(pbc),
+              "n_frames": n_f},
+    )
+    axn = "xyz"[int(axis)]
+    res.panels = [Panel(xlabel=tlabel, ylabel="质心距 (Å)", title="质心距随时间"),
+                  Panel(xlabel=tlabel, ylabel=f"沿 {axn} 轴分量 (Å)",
+                        title=f"{a_name} − {b_name} 沿 {axn} 轴的有符号距离")]
+    res.add_curve(f"{a_name}–{b_name} 距离", tx, d_tot, kind="line", panel=0)
+    res.add_curve(f"{a_name}–{b_name} 平均", tx, np.full_like(tx, np.nanmean(d_tot)),
+                  kind="line", panel=0)
+    res.add_curve(f"沿 {axn} 轴", tx, d_axis, kind="line", panel=1)
+    for tag, arr in (("距离", d_tot), (f"沿 {axn} 轴", d_axis)):
+        fin = arr[np.isfinite(arr)]
+        if fin.size:
+            res.summary[f"{tag} 平均 (Å)"] = float(np.mean(fin))
+            res.summary[f"{tag} 标准差 (Å)"] = float(np.std(fin))
+            res.summary[f"{tag} 最小 (Å)"] = float(np.min(fin))
+            res.summary[f"{tag} 最大 (Å)"] = float(np.max(fin))
+    res.summary["A 组分"] = a_name
+    res.summary["B 组分"] = b_name
+    res.summary["质心口径"] = ("最小镜像" if pbc
+                              else "包裹坐标直接相减（与作者 COM.py 一致）")
+    res.add_notes(
+        f"逐帧取 {a_name} 与 {b_name} 的**质心**再作差（质心口径："
+        f"{'最小镜像' if pbc else '包裹坐标直接相减'}）。"
+        "这是质心距，不是界面宽度；也不能由它推「窄带内粒子数」。")
+    res.add_notes(
+        "为什么要逐帧取质心：膜/界面的位置本身在涨落（实测某 CG 膜体系膜质心 z 的 "
+        "std 达 5.53 Å）。任何以界面为参考的**窄带**统计都必须用**逐帧**参考，"
+        "用时间平均参考会把结果算错一个数量级。")
+    return res
+
+@register("rdf2d", "面内径向分布 RDF (2D)")
+def analyze_rdf_inplane(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
+                        plane_axis: int = 2, rmax: float = 70.0, nbins: int = 140,
+                        slab: tuple | None = None, max_group_atoms: int = 3000,
+                        verbose: bool = False) -> AnalysisResult:
+    """膜平面内的 **2D 自 RDF** ``g2D(r_xy)``（膜体系的标准做法，3D g(r) 不适用）。
+
+    与 3D 的区别（照 ``Supporting_Info/Lipid_RDF.py`` 的口径实现）：
+
+    - 距离只取**面内两个分量**（忽略法向），且只对这两个分量做最小镜像；
+    - 归一化用**面内面密度** ``rho2D = N/(Lx*Ly)`` 与 **2D 壳面积** ``2*pi*r*dr``
+      （而不是 3D 的球壳与体积密度）；
+    - ``slab=(lo, hi)`` 只统计某一叶层（作者用 z > 膜质心）。
+
+    作者参考实现见 ``Lipid_RDF.py`` 的 ``compute_rdf()``：逐对（i != j）取面内距离、
+    直方图计数后除以 ``N * rho2D * 2*pi*r*dr``。本实现向量化等价，并保留他们
+    "rho 用整个面内面积"的约定（分母不随叶层厚度变化）。
+    """
+    times = np.asarray(selection.times_ps, dtype=float)
+    n_f = times.size
+    ax = int(plane_axis)
+    in_ax = [i for i in range(3) if i != ax]
+    edges = np.linspace(0.0, float(rmax), int(nbins) + 1)
+    centers = bin_edges_to_centers(edges)
+    dr = edges[1] - edges[0]
+    shell = 2.0 * np.pi * centers * dr
+    gsum: dict[str, np.ndarray] = {}
+    n_atoms: dict[str, int] = {}
+    notes_subsample: list[str] = []
+    n_acc = 0
+    for _k, (_frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
+        dims = np.asarray(mdt.universe.dimensions, dtype=float)
+        L_in = dims[in_ax]
+        A = float(np.prod(L_in))
+        for name, ag in groups.items():
+            allpos = np.asarray(ag.positions, dtype=float)
+            if slab is not None:
+                z = allpos[:, ax]
+                allpos = allpos[(z >= float(slab[0])) & (z <= float(slab[1]))]
+            n = allpos.shape[0]
+            n_atoms[name] = max(n_atoms.get(name, 0), n)
+            if n < 2:
+                continue
+            if n > int(max_group_atoms):
+                # 逐对 O(N²)：大基团按**整分子**抽稀（2D RDF 是密度归一化量，
+                # 抽稀只增加噪声、不改峰位与峰高），而不是直接报错 ——
+                # 否则界面上"全选"在大体系上会整项失败。
+                keep_n = int(max_group_atoms)
+                step = max(1, n // keep_n)
+                allpos = allpos[::step]
+                n = allpos.shape[0]
+                note = f"面内 RDF 为逐对统计，{name} 超过上限，已抽稀到 {n} 个原子"
+                if note not in notes_subsample:
+                    notes_subsample.append(note)
+            pos = allpos[:, in_ax]
+            delta = pos[:, None, :] - pos[None, :, :]
+            delta -= L_in[None, None, :] * np.round(delta / L_in[None, None, :])
+            d = np.sqrt((delta ** 2).sum(axis=2))
+            # 排除 1-2 成键配对：作者的 2D RDF 每个脂质只取**一个头基珠子**，
+            # 分子内不存在兄弟原子对；若直接对整个组分统计，最近邻就是共价键
+            # （实测出现 0.25 Å @ g=3.3 的假"第一峰"）。这里按比任何共价键都长
+            # 的下限剔除，保证峰位反映的是横向堆积而不是化学键。
+            m = d > _BOND_EXCLUDE
+            if not m.any():
+                continue
+            hist, _ = np.histogram(d[m], bins=edges)
+            rho = n / A
+            g = hist / (n * rho * np.maximum(shell, 1e-12))
+            gsum[name] = gsum.get(name, np.zeros_like(g)) + g
+        n_acc += 1
+
+    res = AnalysisResult(
+        name="rdf2d",
+        title=f"面内径向分布 RDF (2D) —— 法向轴 {ax}",
+        meta={"plane_axis": ax, "rmax_A": float(rmax), "nbins": int(nbins),
+              "n_frames": n_f, "slab_A": list(slab) if slab else None},
+    )
+    res.panels = [Panel(xlabel="面内距离 r_xy (Å)", ylabel="g2D(r)",
+                        title="面内径向分布")]
+    if slab is not None:
+        res.add_notes(f"仅统计法向位置在 {slab[0]:.1f}-{slab[1]:.1f} Å 之间的原子（叶层）。")
+    for name, gs in gsum.items():
+        g = gs / max(n_acc, 1)
+        res.add_curve(f"{name}-{name}", centers, g, kind="line", panel=0)
+        i = int(np.argmax(np.where(np.isfinite(g), g, -np.inf)))
+        res.summary[f"{name}-{name} 第一峰位置 (Å)"] = float(centers[i])
+        res.summary[f"{name}-{name} 第一峰高度 g_max"] = float(g[i])
+        res.summary[f"{name}-{name} 原子数"] = int(n_atoms.get(name, 0))
+    res.summary["统计帧数"] = int(n_acc)
+    for note in notes_subsample:
+        res.add_notes(note)
+    res.add_notes(
+        "2D 面内 RDF：距离只取面内分量、只对面内做最小镜像；归一化用 "
+        "rho2D = N/(Lx*Ly) 与 2D 壳面积 2*pi*r*dr。膜平面内的横向结构必须用这个口径 —— "
+        "3D g(r) 会把法向层间关联混进来，对膜体系没有意义。")
+    res.add_notes(
+        f"已剔除面内距离 < {_BOND_EXCLUDE:g} Å 的配对（1-2 成键）：作者的实现对每个脂质"
+        "只取一个头基珠子、不存在分子内配对；若对整个组分统计而不剔除，最近邻就是共价键，"
+        "会出现 0.25 Å 量级的假「第一峰」。")
+    return res
+
+
 @register("contact", "接触分析")
 def shares_one_molecule(ga, gb) -> bool:
     """两组是否**整个落在同一个分子**里（如蛋白与它共价相连的糖基）。

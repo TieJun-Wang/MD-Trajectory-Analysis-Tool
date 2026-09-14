@@ -290,11 +290,16 @@ ok(h.includes('链构象') && h.includes('空间结构') && h.includes('取向�
 ok(h.includes('已选 1 / 1'), 'FunctionBlock 显示已选数量')
 
 // 「仅 XX」预设按钮：每一类都要有一个，参考「仅链构象」
+// 注意：这里必须与后端 14 个分析项对齐（含 rdf2d / comdist）——
+// 空间结构这一类少写一项，「仅结构」预设就不再等于该类的完整名单，
+// 高亮断言会失败（曾经就这么漏过一次）。
 const FB_TITLES = {
   rg: '回转半径 Rg', ree: '端到端距离 R_ee', dihedral: '二面角分析',
-  density: '密度分布', rdf: '径向分布函数 RDF', contact: '接触分析',
+  density: '密度分布', rdf: '径向分布函数 RDF', rdf2d: '面内径向分布 RDF (2D)',
+  comdist: '两组分质心距', contact: '接触分析',
   interface: '界面宽度分析', orientation: '链段取向分析',
-  order: '结构有序度分析', msd: '均方位移 MSD',
+  order: '结构有序度分析', boo: '键取向序参数 BOO', crystal: '晶体/非晶区域识别',
+  msd: '均方位移 MSD',
 }
 const FB_ORDER = Object.keys(FB_TITLES)
 h = flat(render(() => React.createElement(M.FunctionBlock, {
@@ -311,14 +316,15 @@ ok(!h.includes('全不选'), '已去掉「全不选」（全不选 = 什么都�
 const nBtns = (h.match(/class="mini/g) || []).length
 ok(nBtns === 5, '按钮行恰好 5 个（全选 + 4 个仅 XX），能排在一行', `buttons=${nBtns}`)
 
-// 当前选择正好等于「界面」这一类时，该按钮要高亮（active）
+// 当前选择正好等于「结构」这一类时，该按钮要高亮（active）
 h = flat(render(() => React.createElement(M.FunctionBlock, {
   titles: FB_TITLES, order: FB_ORDER,
-  which: ['density', 'rdf', 'contact', 'interface'], setWhich: () => {},
+  which: ['density', 'rdf', 'rdf2d', 'comdist', 'contact', 'interface'],
+  setWhich: () => {},
 })))
 ok(/class="mini active"[^>]*>仅结构/.test(h) || /仅结构/.test(h) && /mini active/.test(h),
   '「仅结构」在选中空间结构类时高亮')
-ok(h.includes('已选 4 / 10'), '高亮时已选数量正确')
+ok(h.includes('已选 6 /'), '高亮时已选数量正确（6 项：density/rdf/rdf2d/comdist/contact/interface）')
 
 // 选择为「取向与结晶」时应高亮「仅取向」而不是「仅结构」
 h = flat(render(() => React.createElement(M.FunctionBlock, {
@@ -411,6 +417,35 @@ h = flat(render(() => React.createElement(M.RunBlock, {
   busy: false, progress: 0, onRun: () => {}, onCancel: () => {},
   estimateOn: true, setEstimateOn: () => {}, lastLine: '', onOpenLog: () => {},
 })))
+// ------------------------------------- 面内 RDF (2D) / 两组分质心距 参数（新）
+h = flat(render(() => React.createElement(M.ParamBlock, {
+  params: { axis: 2, rdf2d_rmax: 70, rdf2d_nbins: 140,
+            slab_lo: '', slab_hi: '', comdist_pbc: false },
+  setParams: () => {}, which: ['rdf2d', 'comdist'],
+})))
+ok(h.includes('面内最大 r'), 'ParamBlock 有面内 RDF 的 rmax 输入')
+ok(h.includes('面内 bin 数'), 'ParamBlock 有面内 RDF 的 bin 数输入')
+ok(h.includes('留空=全盒') && h.includes('留空=盒顶'),
+   'ParamBlock 有叶层 z 上下限（留空=全盒）')
+ok(h.includes('法向轴'), 'ParamBlock 有法向轴选择（rdf2d/comdist 共用）')
+ok(h.includes('用最小镜像'), 'ParamBlock 有质心距最小镜像开关（默认关，与作者口径一致）')
+// 结构断言：勾选框必须**独占一行**且排在「叶层 z 上限」之后（不能挤在同一行右侧）
+const rowsQc = h.split('<tr').filter((r) => r.includes('叶层 z 上限') || r.includes('用最小镜像'))
+const slabRow = rowsQc.find((r) => r.includes('叶层 z 上限')) || ''
+const chkRow = rowsQc.find((r) => r.includes('用最小镜像')) || ''
+ok(slabRow && chkRow && !slabRow.includes('用最小镜像'),
+   '「用最小镜像」不与「叶层 z 上限」同行（已换行）')
+ok(rowsQc.indexOf(chkRow) > rowsQc.indexOf(slabRow),
+   '「用最小镜像」排在「叶层 z 上限」之后')
+ok(!flat(render(() => React.createElement(M.ParamBlock, {
+  params: { axis: 2 }, setParams: () => {}, which: ['rdf'],
+}))).includes('面内最大 r'), '未勾选 rdf2d/comdist 时不显示这些参数')
+
+// 上面几条改了 h，这里重新渲染一次 RunBlock 再断言（不要依赖 h 的残留值）
+h = flat(render(() => React.createElement(M.RunBlock, {
+  busy: false, progress: 0, onRun: () => {}, onCancel: () => {},
+  estimateOn: true, setEstimateOn: () => {}, lastLine: '', onOpenLog: () => {},
+})))
 ok(h.includes('先预估用时') && h.includes('长跑'), 'RunBlock 有「先预估用时并按短 → 长跑」开关')
 
 const liveEst = {
@@ -435,6 +470,43 @@ ok(h.includes('≈1 min 40 s') || h.includes('≈99.7 s'),
 ok(h.indexOf('均方位移 MSD') < h.indexOf('径向分布函数 RDF'),
    '预估列表按用时短→长排列（MSD 在 RDF 之前）')
 ok(h.includes('est-list') && h.includes('cur'), '预估列表有列表结构且标出当前项')
+
+// ---- 「没预估出东西」时也必须显示原因（否则整块像被删了）------------------
+// 以前 est-box 只在 estRows.length > 0 时渲染，且整体套在 {busy && …} 里：
+// 帧数 < 40 / 只勾 1 项 / 关掉开关这三种情况下一个字都不显示。
+h = flat(render(() => React.createElement(M.RunBlock, {
+  busy: true, progress: 0.1, onRun: () => {}, onCancel: () => {}, live: {
+    ...live, status: 'running', phase: 'run', current: 'rg',
+    estimates: {}, estimateNote: '只有 12 帧，预估本身的成本已不可忽略（要跑 4 帧），直接开跑',
+  },
+  which: ['rg'], titles: { rg: '回转半径 Rg' },
+  lastLine: '', onOpenLog: () => {},
+})))
+ok(h.includes('预估用时') && h.includes('只有 12 帧'),
+   '没有预估出任何项时也显示「预估用时」+ 原因（不再整块消失）')
+ok(h.includes('est-box') && !h.includes('est-list'),
+   '没有预估名单时只显示原因，不渲染空列表')
+h = flat(render(() => React.createElement(M.RunBlock, {
+  busy: true, progress: 0.1, onRun: () => {}, onCancel: () => {}, live: {
+    ...live, status: 'running', phase: 'run', current: '',
+    estimates: {}, estimateNote: '只勾选了 1 项，无需预估排序，直接跑',
+  },
+  which: ['rg'], titles: { rg: '回转半径 Rg' },
+  lastLine: '', onOpenLog: () => {},
+})))
+ok(h.includes('只勾选了 1 项'), '只勾 1 项时显示后端给的跳过原因')
+
+// 跑完之后这块要**继续留着**（预估秒数 → 实测秒数），不能一结束就消失
+h = flat(render(() => React.createElement(M.RunBlock, {
+  busy: false, progress: 1, onRun: () => {}, onCancel: () => {},
+  live: { ...liveEst, status: 'idle' },
+  which: ['msd', 'rdf'], titles: { msd: '均方位移 MSD', rdf: '径向分布函数 RDF' },
+  run: { timings: { msd: 0.21 } },
+  lastLine: '', onOpenLog: () => {},
+})))
+ok(h.includes('预估用时') && h.includes('上一次运行'),
+   '跑完后仍显示预估用时区块（并标明是上一次运行）')
+ok(h.includes('实测') && h.includes('≈'), '跑完后已完成项显实测、未完成项仍显 ≈ 预估')
 
 // 算完的项要显示**实测**秒数（否则用户无法核对"关掉开关到底快没快"）
 h = flat(render(() => React.createElement(M.RunBlock, {
@@ -838,8 +910,12 @@ ok(M.FALLBACK_GROUPS.map(([l]) => l).join('/')
 ok(M.FALLBACK_GROUPS.every(([, , s]) => typeof s === 'string' && s.length >= 1 && s.length <= 3),
   '每个兜底分组都带 2 字按钮缩写', M.FALLBACK_GROUPS.map(([, , s]) => s).join('/'))
 const allNames = M.FALLBACK_GROUPS.flatMap(([, ns]) => ns)
-ok(allNames.length === 12 && new Set(allNames).size === 12,
-  '兜底分组覆盖 12 项且不重复', `n=${allNames.length}`)
+// 14 = 后端 ANALYSIS_TITLES / ANALYSIS_GROUPS 的项数（rdf2d 与 comdist 都要在，
+// 少一个的话「后端离线时用兜底分组」那条路径就会漏掉这一项）
+ok(allNames.length === 14 && new Set(allNames).size === 14,
+  '兜底分组覆盖 14 项且不重复', `n=${allNames.length}`)
+ok(allNames.includes('rdf2d') && allNames.includes('comdist'),
+  '兜底分组含 rdf2d / comdist（与后端分组定义同步）')
 ok(M.normalizeGroups(null) === M.FALLBACK_GROUPS, 'groups 缺失时用兜底')
 ok(M.normalizeGroups([]) === M.FALLBACK_GROUPS, 'groups 为空时用兜底')
 ok(M.normalizeGroups([{ label: 'X', names: ['rg'] }])[0][0] === 'X',

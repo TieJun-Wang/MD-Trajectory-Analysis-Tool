@@ -302,9 +302,13 @@ class Session:
         selection = self.az.require_frames()
 
         which = list(req.get("which") or DEFAULT_ORDER)
-        bad = [w for w in which if w not in DEFAULT_ORDER]
+        # 校验要针对**全部已注册分析项**，而不是 DEFAULT_ORDER（后者只是"默认
+        # 勾选的那批"）。否则界面里能勾上、提交却报"未知分析项"的分析（如
+        # rdf2d / comdist 这类可选项）在前端就完全用不了。
+        known = set(ANALYSIS_TITLES)
+        bad = [w for w in which if w not in known]
         if bad:
-            raise SessionError(f"未知分析项 {bad}；可用: {list(DEFAULT_ORDER)}")
+            raise SessionError(f"未知分析项 {bad}；可用: {sorted(known)}")
 
         params = {k: dict(v) for k, v in (req.get("params") or {}).items()
                   if isinstance(v, Mapping)}
@@ -452,6 +456,14 @@ class Session:
                 with self._lock:
                     job.phase = "run"
                     job.order = list(prep["which"])
+                    # 为什么必须写一句原因：界面上的「预估用时」区块以前只在"估出
+                    # 东西"时才有内容，于是"这次没预估"看起来就像整个模块被删了。
+                    # 跳过预估只有两种情况（帧数 < 40 由 estimate_times 自己给出
+                    # 更具体的原因，走的是上面那条分支），都要在这里讲清楚。
+                    job.estimate_note = (
+                        "已关闭「先预估用时」，按勾选顺序直接跑"
+                        if not prep.get("estimate", True)
+                        else "只勾选了 1 项，无需预估排序，直接跑")
 
             self.az.run_all(prep["which"], params=prep["params"], outdir=None,
                             verbose=False, raise_errors=False,
