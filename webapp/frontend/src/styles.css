@@ -711,6 +711,15 @@ button.link {
 .browser-list .item:hover { background: var(--accent-soft); }
 .browser-list .item.file.topology { color: #7c3aed; }
 .browser-list .item.file.trajectory { color: #0891b2; }
+/* `.pdb` / `.gro` / `.xyz` 这类**两个槽都能用**的格式（后端 kind="both"）：
+   淡色 + 右侧两个小按钮，让用户明确选择"当拓扑"还是"当轨迹"。
+   注意整行必须在窄侧栏里放得下 —— 文件名 flex:1 + min-width:0 允许省略。 */
+.browser-list .item.file.both { color: #7c3aed; }
+.browser-list .filerow { display: flex; align-items: center; gap: 3px; }
+.browser-list .filerow > .item.file { flex: 1; min-width: 0; }
+.browser-list .filerow .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.browser-list .roles { display: flex; gap: 2px; flex: none; }
+.browser-list .roles .mini { padding: 1px 5px; font-size: 10.5px; line-height: 1.5; }
 .browser-list .size { margin-left: auto; color: var(--dim); font-size: 10.5px; }
 .empty { padding: 8px; color: var(--dim); font-size: 11.5px; text-align: center; }
 

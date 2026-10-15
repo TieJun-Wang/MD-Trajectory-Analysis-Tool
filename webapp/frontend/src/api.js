@@ -81,14 +81,16 @@ export const api = {
   /** 文件选择器：列出目录下的子目录与 MD 相关文件 */
   files: (dir) => request(`/files${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`),
 
-  /** 打开体系（读取 tpr/xtc），返回 sid 与体系信息 */
-  open: (topology, trajectory, progressToken) =>
+  /** 打开体系（读取拓扑/轨迹），返回 sid 与体系信息（含 load_notes 加载诊断） */
+  open: (topology, trajectory, progressToken, guessBonds = false) =>
     request('/session', {
       method: 'POST',
       // progress_token 走**请求体**（后端从 payload 取）；前端在 POST 进行中
       // 并发轮询 /session/open/progress?token= 显示文件读取进度
+      // guess_bonds=true：忽略拓扑里已有键、按坐标重猜（CONECT 不完整的 PDB）
       body: JSON.stringify({ topology, trajectory: trajectory || null,
-        progress_token: progressToken || null }),
+        progress_token: progressToken || null,
+        guess_bonds: guessBonds === true }),
     }),
 
   info: (sid) => request(`/session/${sid}/info`),
@@ -140,10 +142,44 @@ export const api = {
 export function guessTrajectory(topologyPath, files) {
   if (!topologyPath) return null
   const stem = topologyPath.replace(/\.[^.]+$/, '')
-  const exts = ['.xtc', '.trr', '.dcd', '.nc', '.trj']
+  const exts = ['.xtc', '.trr', '.dcd', '.nc', '.ncdf', '.trj', '.trz',
+    '.tng', '.lammpstrj', '.dump', '.mdcrd', '.h5md', '.gsd']
   for (const ext of exts) {
     const hit = files.find((f) => f.path === stem + ext)
     if (hit) return hit.path
   }
   return null
+}
+
+/**
+ * 一个文件能用在哪几个槽：`['topology']` / `['trajectory']` / 两者都有。
+ *
+ * 兼容三种后端写法（避免"新旧版本打架"）：
+ *   · 新：`roles: ['topology','trajectory']`
+ *   · 过渡版：`kind === 'both'`
+ *   · 老：`kind === 'topology' | 'trajectory'`
+ * 用户实际踩过的坑：后端先返回了 `kind="both"`，而**老前端**只认
+ * `kind === 'topology'`，于是 `.pdb` 掉进了 else 分支、被当成**轨迹** →
+ * 现象就是"pdb 明明是拓扑，怎么读到轨迹槽去了"。所以这里必须容错。
+ */
+export function fileRoles(file) {
+  const r = file?.roles
+  if (Array.isArray(r) && r.length) return r.map(String)
+  if (file?.kind === 'both') return ['topology', 'trajectory']
+  if (file?.kind === 'trajectory') return ['trajectory']
+  return ['topology']
+}
+
+/**
+ * 点击文件行时该填哪个槽 —— 纯函数，便于自检（之前这段逻辑埋在组件里没法测）。
+ *
+ * 规则（按用户预期定）：**能给拓扑就一定进拓扑槽**。`.pdb` / `.gro` 本来就是结构
+ * 文件，哪怕两个槽都空、哪怕拓扑槽已满，主点击也不该把它塞进轨迹槽。
+ * 想让它当轨迹，只能点行右侧的「轨迹」小按钮（OpenPanel 的 useAs）。
+ * 返回 `{role, next}`，`next` 是合并后的 `{topology, trajectory}`。
+ */
+export function assignFile(file, cur = {}) {
+  const roles = fileRoles(file)
+  const role = roles.includes('topology') ? 'topology' : 'trajectory'
+  return { role, next: { ...cur, [role]: file?.path || '' } }
 }

@@ -608,6 +608,79 @@ h = flat(render(() => React.createElement(M.OpenPanel, { onOpened: () => {}, log
 ok(h.includes('拓扑') && h.includes('轨迹'), 'OpenPanel 显示两个文件槽')
 ok(h.includes('转到') && h.includes('读取体系'), 'OpenPanel 含目录浏览器与读取按钮')
 
+// ------------------------------------------------ 「两者皆可」格式的两种用途
+// 用户报过两次相关故障：
+//   ① "读不了 .pdb"：后缀在表里，但放错槽位后端 500（HTML 错误页）；
+//   ② "pdb 明明是拓扑，怎么读到轨迹槽去了"：后端第一版把 `.pdb` 标成
+//      `kind="both"`，而页面上的**老前端**只认 `kind === 'topology'`，其它全塞轨迹槽。
+// 现在的约定：`kind` 只保留 topology/trajectory 两个老值（老前端安全），
+// "还能当轨迹"走新增字段 `roles`；点击规则是**能给拓扑就一定进拓扑槽**。
+const BOTH = { name: '122C12-450K.pdb', path: 'C:/t/122C12-450K.pdb',
+               size: 569371, kind: 'topology', roles: ['topology', 'trajectory'] }
+const XTC = { name: '122C12-450K.xtc', path: 'C:/t/122C12-450K.xtc',
+              size: 1.3e8, kind: 'trajectory', roles: ['trajectory'] }
+const TPR = { name: 'sys.tpr', path: 'C:/t/sys.tpr', size: 1, kind: 'topology',
+              roles: ['topology'] }
+
+ok(M.fileRoles(BOTH).join('/') === 'topology/trajectory', 'fileRoles 认 roles 字段')
+ok(M.fileRoles({ kind: 'both' }).join('/') === 'topology/trajectory',
+   'fileRoles 兼容过渡版的 kind="both"')
+ok(M.fileRoles({ kind: 'trajectory' }).join('/') === 'trajectory'
+   && M.fileRoles({ kind: 'topology' }).join('/') === 'topology',
+   'fileRoles 兼容老版 kind（只两种值）')
+ok(M.fileRoles({}).join('/') === 'topology', 'fileRoles 缺字段时按拓扑处理（安全默认）')
+
+const a1 = M.assignFile(BOTH, {})
+ok(a1.role === 'topology' && a1.next.topology === BOTH.path,
+   '点 .pdb（两槽都空）→ 进**拓扑**槽，不会跑进轨迹槽')
+const a2 = M.assignFile(BOTH, { topology: 'C:/t/other.tpr' })
+ok(a2.role === 'topology' && a2.next.topology === BOTH.path
+   && a2.next.trajectory === undefined,
+   '拓扑槽已占时点 .pdb → 仍然替换拓扑槽（不是塞进轨迹槽）')
+const a3 = M.assignFile(XTC, { topology: 'C:/t/sys.tpr' })
+ok(a3.role === 'trajectory' && a3.next.trajectory === XTC.path,
+   '点 .xtc → 进轨迹槽')
+ok(M.assignFile({ path: 'x.pdb', kind: 'both' }, {}).role === 'topology',
+   '过渡版 kind="both" 的 .pdb 也走拓扑槽（老后端同样不会被误判）')
+
+const listHtml = (files, help) => flat(render(() => React.createElement(
+  'div', null,
+  files.map((f) => {
+    const roles = M.fileRoles(f)
+    const dual = roles.includes('topology') && roles.includes('trajectory')
+    return React.createElement('div', { key: f.path, className: 'filerow' },
+      React.createElement('button',
+        { className: `item file ${roles.includes('topology') ? 'topology' : 'trajectory'}` },
+        roles.includes('topology') ? '🧬' : '📈',
+        React.createElement('span', { className: 'fname' }, f.name),
+        React.createElement('span', { className: 'size' }, '1.0 MB')),
+      dual ? React.createElement('span', { className: 'roles' },
+        React.createElement('button', { className: 'mini' }, '拓扑'),
+        React.createElement('button', { className: 'mini' }, '轨迹')) : null)
+  }),
+  help ? React.createElement('div', { className: 'hint dim' },
+    `支持格式：拓扑 ${help.topology.split(' ').length} 种、`
+    + `轨迹 ${help.trajectory.split(' ').length} 种`) : null)))
+const hBoth = listHtml([BOTH, XTC], { topology: '.pdb .gro .tpr', trajectory: '.xtc .trr .dcd' })
+ok(hBoth.includes('item file topology') && hBoth.includes('122C12-450K.pdb'),
+   '.pdb 行按**拓扑**样式渲染（不再是 both 样式）')
+ok(hBoth.includes('roles') && hBoth.includes('>拓扑<') && hBoth.includes('>轨迹<'),
+   '两用途文件右侧有「拓扑 / 轨迹」两个小按钮')
+const rowsBoth = hBoth.split('filerow')
+const xtcRow = rowsBoth.find((r) => r.includes('.xtc')) || ''
+ok(xtcRow && !xtcRow.includes('roles'), '纯轨迹文件不出现用途按钮')
+ok(hBoth.includes('支持格式：拓扑 3 种、轨迹 3 种'), '文件列表下方给出支持格式数量提示')
+ok(!listHtml([TPR], null).includes('roles'), '纯拓扑文件不出现用途按钮')
+
+// 老前端兼容性回归（用户实际踩的坑）：**老代码只看 kind**
+const oldClientRole = (file) => (file.kind === 'topology' ? 'topology' : 'trajectory')
+ok(oldClientRole({ name: '122C12-450K.pdb', kind: 'topology',
+                   roles: ['topology', 'trajectory'] }) === 'topology',
+   '老前端（只看 kind）拿到新后端数据，也把 .pdb 放进**拓扑**槽')
+ok(oldClientRole({ kind: 'both' }) === 'trajectory',
+   '（对照）老前端遇到过渡版 kind="both" 会误判成轨迹——这正是当初那起 bug，'
+   + '现在后端不再产生该值')
+
 h = flat(render(() => React.createElement(M.LogPanel, {
   log: ['[12:00:00] 开始分析'], onClear: () => {},
 })))

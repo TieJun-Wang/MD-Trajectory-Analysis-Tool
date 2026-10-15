@@ -67,6 +67,31 @@ P(f"      子目录 {len(f['dirs'])} 个，MD 文件 {len(f['files'])} 个: "
 P(f"      盘符: {f.get('drives')}")
 assert any(x['name'] == 'adk_oplsaa.tpr' for x in f['files'])
 assert any(x['name'] == 'adk_oplsaa.xtc' for x in f['files'])
+# 格式说明由后端下发（唯一来源 mdta.formats），前端不再自己写一份
+fmt = show(client.get("/api/formats"), "GET /api/formats")
+P(f"      支持格式: 拓扑 {fmt['topology_count']} 种 / 轨迹 {fmt['trajectory_count']} 种")
+assert fmt["topology_count"] >= 15 and fmt["trajectory_count"] >= 20
+assert ".pdb" in fmt["topology"] and ".xtc" in fmt["trajectory"]
+
+# 2b) 后缀 → 槽位分类 + 放错槽位必须是**可读的 400**（以前是 500 HTML）
+kinds = {x["name"]: x for x in f["files"]}
+P(f"      两用途文件（roles 含两项）: "
+  f"{[k for k, v in kinds.items() if len(v.get('roles', [])) == 2]}")
+for name, want in (("adk_oplsaa.tpr", "topology"), ("adk_oplsaa.xtc", "trajectory")):
+    assert kinds[name]["kind"] == want, (name, kinds[name])
+# ⚠️ `kind` **只能**是 topology / trajectory 两个值：第一版曾让 .pdb 返回
+# `kind="both"`，结果页面上还是老前端（只认 kind === 'topology'）时，
+# .pdb 会掉进 else 分支被塞进**轨迹槽** —— 用户报"pdb 怎么读到轨迹去了"。
+# 两用途的信息必须走新增字段 roles，老客户端不认识会直接忽略。
+assert all(v["kind"] in ("topology", "trajectory") for v in kinds.values()), kinds
+assert kinds["adk_oplsaa.xtc"].get("roles") == ["trajectory"]
+bad = client.post("/api/session", json={"topology": XTC, "trajectory": TOP})
+P(f"      轨迹放进拓扑槽 -> HTTP {bad.status_code}（应为 400，且带 JSON 说明）")
+assert bad.status_code == 400, bad.status_code
+P(f"        {bad.json()['detail'][:96]}")
+junk = client.post("/api/session", json={"topology": str(ROOT / "README.md")})
+P(f"      拿 README.md 当拓扑 -> HTTP {junk.status_code}")
+assert junk.status_code == 400 and "可用拓扑格式" in junk.json()["detail"]
 
 # 3) 打开体系
 s = show(client.post("/api/session", json={"topology": TOP, "trajectory": XTC}),

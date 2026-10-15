@@ -59,6 +59,7 @@ from .session import (                                           # noqa: E402
     SessionError,
     SessionRegistry,
     list_dir,
+    supported_formats,
 )
 
 # 服务端只把图**存成文件**，绝不弹窗；必须先切到 Agg，
@@ -75,7 +76,7 @@ registry = SessionRegistry(DEFAULT_OUTDIR)
 app = FastAPI(
     title="MD Trajectory Analysis Tool — Web API",
     version=__version__,
-    description="分子动力学轨迹分析工具的 Web 后端（分析引擎复用 mdta 包）",
+    description="分子动力学轨迹分析工具Web后端",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -94,6 +95,26 @@ def _sess(sid: str):
 
 def _fail(exc: Exception) -> HTTPException:
     return HTTPException(400, f"{type(exc).__name__}: {exc}")
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request, exc: Exception):
+    """兜底：**任何**没被捕获的异常都回一个 JSON 400/500，而不是 HTML 错误页。
+
+    为什么需要：前端 `request()` 直接 `JSON.parse` 响应体，而 Starlette 默认的
+    未处理异常会返回 **HTML** 错误页 —— 实测"把 .xtc 放进拓扑槽""拿 .md 当拓扑"
+    都会走到这里，页面只能显示一句 "Unexpected token '<'"，完全看不出发生了什么。
+    现在至少能把异常类型与消息带回界面。
+    """
+    from fastapi.responses import JSONResponse
+
+    detail = f"{type(exc).__name__}: {exc}"
+    return JSONResponse(
+        status_code=400,
+        content={"detail": detail,
+                 "hint": "请求本身可以重试；若与文件格式相关，请确认后缀在支持列表内"
+                         "（见 GET /api/formats）"},
+    )
 
 
 # ==================================================================== 基础
@@ -121,6 +142,15 @@ def analyses() -> dict:
     }
 
 
+@app.get("/api/formats")
+def formats() -> dict:
+    """支持的文件格式（后缀白名单的唯一来源是 `mdta.formats`）。
+
+    前端用它渲染提示文案与"这个文件能放哪个槽"的判断，避免前后端各写一份。
+    """
+    return supported_formats()
+
+
 @app.get("/api/files")
 def files(dir: str | None = None) -> dict:
     try:
@@ -136,8 +166,13 @@ def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
     traj = str(payload.get("trajectory") or "").strip() or None
     # 前端会带一个 token 并**并发轮询** /api/session/open/progress 显示读取进度
     token = str(payload.get("progress_token") or "").strip() or None
+    # `guess_bonds=True`：忽略拓扑里已有的键、按坐标重新猜（CONECT 不完整的 PDB，
+    # 例如 Material Studio 导出的文件）
+    gb = payload.get("guess_bonds")
+    guess_bonds = bool(gb) if gb is not None else None
     try:
-        sess = registry.open(top, traj, progress_token=token)
+        sess = registry.open(top, traj, progress_token=token,
+                             guess_bonds=guess_bonds)
     except SessionError as exc:
         raise _fail(exc) from exc
     return {
@@ -148,6 +183,8 @@ def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
         "primary_label": sess.az.primary_label,
         "primary_atoms": int(sess.az.primary.n_atoms) if sess.az.primary else 0,
         "outdir": sess.outdir,
+        # 加载诊断（猜键 / 分子划分 / 偏移缓存重建），前端写进「运行日志」
+        "load_notes": sess.load_notes(),
     }
 
 

@@ -23,4 +23,4 @@ export {
 } from './src/components/SetupPanel.jsx'
 export { buildOption, formatNumber, formatCell, keyStats } from './src/chartOption.js'
 export { FALLBACK_GROUPS, normalizeGroups, groupPresent } from './src/analysisGroups.js'
-export { api, guessTrajectory } from './src/api.js'
+export { api, assignFile, fileRoles, guessTrajectory } from './src/api.js'

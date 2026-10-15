@@ -71,10 +71,57 @@ from mdta.systeminfo import info_tables
 
 from . import serialize
 
-#: 支持的扩展名（用于文件选择器过滤）
-TOPOLOGY_EXT = (".tpr", ".gro", ".pdb", ".psf", ".prmtop", ".parm7", ".top", ".xyz")
-TRAJECTORY_EXT = (".xtc", ".trr", ".dcd", ".nc", ".trj", ".lammpstrj")
-MD_EXT = TOPOLOGY_EXT + TRAJECTORY_EXT
+#: 支持的扩展名（用于文件选择器过滤）—— **唯一来源是 mdta.formats**，
+#: 这里只做排序后的元组，供前端展示；不要再往这里加格式（会与其它入口脱节）。
+from mdta.formats import (                                   # noqa: E402
+    ALL_SUFFIXES as _ALL_SUFFIXES,
+    BOTH_SUFFIXES as _BOTH_SUFFIXES,
+    TOPOLOGY_SUFFIXES as _TOP_SUFFIXES,
+    TRAJECTORY_SUFFIXES as _TRAJ_SUFFIXES,
+    can_be_topology as _can_be_topology,
+    can_be_trajectory as _can_be_trajectory,
+    classify as _classify_suffix,
+    suffix_of as _suffix_of,
+    topology_help as _topology_help,
+    trajectory_help as _trajectory_help,
+)
+
+TOPOLOGY_EXT = tuple(sorted(_TOP_SUFFIXES))
+TRAJECTORY_EXT = tuple(sorted(_TRAJ_SUFFIXES))
+MD_EXT = tuple(sorted(_ALL_SUFFIXES))
+
+
+def file_kind(name: str) -> str:
+    """文件在界面里的**主用途**：``"topology"`` 或 ``"trajectory"``（只有这两种值）。
+
+    ⚠️ 这里**故意不返回第三种值** `"both"`。教训（真实故障）：第一版让 `.pdb` 返回
+    `kind="both"`，而用户页面上还是**上一版前端**，它只判断 `kind === 'topology'`，
+    其它一律塞进轨迹槽 —— 现象就是"pdb 明明是拓扑，怎么读到轨迹槽里去了"。
+    只要接口新增枚举值、而客户端可能滞后一版，就会出现这种"新后端 + 老前端"事故。
+
+    所以：`kind` 保持两种老值（`.pdb`/`.gro` 这类主用途就是**拓扑**），
+    "还能当轨迹"的信息走**新增字段** `roles`（老前端不认识就会直接忽略）。
+    """
+    return "trajectory" if _classify_suffix(name) == "trajectory" else "topology"
+
+
+def file_roles(name: str) -> list[str]:
+    """该文件能用在哪几个槽：``["topology"]`` / ``["trajectory"]`` / 两者都有。"""
+    kind = _classify_suffix(name)
+    if kind == "both":
+        return ["topology", "trajectory"]
+    if kind == "trajectory":
+        return ["trajectory"]
+    return ["topology"]
+
+
+def supported_formats() -> dict:
+    """给界面的格式说明（唯一来源 `mdta.formats`，前端 tooltip 与错误信息共用）。"""
+    return {"topology": _topology_help(), "trajectory": _trajectory_help(),
+            "topology_count": len(_TOP_SUFFIXES),
+            "trajectory_count": len(_TRAJ_SUFFIXES),
+            "both": sorted(_BOTH_SUFFIXES)}
+
 
 
 class SessionError(RuntimeError):
@@ -163,6 +210,36 @@ class Session:
             "sections": info_tables(info, max_chain_types=25),
             "text": self.az.info_text(max_chain_types=25),
         }
+
+    def load_notes(self) -> list[str]:
+        """加载阶段的诊断说明（猜键 / 分子划分 / 偏移缓存重建）。
+
+        为什么要给前端：下面这些情况**不会报错**，但会实质影响结果 ——
+        `CONECT` 不完整的 PDB 导致分子被切碎、退化 molnums 导致"整个体系算 1 个分子"、
+        偏移缓存过期被重建。把话说出来，用户才知道要不要换拓扑或勾选重新猜键。
+        """
+        mdt = self.az.trajectory
+        notes: list[str] = []
+        bi = mdt.bond_guess_info or {}
+        if bi.get("note"):
+            notes.append(str(bi["note"]))
+        if bi.get("bonds"):
+            notes.append(f"键表：{bi.get('bonds'):,} 个键 / "
+                         f"{bi.get('fragments', 0):,} 个碎片"
+                         + (f"（{bi.get('note')}）" if bi.get("note") else ""))
+        if bi.get("skipped"):
+            notes.append(f"未猜键：{bi['skipped']}")
+        oi = mdt.object_info or {}
+        src = str((oi.get("sources") or {}).get("molnums") or "")
+        if src:
+            notes.append("分子划分：" + src)
+        if oi.get("molnums_degenerate"):
+            notes.append(f"⚠️ 拓扑的残基/分子信息退化 {oi['molnums_degenerate']}；"
+                         f"分析已改用键连通分量划分分子")
+        if getattr(mdt, "offsets_rebuilt", False):
+            notes.append("偏移缓存与轨迹不符，已自动重建（轨迹可能在缓存建立后被"
+                         "替换/重新转换过）")
+        return notes
 
     def chains(self) -> list[dict]:
         out = []
@@ -711,8 +788,14 @@ class SessionRegistry:
 
     # ------------------------------------------------------------------ 建立
     def open(self, topology: str, trajectory: str | None = None,
-             progress_token: str | None = None) -> Session:
-        """打开一个体系。``progress_token`` 非空时记录加载进度供前端轮询。"""
+             progress_token: str | None = None,
+             guess_bonds: bool | None = None) -> Session:
+        """打开一个体系。``progress_token`` 非空时记录加载进度供前端轮询。
+
+        ``guess_bonds=True``：忽略拓扑里已有的键、按坐标重新猜。用于
+        ``CONECT`` 不完整的 PDB（Material Studio 导出常见；实测某体系只有
+        4393 个键、键图碎片 1203 个，重新猜键后 5953 键 / 124 个分子）。
+        """
         prog: OpenProgress | None = None
         if progress_token:
             prog = OpenProgress()
@@ -723,7 +806,8 @@ class SessionRegistry:
                         self._open_progress.pop(k, None)
             set_progress_sink(prog)
         try:
-            return self._open_inner(topology, trajectory, prog)
+            return self._open_inner(topology, trajectory, prog,
+                                    guess_bonds=guess_bonds)
         except Exception as exc:  # noqa: BLE001 - 记录失败原因后原样抛出
             if prog is not None:
                 prog.error = str(exc)
@@ -732,15 +816,35 @@ class SessionRegistry:
             set_progress_sink(None)
 
     def _open_inner(self, topology: str, trajectory: str | None,
-                    prog: "OpenProgress | None") -> Session:
+                    prog: "OpenProgress | None",
+                    guess_bonds: bool | None = None) -> Session:
         if not topology:
-            raise SessionError("必须提供拓扑文件（.tpr/.gro/.pdb）")
+            raise SessionError("必须提供拓扑文件；可用格式：" + _topology_help())
         if not os.path.isfile(topology):
             raise SessionError(f"找不到拓扑文件: {topology}")
         if trajectory and not os.path.isfile(trajectory):
             raise SessionError(f"找不到轨迹文件: {trajectory}")
+        # 槽位校验放在最前面：把"轨迹放进拓扑槽""不认识的后缀"当场说清楚，
+        # 而不是丢给 MDAnalysis 抛一个看不懂的错（那种错以前会变成 HTTP 500）。
+        if not _can_be_topology(topology):
+            if _can_be_trajectory(topology):
+                raise SessionError(
+                    f"「{os.path.basename(topology)}」是**轨迹**格式"
+                    f"（后缀 {_suffix_of(topology)}），不能放在「拓扑」槽里——"
+                    f"它没有原子名/元素/键表，按拓扑读进来质量与键表都会错。\n"
+                    f"请把它放到「轨迹」槽，并在「拓扑」槽选同体系的文件。\n"
+                    f"可用拓扑格式：{_topology_help()}")
+            raise SessionError(
+                f"不支持的文件格式：{os.path.basename(topology)}"
+                f"（后缀 {_suffix_of(topology) or '无'}）。\n"
+                f"可用拓扑格式：{_topology_help()}")
+        if trajectory and not _can_be_trajectory(trajectory):
+            raise SessionError(
+                f"「{os.path.basename(trajectory)}」不能用作轨迹"
+                f"（后缀 {_suffix_of(trajectory)}）。\n"
+                f"可用轨迹格式：{_trajectory_help()}")
         try:
-            mdt = load_trajectory(topology, trajectory)
+            mdt = load_trajectory(topology, trajectory, guess_bonds=guess_bonds)
         except TrajectoryError as exc:
             raise SessionError(str(exc)) from exc
 
@@ -834,8 +938,10 @@ def list_dir(path: str | None) -> dict:
                     "name": name,
                     "path": full,
                     "size": os.path.getsize(full),
-                    "kind": ("trajectory"
-                             if name.lower().endswith(TRAJECTORY_EXT) else "topology"),
+                    # kind 只有 topology / trajectory（老前端也认）；
+                    # roles 是新增字段，列出"这个文件能放哪几个槽"
+                    "kind": file_kind(name),
+                    "roles": file_roles(name),
                 })
     except PermissionError as exc:
         raise SessionError(f"没有权限读取目录: {path}") from exc
@@ -846,8 +952,11 @@ def list_dir(path: str | None) -> dict:
         drives = [f"{d}:\\" for d in string.ascii_uppercase
                   if os.path.isdir(f"{d}:\\")]
     return {"dir": path, "parent": parent if parent != path else None,
-            "dirs": dirs, "files": files, "drives": drives}
+            "dirs": dirs, "files": files, "drives": drives,
+            # 界面提示/错误信息共用同一份后缀说明（来自 mdta.formats）
+            "help": {"topology": _topology_help(), "trajectory": _trajectory_help()}}
 
 
 __all__ = ["Session", "SessionRegistry", "SessionError", "list_dir",
+           "file_kind", "file_roles", "supported_formats",
            "ANALYSIS_TITLES", "DEFAULT_ORDER", "__version__"]
