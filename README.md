@@ -28,19 +28,80 @@
 
 ### 支持的拓扑 / 轨迹格式
 
-**拓扑文件**（第一个参数）：
+**拓扑文件**（第一个参数，共 **26 种**）：
 
 | 格式 | 是否支持 | 化学键 | 元素 | 说明 |
 |---|---|---|---|---|
-| `.tpr` | ✅ 首选 | ✅ 自带键表 | ✅ | GROMACS 运行输入，信息最完整 |
+| `.tpr` | ✅ 首选 | ✅ 自带键表 | ✅ | GROMACS 运行输入，信息最完整（含电荷与质量） |
 | `.gro` | ✅ | ❌ 无键表 → **自动猜键** | ❌ → 按残基名/原子名推断 | 只需第 2 行的原子数，读取很快 |
-| `.pdb` | ✅ | ⚠️ 仅 `CONECT` 记录 | ✅ | 多数 MD 输出的 pdb 没有 CONECT，因此同样自动猜键 |
-| `.psf` / `.prmtop` / `.parmed` | ✅ | ✅ | ⚠️ | 由 MDAnalysis 读取 |
+| `.pdb` / `.ent` | ✅ | ⚠️ 仅 `CONECT` 记录 | ✅ | 多数 MD 输出的 pdb 没有 CONECT，因此同样自动猜键 |
+| `.psf` / `.prmtop` / `.parm7` | ✅ | ✅ | ⚠️ | 由 MDAnalysis 读取（本身不含坐标，需要另配轨迹） |
 | `.top` | ❌ **明确拒绝** | — | — | GROMACS 力场拓扑，MDAnalysis 无法解析；会给出可操作的提示，而不是抛晦涩错误 |
-| `.xyz` / `.pdb1` / `.ent` | ✅ | ❌ → 自动猜键 | 部分 | — |
+| **`.xsd` / `.xtd`** | ✅（**自研解析**） | ✅ `<Bond Connects>` | ✅ `<Atom3d Components>` | Materials Studio 文档格式，MDAnalysis 不认识，由 `mdta/ms_structure.py` 解析：`XYZ` 是**分数坐标**（× 晶胞基矢得 Å），文件里 **`ImageOf` 的周期镜像拷贝要剔除**；`.xtd` 只有 `<Trajectory End=6001 Type="trj"/>` 声明，**真正的帧在同名 `.trj` 里**（`.trj` 再走下面的转换链路），单独当单帧用 |
+| **`.car`** | ✅（**自研解析**） | ❌ 通常无键表 → 猜键 | ✅ | BIOSYM/MS 结构文件，一行一个原子 + `PBC a b c α β γ` 给晶胞 |
+| `.xyz` / `.mol2` / `.pdbqt` / `.pqr` / `.dms` / `.fhiaims` / `.xml` | ✅ | ❌ → 自动猜键 | 部分 | — |
+| **`.lmp` / `.dat` / `.data` / `.lammps`** | ✅（LAMMPS data） | ✅ 文件里 `Bonds` 段 | ✅ `Masses` 段 | `Atoms # full/atomic` 格式的 data 文件。**MDAnalysis 只给 `.data` 登记了后缀**，其余三个按名字自动识别会失败（`.lammps` 甚至被映射到 **DCDReader**，报的错与真实原因无关）→ 加载时显式传 `topology_format="DATA"`（`mdta/formats.py::EXPLICIT_TOPOLOGY_FORMAT`） |
+| `.pdb.gz` / `.gro.gz` / `.xyz.gz` / `.tpr.gz` | ✅ | 同上 | 同上 | 压缩版由 MDAnalysis 解压 |
 
-**轨迹文件**（第二个参数，可省略）：`.xtc` `.trr` `.dcd` `.nc` `.gro` `.pdb` `.xyz` `.lammpstrj` 等，
-凡 MDAnalysis 支持的格式都能用。
+> **MS 文档的实测结果**（用户体系 `122C12-450K.xsd` / `.xtd`）：5596 原子
+> （H 3172 + C 2424）、**5891 根键**（比 MS 导出的 PDB 的残缺 `CONECT` 完整）、
+> 晶胞 51.4 × 49.2 × 120 Å；分数坐标换算后 C–C 键长 1.48 Å、C–H 1.11 Å（判据正确）；
+> 分子划分 **122 条十二烷 + 1 片石墨烯**，界面组分直接显示
+> `polymer[ETH]`（4636 原子 / 122 分子）与 `polymer[GRA]`（960 原子）。
+> 单帧 Rg（分子 / 链，小分子部分）：`.xsd` = **4.4592 Å**、`.xtd` = **3.8247 Å**
+> —— 分别是 Forcite 曲线的**末帧**与**首帧**（4.4592 / 3.8247），逐位对上。
+
+> **`.xtd` 能不能当轨迹？不能**（1.0.4 实测）：文件里 `<Frame>`/`<Step>` **各 0 个**，
+> 只有一个自闭合标签 `<Trajectory ID="25810" End="6001" Type="trj" FrameClassType="Bondable"/>`，
+> 后面直接 `</AtomisticTreeRoot></XSD>`；也没有 base64/`<Set>` 之类的内嵌数据块。
+> 体积账同样否掉它：6001 帧 × 5596 原子 × 3 分量 × 4 B = **384 MB**，而 `.xtd` 只有
+> **3.87 MB（1%）**。**帧在同名 `.trj` 里**（`Type="trj"`）：本体系每帧约 **269 KB**
+> ⇒ 6001 帧应约 **1.6 GB**，用户手上那份 31 MB 是被截断的（转换器会报
+> 「文件长度与帧步长不匹配（31434504 % 269608 ≠ 0）」）。
+> 所以工具的做法是：**`.xtd` 当拓扑 + 帧数见证，`.trj` 当轨迹**（自动配对 → 转 XTC），
+> 并**核对帧数** —— 文档声明 `End="6001"` 而实际读到的帧数不同时，读取说明里直接写
+> 「⚠️ 轨迹帧数与 MS 文档声明不符……轨迹文件可能被截断」。
+
+**轨迹文件**（第二个参数，可省略，共 **30 种**）：`.xtc` `.trr` `.tng` `.dcd` `.nc` `.ncdf`
+`.trj` `.trz` `.mdcrd` `.crd` `.coor` `.inpcrd` `.lammpstrj` `.dump` **`.lammpsdump`** `.h5md` `.gsd`，
+以及**多帧文本格式** `.pdb` `.gro` `.ent` `.xyz` `.dms` `.mol2` `.data` `.lammps` `.lmp` `.dat`。
+
+> **LAMMPS 的三类文件要分清**（后缀不可信，`sniff_lammps_kind()` 只看内容）：
+> · **data**（`write_data` 的产物，`.lmp`/`.data`/`.dat`/`.lammps`）＝ 拓扑，显式走 `DATA`；
+> · **dump**（`dump … custom` 的产物，`.lammpstrj`/`.dump`/`.lammpsdump`）＝ 轨迹，显式走
+>   `LAMMPSDUMP`（`DumpReader` 没有 `EXTENSIONS`，按后缀自动识别必然失败）；
+> · **输入脚本 / 日志**（`in.lammps`、`log.lammps`）＝ **都不是数据文件**，放进哪个槽都会被
+>   当场挡下并说明「真正的 data / 轨迹文件长什么样」（以前空 `log.lammps` 还会因为被当成
+>   gzip 而抛 `EOFError: Compressed file ended…`）。
+> `.cfg`（AtomEye）/ `.restart`（二进制内部状态）/ `.yaml`（YAML dump）本机没有读取器，
+> 会给出逐项替换做法而不是一句"读不了"。实测：同内容的
+> `.lmp`/`.dat`/`.data`/`.lammps` 均读成 **4 原子 / 1 键**，`.lmp` 自动配上同名
+> `.lammpstrj` 得 **2 帧**；`.lammpsdump` 当轨迹同样得 2 帧。
+
+**Materials Studio `.trj`**：MDAnalysis 不认识 MS 的二进制 `.trj`，本工具**先让
+MDAnalysis 试读**（CHARMM 的 ASCII `.trj` 它能读），失败再**自动转换**：调用你自己的
+纯 Python 模块 `md_convert/ms_trj.py`（解析器）+ `pymsdump/xtcwriter.py`（XTC 写入器）
+转成 XTC 后按普通轨迹读取；结果缓存在 `_convert_cache/`（键 = 源文件路径+大小+修改时间），
+第二次打开秒开。模块位置可用环境变量指定：
+
+```powershell
+set MDTA_MS_CONVERT=D:\somewhere\md_convert;D:\somewhere\pymsdump
+```
+
+> 实测：合成的合法 `.trj`（6 原子 × 3 帧）→ 解析 → 转 XTC → 加载器读回，坐标偏差 **0.0000 Å**；
+> 被截断的 `.trj` 会给出明确报错（「文件长度与帧步长不匹配」+ 三条排查建议），不会静默读出垃圾。
+
+> **「两者皆可」的格式**：`.pdb` / `.gro` / `.xyz` / `.dms` / `.mol2` 等既能当拓扑也能当轨迹
+> —— Web 界面里这类文件行右侧有「拓扑 / 轨迹」两个小按钮，**直接点文件名永远进拓扑槽**
+> （`.pdb`/`.gro` 本来就是结构文件），想当轨迹只能点右侧「轨迹」。
+> 接口契约：`/api/files` 的 `kind` 只取 `topology` / `trajectory` 两个值，
+> "还能当轨迹"走新增字段 `roles`——**新增能力不改老字段的取值域**，否则"新后端 + 老前端"
+> 会把 `.pdb` 误塞进轨迹槽（这条踩过一次）。
+> 后缀表的**唯一来源**是 `mdta/formats.py`（后端 / GUI / CLI / 前端提示共用一份），
+> 并有自检逐个后缀核对 MDAnalysis 的实际能力。
+> 放错槽位（把 `.xtc` 放进拓扑槽等）会得到一条能看懂的 400 错误并列出可用后缀，
+> 而不是 500 + HTML 错误页。
+> ⚠️ 后端 Python 改动**需要重启服务**；前端改动需要 `node _build.mjs` + 刷新页面。
 
 #### 没有化学键时的「自动猜键」
 
@@ -88,8 +149,8 @@ python mdta_gui.py adk_oplsaa.tpr adk_oplsaa.xtc
 # 命令行：一条命令跑完全部分析并导出
 python mdta_cli.py run -t adk_oplsaa.tpr -x adk_oplsaa.xtc --interval 100 -o analysis_results
 
-# 数值自检（22 项，确认计算结果可信）
-python selftest.py
+# 数值自检（69 项，确认计算结果可信）
+python test/selftest.py
 ```
 
 ---
@@ -120,13 +181,24 @@ MDT/
 │   ├── backend/                   app.py / session.py / serialize.py / run.py
 │   ├── frontend/                  React + Vite + ECharts 源码与 dist/
 │   └── README.md                  Web 版说明与 API 文档
-├── selftest.py                    数值正确性自检
+├── pymsdump/                      Materials Studio `.trj` → XTC 写入器（`.trj` 转换链路）
+├── test/                          测试与诊断脚本（**不入库**，见 test/README.md）
+│   ├── README.md                  测试说明（唯一入库的文件）
+│   ├── selftest.py                数值正确性自检（69 项）
+│   ├── webapp/                    后端 API / 构建产物 / 跨体系校验脚本
+│   ├── comparisons/               与另一套工具（mdtransport）的对照实验
+│   ├── fixtures_fmt/              跨格式一致性测试用的 .gro / .pdb 夹具
+│   └── _diag_*.py / _probe_*.py   历史诊断脚本及其报告
 ├── examples/
-│   ├── quickstart.py              最小示例（设计大纲第 32 章的第一版目标）
+│   ├── quickstart.py              最小示例
 │   └── run_full_pipeline.py       完整流程示例（10 项分析 + 导出）
 ├── analysis_results/              输出目录（CSV / PNG / summary.xlsx）
 └── README.md                      本文件
 ```
+
+> 轨迹 / 结构数据（`.tpr` `.xtc` `.trj` `.pdb` `.xsd` …）、测试脚本、缓存与构建产物
+> 都写在 `.gitignore` 里：`git add .` 只会收 `mdta/`、`webapp/`、`examples/`、
+> `pymsdump/`、两个入口脚本与 README。
 
 ---
 
@@ -231,7 +303,7 @@ ECharts 侧用 `ResizeObserver` + `requestAnimationFrame` 把动画期间的 res
 
 统计量页每项分析是**带表头的表格**（统计量 | 数值），导出文件清单也是表格。
 所有表格的单元格统一**水平居中 + 垂直居中** —— 这一条由真实浏览器逐格验证
-（`webapp/_test_layout.mjs`，Headless Chrome + CDP）。
+（`webapp/frontend/_test_layout.mjs`，Headless Chrome + CDP）。
 
 「分析功能」区有一排快捷预设：**全选 / 仅构象 / 仅结构 / 仅取向 / 仅输运**
 （5 个按钮强制排在**一行**；按钮用 2 字缩写、完整分组名在悬停提示里，因为
@@ -436,26 +508,50 @@ $$R_g=\sqrt{\frac{\sum_i m_i|\mathbf r_i-\mathbf r_{cm}|^2}{\sum_i m_i}}$$
 - 输出：Rg–Time 曲线 + 平均线、Rg 分布、平均值/标准差/标准误/**块平均标准误**
 - 关键点：默认在 **PBC 展开后**的坐标上计算（见 [5.1](#51-周期性边界条件)）
 - 参数：`mass_weighted=True` 质量加权（可改为等权重）
-- **按分子统计**（1.0.1 起）：组分含多个分子时，除整组 Rg 外还**逐个分子**算 Rg，
+- **「分析对象」二选一（1.0.4 起，界面里是两个单选钮，默认「分子 / 链」）**：
+
+  | 档位 | 算什么 | 多分子组分上的含义 | 输出 |
+  |---|---|---|---|
+  | **分子 / 链**（默认） | 每个分子各算 Rg，再逐帧对分子取平均 | 「分子有多大」（与 Forcite 同口径） | 3 张面板：Rg–t、Rg 分布、各分子的平均 Rg；统计量含「单分子 Rg 平均±标准差」 |
+  | 整体体系 | 把所选对象当成一个整体算 | 「整团物质」的尺寸（接近盒子尺度） | 2 张面板：Rg–t、Rg 分布；不算逐分子统计 |
+
+  两档**互斥**：一次运行只算选中的那一种（不会为另一个口径把轨迹再扫一遍）。
+  用户体系 122 个 C12 分子实测：分子 / 链 **4.3929 Å** vs 整体体系 **21.21 Å**
+  （差 4.8 倍，**不可混用**）。命令行对应 `--rg-object molecule|system`；
+  旧的 `per_molecule=True/False` 仍被接受（= molecule / system）。
+- **按分子统计**（1.0.1 起）：组分含多个分子时，**逐个分子**算 Rg，
   给出「单分子 Rg 平均/标准差/最小/最大」与逐分子面板。
   例：46 体系 polymer 组分（253 个分子）整组 Rg = 45.35 Å，而单分子 Rg = 7.79 Å
-  ——**整组那个数是"整团物质"的回转半径，不是"分子有多大"**，1.0.0 只给前者。
+  ——**整组那个数是"整团物质"的回转半径，不是"分子有多大"**。
   质量信息缺失时退化为等权重（几何）Rg 并注明。
-- **界面开关（1.0.1 补充）**：「分析参数」里新增一组「回转半径 Rg / 端到端距离 R_ee」
-  —— `质量加权`（关掉 = 等权几何口径）、`逐分子统计`（关掉 = 只给整组值）两个复选框，
-  以及 R_ee 的 `链端来源`（`bond_graph` 默认 / `selection` 旧口径）与
-  `指定原子`（如 `0,3034`，留空自动）。关掉逐分子统计时**依然如实报出分子数**，
-  并写明"这是整团物质的尺寸"，不会退化成"该组即 1 个分子"。
+- **界面开关**：「分析参数」里的「回转半径 Rg / 端到端距离 R_ee」一组——
+  `分析对象`（两个单选钮）、`质量加权`（关掉 = 等权几何口径）、`R_ee 逐分子`
+  （**只影响 R_ee**），以及 R_ee 的 `链端来源`（`bond_graph` 默认 / `selection` 旧口径）
+  与 `指定原子`（如 `0,3034`，留空自动）。**分子数在任何档位都如实报出**，
+  不会退化成"该组即 1 个分子"。
   实测（md_biopolymer_nowater 的 polymer 组分 = 648 个癸醇分子）：
   整组 Rg **33.30 Å** vs 单分子 **4.12 ± 0.01 Å**，差 **8.08×**；
   质量加权 4.1212 Å vs 等权几何 4.2111 Å。
-- **单分子时直接不给选（1.0.1 补充）**：组分/分析对象上会显示**分子数**（AdK 实测
-  protein 1 / water 11084 / ion 4）。主链只有一个分子时（AdK 的 protein 或"最大链"），
-  `逐分子统计` 被**直接置灰**——不给选、不加解释文字。因为单分子时整组 Rg 与该分子 Rg
-  是同一个双重求和，工具也不会输出一个恒等于整组的"单分子 Rg 平均"。
-  实测 AdK protein（6 帧）：逐分子开/关都是 19.7702 Å（质量加权）、19.7139 Å（等权），
-  确实一字不差——这是设计如此，不是开关失效。想看到差别请换成 water（整组
-  41.3475 Å vs 单分子 0.3134 Å，差 132 倍）。
+- **单分子时**：组分/分析对象上会显示**分子数**（AdK 实测 protein 1 / water 11084 /
+  ion 4）。主链只有一个分子时（AdK 的 protein 或"最大链"），`R_ee 逐分子` 被
+  **直接置灰**——不给选、不加解释文字；「分析对象」两个钮仍可点，但两档同值
+  （整组 Rg 与该分子 Rg 是同一个双重求和）。实测 AdK protein（6 帧）：
+  19.7702 Å（质量加权）、19.7139 Å（等权），两档一字不差——这是设计如此。
+  想看到差别请换成 water（整组 41.3475 Å vs 单分子 0.3134 Å，差 132 倍）。
+- **Forcite 口径（1.0.3 定案，1.0.4 起就是「分子 / 链」档）**：Materials Studio Forcite 的
+  "Radius of gyration" = **每个分子各算 Rg、再逐帧对分子取平均**（工具里
+  「逐帧各分子 Rg 平均」曲线），不是"取一个分子代表"、也不是整团物质的 Rg。
+  用户体系 122 个 C12 分子实测：**逐帧相关系数 +1.000000、均值 4.3929 vs 4.3929 Å
+  （+0.0000%）、std 都是 0.1443、逐帧最大偏差 0.0002 Å**；反证：122 个单分子里最好的
+  相关系数只有 0.8847，整组 Rg 均值 21.18 Å（与 Forcite 差 16.8 Å）。
+  对照脚本 `_diag_forcite_rg4.py`。
+- **两条路径与速度（1.0.3 重写）**：多分子组分走向量化展开（`rg_fast`），单分子对象
+  走 MDAnalysis 精确展开；两条路径**口径已对齐**（整组 Rg 差 ≤1.2e-07 Å、逐分子 Rg
+  对键连通重建 `make_whole` 差 ≤5.3e-09 Å）。用户体系 4636 原子 / 122 分子：
+  纯计算 **0.37 ms/帧**（整段 6001 帧约 4 s；经 GUI/API 全流程约 7 s，其余是 XTC 解码
+  与逐帧开销），此前精确路径 18.1 ms/帧（≈108 s）。
+  "分子尺度接近半盒"的个别分子（用户体系里 960 原子的那个）会自动改用键连通重建，
+  个数写进结果说明。
 
 #### R_ee — 端到端距离
 
@@ -834,16 +930,18 @@ z ≈ 195–204 Å  : 界面（周期性回到 DCE）
 ## 7. 数值正确性验证
 
 ```powershell
-python selftest.py                          # 用配套的 adk 轨迹
-python selftest.py sys.tpr sys.xtc          # 换自己的轨迹
+python test/selftest.py                          # 用配套的 adk 轨迹
+python test/selftest.py sys.tpr sys.xtc          # 换自己的轨迹
 ```
 
-22 项自检（可用 pytest 直接收集），验证策略分两类：
+69 项自检（可用 pytest 直接收集；脚本全部在 `test/` 下，说明见 `test/README.md`），
+验证策略分两类：
 **A. 与 MDAnalysis 原生实现对照**
 
 | 测试 | 结果 |
 |---|---|
 | Rg vs `AtomGroup.radius_of_gyration()` | 完全一致（1e-9 内） |
+| **Rg 快路径 vs 精确路径**（多分子组分，整组值，1.0.3） | 最大偏差 **6.1e-08 Å**（PEG 200×30）/ 1.2e-07 Å（122 个 C12）；1.0.3 之前两条路径镜像约定不同，同帧差 26.8 Å vs 88.9 Å |
 | RDF vs `InterRDF` | 最大相对偏差 3.7%（来自 bin 化差异） |
 | φ/ψ vs `Dihedral` 分析类 | 最大偏差 **0.00°**（10 帧 × 213 个角） |
 | 端到端距离 vs 手工计算 | 逐帧偏差 0.00 Å |
@@ -853,6 +951,7 @@ python selftest.py sys.tpr sys.xtc          # 换自己的轨迹
 | 测试 | 结果 |
 |---|---|
 | Rg vs 独立成对距离公式 $R_g^2=\frac{1}{2M^2}\sum\sum m_im_jr_{ij}^2$ | 三个实现 24.376830 Å 完全一致 |
+| **Rg 快路径逐分子值 vs 键连通重建**（`mdamath.make_whole`，1.0.3） | PEG 200×30：≤5.3e-09 Å；122 个 C12：1.3e-15 Å —— Forcite 对照的就是这个量 |
 | 二面角 vs 解析投影 atan2 公式 | 400 组随机几何最大偏差 3.9e-4°（float32 精度） |
 | 取向参数 S vs 理论值 | 完全取向 1.0000；各向同性 0.002；30° 圆锥 0.8083（理论 0.8080） |
 | 界面宽度 vs 已知 erf 轮廓 | 设定 x₀=20.00 Å / 宽 3.845 Å → 实测 20.000 Å / 3.857 Å |
@@ -959,3 +1058,6 @@ MSD 需要较密的帧才能分辨短时间行为；二面角分布建议帧数 
 工具启动时会自动开启高 DPI 感知并按显示缩放调整，正常情况下不会模糊。
 若仍然模糊，通常是系统 DPI 探测异常，用 `$env:MDTA_GUI_SCALE="1.5"` 手动指定
 （值 = 系统缩放百分比 ÷ 100）即可。
+
+
+

@@ -1,61 +1,182 @@
-# ===== 系统文件 =====
+# =====================================================================
+#  MD 轨迹分析工具 —— 只提交**核心代码**
+#
+#  约定：`git add .` 之后进仓库的应当是
+#    mdta/**            分析引擎
+#    webapp/**          后端 + 前端源码（含 package.json / requirements.txt）
+#    mdta_cli.py  mdta_gui.py  examples/**  pymsdump/**
+#    README.md  webapp/README.md  pymsdump/README.md
+#
+#  不进仓库的：测试脚本、轨迹/结构数据、缓存、构建产物、除 README 以外的文档。
+# =====================================================================
+
+# ---------------------------------------------------------------- 系统 / IDE
 .DS_Store
 Thumbs.db
 desktop.ini
-
-# ===== IDE编辑器 =====
 .idea/
 .vscode/
 *.suo
 *.sw?
 *.bak
 *.tmp
+*.orig
 
-# ===== Python（命令行、thinker后端）====
+# ---------------------------------------------------------------- Python
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.pyd
 venv/
 .venv/
 ENV/
+env/
 .pytest_cache/
 .mypy_cache/
+.ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
-dist/
-build/
 *.egg-info/
+build/
+dist/
+site-packages/
 
-# ===== Web前端目录 =====
-web/node_modules/
-web/dist/
-web/build/
-web/.cache/
-web/npm-debug.log*
-web/yarn-debug.log*
-web/yarn-error.log*
-web/.env.local
-web/.env.*.local
-
-# ===== 通用环境变量、密钥（所有子目录）====
+# ---------------------------------------------------------------- 前端依赖 / 构建产物
+node_modules/
+webapp/frontend/dist/
+webapp/frontend/_ssr_build/
+webapp/frontend/.npm-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-store/
 .env
 .env.local
 .env.*.local
 !/.env.example
 
-# ===== 日志、数据库、临时产物 =====
-*.log
-*.sqlite
-*.db
+# ---------------------------------------------------------------- 测试脚本（全部不进仓库）
+# 目录整体排除：selftest / 回归 / 诊断 / 探针 / 夹具 / 报告都在 test/ 下（只留说明文档）
+/test/*
+!/test/README.md
+
+# 散落在别处的前端测试脚本（node 测试必须留在 webapp/frontend 才能解析 node_modules，
+# 所以不能挪进 test/，这里按 `_` 前缀整体排除，只把**构建脚本**放回来）
+# ⚠️ 不要写 `webapp/_*.py`：gitignore 的 `*` 也能匹配 `__init__.py` 里的下划线，
+#    会把 `webapp/__init__.py` 一起排除掉（这条踩过一次）。
+webapp/frontend/_*.mjs
+webapp/frontend/_*.js
+!webapp/frontend/_build.mjs
+webapp/_*.txt
+webapp/_*.log
+webapp/_*.mjs
+webapp/_test_*.py
+webapp/_api_check.py
+webapp/_css_check.py
+webapp/_font_check_all.py
+webapp/_validate_*.py
+webapp/_probe*.py
+pymsdump/test_*.py
+
+# 兜底：根目录下 `_` 开头的一次性脚本、报告与临时目录
+#（用 `/` 锚定到根目录，避免误伤 `mdta/__init__.py`；根目录下没有 `__init__.py`）
+/_*/
+/_*.py
+/_*.txt
+/_*.mjs
+/_*.log
+
+# ---------------------------------------------------------------- 轨迹 / 结构数据（体积大，不入库）
+# GROMACS
+*.trr
+*.xtc
+*.tpr
+*.edr
+*.gro
+*.g96
+*.h5md
+*.tng
+# 其它 MD 轨迹
+*.trj
+*.trz
+*.dcd
+*.nc
+*.ncdf
+*.mdcrd
+*.crd
+*.coor
+*.inpcrd
+*.lammpstrj
+*.lammpsdump
+*.dump
+*.gsd
+# LAMMPS
+*.lmp
+*.data
+*.dat
+*.restart
+*.cfg
+# 结构与拓扑
+*.pdb
+*.ent
+*.xyz
+*.mol2
+*.pdbqt
+*.pqr
+*.dms
+*.psf
+*.prmtop
+*.parm7
+*.top
+*.car
+*.xsd
+*.xtd
+# 参考数据 / 数值结果
+*.csv
+*.npz
+*.npy
+*.xvg
+*.xpm
+*.mat
+*.fig
+*.h5
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+*.zip
+*.tar
+*.gz
+!webapp/frontend/package-lock.json
+
+# ---------------------------------------------------------------- 文档
+# 只保留 README.md，其余说明文档（功能说明 / 修改记录 / 审计计划…）不入库
+*.md
+!README.md
+
+# ---------------------------------------------------------------- 运行缓存与临时产物
+_offsets_cache/
+_convert_cache/
+_msd_scratch/
+_export_probe/
+_selftest_out/
+_fontcheck_out/
+_probe/
+outputs/
 output/
 temp/
-
-# ===== MDAnalysis 偏移缓存（数据目录只读时，偏移/锁文件的重定向目标）=====
-_offsets_cache/
-
-# ===== 约束文件 =====
-分析对象规范表.md
-分析对象审计与修改计划.md
 analysis_results/
+validation_output/
+.*_offsets.*
+*.lock
+*.log
+*.tmp
+*.cache
 
+# ---------------------------------------------------------------- 非代码附件
+/mdt-call-chain.html
+*.pptx
+*.docx

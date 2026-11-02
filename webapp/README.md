@@ -100,6 +100,27 @@ npm run dev            # http://127.0.0.1:5173
 格式支持表）；`.top`（GROMACS 力场拓扑）会在读取时被**明确拒绝**并给出提示，
 而不是抛一个看不懂的底层错误。
 
+**LAMMPS 文件也能直接选**（1.0.4）：data 文件 `.lmp` / `.dat` / `.data` / `.lammps`
+（`write_data` 的产物）都能当拓扑 —— 加载时显式传 `topology_format="DATA"`，因为
+MDAnalysis 只给 `.data` 登记了后缀，`.lammps` 甚至被映射到 **DCDReader**；
+dump 轨迹 `.lammpstrj` / `.dump` / `.lammpsdump` 当轨迹（显式 `format="LAMMPSDUMP"`），
+选中 data 文件时会**自动配对同名 dump**。后缀在这里不太可信，所以 `in.lammps`（输入脚本）、
+`log.lammps`（热力学日志）会按**内容**识别后挡下，并说明真正的 data / dump 文件长什么样；
+`.cfg` / `.restart` / `.yaml` 本机没有读取器，会给逐项替换做法。
+
+**Materials Studio 文档也能直接选**（1.0.4）：`.car` / `.xsd` / `.xtd` 出现在
+拓扑槽的候选里（后缀表 `mdta/formats.py` 统一给出）。它们由 `mdta/ms_structure.py`
+自己解析 —— MDAnalysis 不认识这三种格式：
+
+* `.xsd` 带完整键表（实测 5596 原子 / 5891 键），分子划分与组分命名直接用它的；
+* `.xtd` 里只有 `<Trajectory End="6001" Type="trj"/>` 声明，**真正的帧在同名 `.trj`**，
+  所以「拓扑选 `.xtd`、轨迹选 `.trj`」（或都放在一个目录里，自动配对）才有整条轨迹；
+  只给 `.xtd` 时按**单帧**分析，读取说明里会写清楚；
+* `.car` 通常没有键表 → 按坐标猜键。
+
+选上以后界面里的组分按分子类型命名，例如用户体系的
+`polymer[ETH]`（4636 原子 / 122 个十二烷）与 `polymer[GRA]`（960 原子 / 1 片石墨烯）。
+
 **互斥**：点某块的标题栏展开时，其它两块自动收起，**一次只展开一块**；
 标题栏右侧还会显示该块的摘要（文件名 / 原子数 / 已选分析项数）。
 未读取体系时，「体系信息」「分析设置」两块是禁用的。
@@ -148,22 +169,24 @@ npm run dev            # http://127.0.0.1:5173
     7.435 Å），而「第 1 条」是 30 原子（Rg 7.537 Å）。
     早先后端无论 `count` 是多少都只取 `got[0]`，于是标着"200 条"的选项实际只算了
     1 条链，数值和耗时都对不上；已修。
-    - **回归测试**：`webapp/_api_check.py` 的「PEG 数据集」段（断言"全部链"与
+    - **回归测试**：`test/webapp/_api_check.py` 的「PEG 数据集」段（断言"全部链"与
       "组分 polymer" 是同一批 6000 个原子、Rg 差 < 1e-9，而"第 1 条"只有 30 原子、
-      Rg 差 > 5 Å），以及 `selftest.py` 的 `peg chain type merges all chains`
+      Rg 差 > 5 Å），以及 `test/selftest.py` 的 `peg chain type merges all chains`
       （mdta 层等价校验 + 独立 Rg 公式复核），数据集缺省时自动跳过。
 - **参数设置**：**三列网格**（起始、结束、平衡段 / 抽帧间隔、最多帧数、cutoff /
   密度方向、bin 数、RDF rmax / 二面角模式）；
   - 参数按分析项分组，**只显示已勾选项相关的参数**；勾了 Rg / R_ee 就出现
-    「回转半径 Rg / 端到端距离 R_ee」一组：`质量加权`、`逐分子统计` 两个复选框
-    （默认都开），以及 R_ee 的 `链端来源`（bond_graph / selection）与
-    `指定原子`（如 `0,3034`，留空自动）。复选框传的是**真布尔**，
-    关掉后后端不再做逐分子统计，但**分子数照报**并注明"这是整团物质的尺寸"。
+    「回转半径 Rg / 端到端距离 R_ee」一组：**`分析对象`（两个单选钮：整体体系 /
+    分子 · 链，默认分子 · 链，互斥）**、`质量加权` 复选框、`R_ee 逐分子` 复选框
+    （只影响 R_ee），以及 R_ee 的 `链端来源`（bond_graph / selection）与
+    `指定原子`（如 `0,3034`，留空自动）。复选框传的是**真布尔**。
+    「分析对象」选哪个**只算哪个**（整体体系 2 面板 / 分子 · 链 3 面板），
+    不会把同一条轨迹扫两遍算两套数；分子数在任何档位都照报。
   - 「分析对象」下拉与组分胶囊会显示每个组分的**分子数**（后端直接给
     `n_molecules`，实测 AdK：protein 1 / water 11084 / ion 4）。
-    **主链只有一个分子时**（例如 AdK 的 protein、最大链），`逐分子统计` 会被
-    **直接置灰**——不给选，也不加解释文字（单分子时整组 Rg 与该分子的 Rg 是同一个数，
-    这个开关没有作用；想看到两者差别要换成含多个分子的组分）。
+    **主链只有一个分子时**（例如 AdK 的 protein、最大链），`R_ee 逐分子` 会被
+    **直接置灰**——不给选，也不加解释文字；「分析对象」两个钮仍可点，但两档同值
+    （单分子时整组 Rg 与该分子的 Rg 是同一个数）。想看到两者差别要换成含多个分子的组分。
 - **分析功能**：四行紧凑勾选（链构象 / 空间结构 / 取向与结晶 / 动力学与输运），带已选计数，
   以及一排快捷按钮：**全选 / 仅构象 / 仅结构 / 仅取向 / 仅输运**。
   - 「仅 XX」按钮由分组表自动生成（不会和勾选项不同步），
@@ -306,7 +329,7 @@ npm run dev            # http://127.0.0.1:5173
 >   `.notes-body` 就不再是 `.notes` 的直接子元素，**选择器匹配不上**，
 >   `display:flex / min-height:0` 一条都没生效 —— 内容被 `overflow:hidden` 裁掉，
 >   既看不到也滚不动。
-> - 所以现在有一道**真实浏览器**的验证：`webapp/_test_layout.mjs`
+> - 所以现在有一道**真实浏览器**的验证：`webapp/frontend/_test_layout.mjs`
 >   （Headless Chrome + CDP，量 `getComputedStyle` 与
 >   `scrollHeight/clientHeight`、并真的把 `scrollTop` 推到最大确认能滚）。
 
@@ -543,22 +566,18 @@ webapp/
 │   │       ├── StatsPanel.jsx      「统计量」页（只显示指标）
 │   │       ├── ExportPanel.jsx     「导出」页（只管导出）
 │   │       └── LogPanel.jsx        运行日志
-│   ├── _ssr_entry.js / _ui_render.mjs   渲染自检（85 项）
+│   ├── _ssr_entry.js / _ui_render.mjs   渲染自检（356 项，不入库）
 │   ├── _build.mjs                   生产构建（不经 vite.config.js 加载器）
-│   └── dist/                       构建产物（FastAPI 托管）
-├── _e2e.mjs            端到端验证（真实 HTTP）—— AdK 体系
-├── _e2e_polymer.mjs    端到端验证 —— 糖蛋白 + DOL 体系
-├── _api_check.py       后端 API 冒烟测试（TestClient）
-├── _test_abeta.py      板层界面体系 + 拓扑格式（gro/pdb/top）路径验证
-├── _test_formats.py    .tpr / .gro / .pdb 跨格式一致性
-├── _test_live.py       实时运行接口（TestClient）
-├── _test_live_http.py  实时运行接口（真实 HTTP + 板层体系）
-├── _css_check.py       构建产物的布局 / 折叠面板样式检查
-├── _font_check_all.py  导出图缺字 / 后端检查
-├── _getwheel.mjs       离线拉取 Python wheel 的小工具
+│   └── dist/                       构建产物（FastAPI 托管，不入库）
 ├── requirements.txt
 └── README.md
 ```
+
+> **测试脚本已集中到仓库根的 `test/`**（入口与分组见 `test/README.md`）：
+> `test/webapp/` 放后端 API / 构建产物 / 跨体系校验的 Python 脚本；
+> 前端的 node 测试（`_ui_render.mjs` / `_test_layout.mjs` / `_e2e*.mjs`）
+> 必须留在 `webapp/frontend/` 才能解析 `node_modules`，它们同样被 `.gitignore` 排除。
+> `test/` 与这些脚本都**不进版本库**。
 
 ---
 
@@ -566,41 +585,41 @@ webapp/
 
 ```powershell
 # 后端 API（不用起服务，直接 TestClient）
-python webapp\_api_check.py
+python test\test\webapp\_api_check.py
 
 # 端到端（需先启动服务）
 python -m webapp.backend.run            # 终端 1
-node webapp\_e2e.mjs                    # 终端 2
+node webapp\frontend\_e2e.mjs           # 终端 2
 
 # 前端组件渲染（React SSR，无需浏览器）
 cd webapp\frontend
-node _ui_render.mjs                     # 203 项（含导航分层、统计量板块、说明排版、全屏、信息表格、快捷预设）
+node _ui_render.mjs                     # 356 项（含导航分层、统计量板块、说明排版、全屏、信息表格、快捷预设、文件内容警示）
 node _build.mjs                         # 生产构建（不经 vite.config.js 加载器）
 
 # 构建产物里折叠面板 / 一屏布局的样式检查（需先启动服务）
-python webapp\_css_check.py             # 62 项
+python test\test\webapp\_css_check.py
 
 # 真实两组分体系（糖蛋白 + DOL，301 帧）
-node webapp\_e2e_polymer.mjs            # 29 项
+node webapp\frontend\_e2e_polymer.mjs   # 29 项
 
 # 导出图字体 / 后端检查
-python webapp\_font_check_all.py
+python test\webapp\_font_check_all.py
 
 # 板层界面体系（Aβ4-16+Cu / 水 / DCE）+ 拓扑格式（gro/pdb/top）路径
-python webapp\_test_abeta.py
+python test\webapp\_test_abeta.py
 
 # 拓扑格式一致性（.tpr / .gro / .pdb 的键表、组分识别必须一致）
-python webapp\_test_formats.py          # 28 项
+python test\webapp\_test_formats.py     # 28 项（夹具已移到 test/fixtures_fmt/）
 
 # 导出功能（目标目录 / 模块 / 文件形式 / 打开目录 / 只报目录+时间）
-python webapp\_test_export.py            # 20 项（真实 HTTP）
+python test\webapp\_test_export.py      # 20 项（真实 HTTP）
 
 # 实时运行接口（边算边出、增量拉取、运行期加锁、取消保留结果）
-python webapp\_test_live.py             # 22 项（TestClient，不用起服务）
-python webapp\_test_live_http.py        # 11 项（真实 HTTP，跑 Abeta 板层体系）
+python test\webapp\_test_live.py        # 22 项（TestClient，不用起服务）
+python test\webapp\_test_live_http.py   # 11 项（真实 HTTP，跑 Abeta 板层体系）
 
 # 真实浏览器布局验证（Headless Chrome + CDP，量 computed style）
-node webapp\_test_layout.mjs            # 22 项
+node webapp\frontend\_test_layout.mjs   # 22 项
 ```
 
 > **`_test_layout.mjs` 需要先起一个带调试端口的 Chrome。**
@@ -682,7 +701,7 @@ node webapp\_test_layout.mjs            # 22 项
 
 **D. 拓扑格式一致性（`_test_formats.py`，28 / 28 通过）**
 
-`_fmt_test/` 里是从 `.tpr` 转换出的同名 `.gro` 与 `.pdb`，用来验证跨格式一致性：
+`test/fixtures_fmt/` 里是从 `.tpr` 转换出的同名 `.gro` 与 `.pdb`，用来验证跨格式一致性：
 
 | 检查 | AdK | 糖蛋白 + DOL |
 |---|---|---|
