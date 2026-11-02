@@ -9,7 +9,7 @@
  * 分层（ChartPanel）用的是同一份定义，不会出现两边对不上的情况。
  *
  * 每项是 `[完整名, 分析项, 按钮缩写]`；缩写只用于快捷按钮行（那一行必须在
- * 一行内放下，见 `webapp/_css_check.py`），完整名用于面板标题与 tooltip。
+ * 一行内放下，见 `test/webapp/_css_check.py`），完整名用于面板标题与 tooltip。
  */
 
 /** 与后端 `mdta.pipeline.ANALYSIS_GROUPS` / `GROUP_SHORT` 保持一致 */

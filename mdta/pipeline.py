@@ -39,7 +39,9 @@ from .systeminfo import SystemInfo, describe_system, format_system_info
 
 #: 全部分析项及其默认参数
 DEFAULT_PARAMS: dict = {
-    "rg": {"mass_weighted": True},
+    # 「分析对象」默认 **分子 / 链**（逐分子算 Rg；与 Forcite / "分子有多大"同口径）。
+    # 另一档是 "system" = 整体体系（整组 Rg）—— 两档互斥，一次只算一个。
+    "rg": {"mass_weighted": True, "object": "molecule"},
     "ree": {},
     "dihedral": {"mode": "auto", "gauche_edge": 120.0},
     "density": {"axis": 2, "nbins": 100, "mode": "mass"},
@@ -56,7 +58,7 @@ DEFAULT_PARAMS: dict = {
     #    静默覆盖（这里曾同时写了 `"order": {"gauche_edge": …}` 和 `"order": {}`，
     #    结果默认阈值被吃掉，只有显式传参才生效）。
     "order": {"gauche_edge": 120.0},
-    "msd": {},
+    "msd": {"object": "molecule", "max_particles": None, "workers": 0},
     # 键取向序参数 / 晶体-非晶识别（1.0.2）：默认用 Lechner–Dellago 平均版 q̄6，
     # 邻域半径留空 = 自动按最近邻距离中位数推定
     "boo": {"cutoff": None, "averaged": True},
@@ -98,7 +100,7 @@ ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
 #: 分组在**快捷按钮行**上用的 2 字缩写。
 #:
 #: 为什么需要：快捷行要求「全选 + 各分组的仅选按钮」在**一行内**放下（用户明确要求），
-#: 而 `webapp/_css_check.py` 会用真实 CSS 字号做静态宽度估算。分组名改长之后
+#: 而 `test/webapp/_css_check.py` 会用真实 CSS 字号做静态宽度估算。分组名改长之后
 #: 「仅动力学与输运」这类按钮会把整行挤爆，所以按钮用缩写、完整名放在 tooltip 与
 #: 分组标题上。改分组名时**必须同步更新这张表**（有测试盯着）。
 GROUP_SHORT: dict[str, str] = {
@@ -135,8 +137,13 @@ def sort_by_estimate(names: Sequence[str],
 class Analyzer:
     """一次完整的分析会话。"""
 
-    def __init__(self, topology: str, trajectory: str | None = None):
-        self.trajectory: MDTrajectory = load_trajectory(topology, trajectory)
+    def __init__(self, topology: str, trajectory: str | None = None, *,
+                 guess_bonds: bool | None = None):
+        # `guess_bonds=True`：忽略拓扑里已有的键、按坐标重新猜（CONECT 不完整的
+        # PDB 用）。**必须能一路传到 Analyzer** —— 否则 Web 端把参数传给了
+        # `load_trajectory` 做校验、Analyzer 又重新加载一次、参数就丢了。
+        self.trajectory: MDTrajectory = load_trajectory(
+            topology, trajectory, guess_bonds=guess_bonds)
         self.frames: FrameSelection | None = None
         self.primary = None            # 主链（构象/结晶分析对象）
         self.primary_label: str = "链"
@@ -196,15 +203,45 @@ class Analyzer:
         """
         u = self.universe
         chains = largest_chains(u, n=1, min_atoms=min_chain_atoms)
+        comps = component_groups(u)
         if chains:
-            self.primary = chains[0]
-            seg = str(chains[0].segids[0])
-            self.primary_label = f"最大链 ({seg}, {chains[0].n_atoms} 原子)"
+            ch = chains[0]
+            # ⭐「最大链」是**一个小分子**、而同类分子有很多个时，主链应该取**整个组分**。
+            # 为什么：这种体系（例如 122 个 C12 分子）里"分子有多大"的正确回答是
+            # **逐分子算 Rg 再平均**，而不是随便挑一个分子 —— 单分子的 Rg 涨落大、
+            # 曲线形状与"全部分子的平均"完全不同。实测用户拿 Forcite 的 Rg
+            # （=122 个分子的平均）与界面上导出的"最大链"单分子曲线比，逐帧相关系数
+            # 只有 0.84、均值差 1%，看起来像"算错了"，其实是**分析对象选错**。
+            # 判据：该链占体系原子数 < 10%，且包含它的那个组分有 ≥10 个分子、
+            #       原子数是该链的 ≥5 倍。
+            chosen = None
+            if u.atoms.n_atoms >= 10 * ch.n_atoms:
+                idx_ch = set(np.asarray(ch.indices, dtype=int).tolist())
+                for name, ag in comps.items():
+                    # ⚠️ 用 molecule_count() 而不是直接 ag.molnums：退化拓扑下
+                    # molnums 会被删掉（Material Studio 的 PDB 只有 2 个残基），
+                    # 直接访问会抛 NoDataError 让整个体系打不开。
+                    from .topology import molecule_count
+
+                    n_mol = molecule_count(ag) if getattr(ag, "n_atoms", 0) else 0
+                    if (ag.n_atoms >= 5 * ch.n_atoms and n_mol >= 10
+                            and idx_ch.issubset(set(np.asarray(ag.indices,
+                                                              dtype=int).tolist()))):
+                        chosen = (name, ag, n_mol)
+                        break
+            if chosen is not None:
+                name, ag, n_mol = chosen
+                self.primary = ag
+                self.primary_label = (f"组分 {name}（{n_mol} 个分子，"
+                                      f"{ag.n_atoms} 原子）")
+            else:
+                self.primary = ch
+                seg = str(ch.segids[0])
+                self.primary_label = f"最大链 ({seg}, {ch.n_atoms} 原子)"
         else:
             self.primary = u.atoms
             self.primary_label = "全部原子"
 
-        comps = component_groups(u)
         # protein/polymer 优先，其余按原子数降序
         priority = {"protein": 0, "nucleic": 1, "sugar": 2, "polymer": 3,
                     "water": 4, "ion": 5, "other": 6}
@@ -245,15 +282,63 @@ class Analyzer:
 
         res = self._run_one(name, params=params, verbose=verbose)
         if res is not None:
-            # 把"拓扑能不能提供质量"这一信息随结果带下去，供 QC 判断
-            # （.gro/.pdb/.xyz 只有坐标：质量由元素/原子名**推断**，CG/联合原子
-            #  体系会算错 —— 实测 MARTINI 珠子 51 amu 被推成 9.0 amu，密度差 5.7×）
+            # 把"质量从哪来"随结果带下去，供 QC 判断。**区分两种情况**（用户要求）：
+            #   ① MDAnalysis 自己读到了质量（PDB 带元素列、力场拓扑自带…）→ QC 不提醒；
+            #   ② 连 MDAnalysis 都没有质量，是本工具按元素表补的 → 才提醒
+            #      （CG/联合原子体系会把珠子质量补错数倍：实测 MARTINI 51 → 9 amu，
+            #       质量密度差 5.7×，而且**不报错**）。
             top = str(getattr(self.trajectory, "topology", "") or "")
             ff = top.lower().endswith((".tpr", ".psf", ".prmtop", ".parm7", ".top"))
             res.meta["拓扑文件"] = top.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
             res.meta["拓扑含力场信息"] = bool(ff)
+            src = str(((getattr(self.trajectory, "object_info", None) or {})
+                       .get("sources") or {}).get("masses") or "")
+            inferred = ("由元素查表" in src) or ("由元素" in src) or ("推断" in src)
+            res.meta["质量来源"] = ("由工具按元素/原子名推断" if inferred
+                                    else "拓扑/MDAnalysis 提供")
+            # 键表完整性：拓扑自带键表残缺时（MS 的 PDB 常见）工具会按坐标补键，
+            # 这里把"补过"如实带进结果 —— 否则用户看到"122 分子"会以为是原样，
+            # 看到"243 分子"又不知道为什么（实测正是后者让逐分子 Rg 少了一半）。
+            binfo = getattr(self.trajectory, "bond_guess_info", None) or {}
+            if binfo.get("forced_repair") or binfo.get("replaced_existing"):
+                res.summary["键表修复"] = str(binfo.get("note", ""))
+                res.meta["键表修复"] = {
+                    "fragments_before": binfo.get("fragments_before"),
+                    "fragments": binfo.get("fragments"),
+                    "bonds_before": binfo.get("replaced_existing"),
+                    "bonds": binfo.get("bonds"),
+                    "degenerate_note": binfo.get("degenerate_note", ""),
+                    "forced": bool(binfo.get("forced_repair")),
+                }
+                res.add_notes("**键表修复**：" + str(binfo.get("note", "")))
+            # 坐标尺度体检（用共价键长当尺子）：轨迹被缩放过 / 单位不是 Å 时，
+            # Rg / R_ee / 界面厚度等**所有长度量**都会按同一比例偏大偏小，而且不报错。
+            # 这里把结论随结果带下去，qc.derive_checks 会据此出一条检查项。
+            scale = self.bond_scale()
+            if scale.get("ok") is not None:
+                res.summary["坐标尺度校验"] = scale["note"]
+                res.meta["坐标尺度"] = {k: scale.get(k) for k in
+                                       ("ok", "median", "expected", "ratio")}
+                if not scale["ok"]:
+                    res.add_notes("⚠️ 坐标尺度异常 —— " + scale["note"])
             qc.derive_checks(res)          # 统一把散落的判据变成结构化结论
         return res
+
+    def bond_scale(self) -> dict:
+        """用共价键长标定坐标尺度（每个 Analyzer 只算一次，便于多处复用）。"""
+        cached = getattr(self, "_bond_scale_cache", None)
+        if cached is not None:
+            return cached
+        out: dict = {"ok": None, "note": ""}
+        try:
+            from .topology import bond_scale_report
+
+            ag = self.primary if self.primary is not None else self.universe.atoms
+            out = bond_scale_report(ag)
+        except Exception as exc:                                # noqa: BLE001
+            out = {"ok": None, "note": f"坐标尺度校验失败：{type(exc).__name__}: {exc}"}
+        self._bond_scale_cache = out
+        return out
 
     def _run_one(self, name: str, *, params: Mapping | None = None,
                  verbose: bool = False) -> AnalysisResult | None:
@@ -293,8 +378,19 @@ class Analyzer:
             groups = self._rdf_groups()
             if len(groups) < 1:
                 return None
+            # 逐帧叶层：`slab_ref_from` 给"膜"那一侧组分的名字，就用它的**逐帧质心**
+            # 当叶层阈值（作者 Lipid_RDF.py 正是 z > 膜质心(t)）。给固定 slab 时优先用
+            # 固定值（两者互斥，见 analyze_rdf_inplane 的文档）。
+            p2 = dict(p)
+            ref_name = p2.pop("slab_ref_from", None)
+            if ref_name and p2.get("slab") is None:
+                ref = (self.components.get(str(ref_name))
+                       or self.extra_components.get(str(ref_name)))
+                if ref is None:
+                    raise SelectionError(f"组分 {ref_name!r} 不存在，无法作为叶层参考")
+                p2["slab_ref"] = ref
             return ifc.analyze_rdf_inplane(self.trajectory, groups, sel,
-                                           verbose=verbose, **p)
+                                           verbose=verbose, **p2)
         if name == "comdist":
             if len(self.components) < 2:
                 return None
@@ -680,17 +776,18 @@ class Analyzer:
                         continue
                 except Exception:  # noqa: BLE001
                     pass
-            if ag.n_atoms > 5000:
-                # 抽稀以避免过大的内存与计算量
-                step = int(np.ceil(ag.n_atoms / 2000))
-                out[f"{name}(抽稀 1/{step})"] = ag[::step]
-            else:
+            # ⚠️ 这里**不再**按原子数抽稀（1.0.2 改）。
+            # 老代码对 >5000 原子的组分做 `ag[::step]`（抽到约 2000 个**原子**），
+            # 两个问题：
+            #   1. 用户要"每个原子都参与"，抽稀直接违背需求；
+            #   2. 原子级等间隔取会把**分子切碎** —— PEG 体系 200 条 30 原子链
+            #      抽成每条 10 个原子，"分子质心"变成残缺分子的质心，D 失真。
+            # MSD 现在自己会分块 + 落盘内存映射，因此不需要在这里丢粒子；
+            # 真要限制规模请用 MSD 参数 `max_particles`（分子对象按分子整取）。
+            if ag.n_atoms:
                 out[name] = ag
         for name, ag in self.extra_components.items():
-            if ag.n_atoms > 5000:
-                step = int(np.ceil(ag.n_atoms / 2000))
-                out[f"{name}(抽稀 1/{step})"] = ag[::step]
-            elif ag.n_atoms:
+            if ag.n_atoms:
                 out[name] = ag
         return out
 

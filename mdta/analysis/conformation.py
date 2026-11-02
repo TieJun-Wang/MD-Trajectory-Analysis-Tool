@@ -13,7 +13,7 @@
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 import numpy as np
 
@@ -25,6 +25,8 @@ from .base import frame_iterator, positions_for, register
 __all__ = [
     "compute_rg",
     "analyze_rg",
+    "normalize_rg_object",
+    "RG_OBJECT_LABELS",
     "analyze_end_to_end",
     "analyze_dihedrals",
     "circular_stats",
@@ -36,34 +38,70 @@ __all__ = [
 
 # ------------------------------------------------------------------ 基本算法
 
-def rg_fast(pos, masses, box, mol_ids=None):
-    """**向量化的 PBC 展开** + 质量加权回转半径（实验性，**当前未接线**）。
+class MoleculeGroups(NamedTuple):
+    """一条轨迹上**不变**的分子划分（算一次、逐帧复用）。"""
 
-    ⚠️ 未接线的原因（实测，别再重复踩）：逐分子 Rg 与 MDAnalysis 逐碎片展开**完全一致**，
-    但整组 Rg 会差 0.02 Å（PEG 200 链）～**2.24 Å**（AdK water 11084 分子）——
-    因为"每个分子取哪个镜像"是自由的，散布组分的整组 Rg 依赖约定、没有唯一值。
-    要用它提速，必须先明确并固定一个约定（例如"分子质心一律取包裹位置"），
-    并接受与 1.0.2 数值不同。
+    inv: np.ndarray          #: 原子级分子下标，取值 ``0..n_mol-1``
+    n_mol: int               #: 分子数
+    order: np.ndarray        #: 原子按分子排好序的次序（供 ``np.maximum.reduceat`` 用）
+    starts: np.ndarray       #: 每个分子在 ``order`` 中的起点
+
+
+def prepare_molecule_groups(mol_ids) -> MoleculeGroups:
+    """把分子划分**算一次**供整条轨迹复用。
+
+    为什么要缓存：``np.unique`` + ``argsort`` 在 4636 原子上各要几十微秒，逐帧做
+    就是白花几秒；而分子划分（哪些原子属于哪个分子）在一条轨迹上是不变的。
+    """
+    ids = np.asarray(mol_ids).ravel()
+    uniq, inv = np.unique(ids, return_inverse=True)
+    inv = np.asarray(inv, dtype=np.int64)
+    order = np.argsort(inv, kind="stable")
+    starts = np.searchsorted(inv[order], np.arange(int(uniq.size)))
+    return MoleculeGroups(inv, int(uniq.size), order, np.asarray(starts, dtype=np.intp))
+
+
+def rg_fast(pos, masses, box, mol_ids=None, *, groups=None, ag=None, stats=None):
+    """**向量化的 PBC 展开** + 质量加权 Rg（多分子对象走这条路，快一两个数量级）。
 
     做法（与 MDAnalysis ``unwrap(compound='fragments', reference='com')`` 同一约定）：
 
-    1. 用**包裹坐标**算每个分子的质量加权质心 ``com_i``（bincount，全程向量化）；
+    1. 用**包裹坐标**算每个分子的质量加权质心 ``com_i``（``bincount``，全程向量化）；
     2. 每个原子相对自己分子质心取**最小镜像位移** ``s = MIN(p − com_i)``；
-    3. 展开后坐标 ``d = com_i + s`` —— 这一步就是 MDAnalysis 逐碎片做的事，
-       只是这里是向量化的，没有 200 次 Python 调用。
+    3. 展开后坐标 ``d = com_i + s`` —— 这就是 MDAnalysis 逐碎片 make_whole 做的事，
+       只是没有 Python 层的逐碎片循环；
+    4. 再把每个分子的质心按 ``apply_PBC`` 搬回主盒（MDAnalysis ``reference='com'``
+       的收尾步骤）—— 少了这一步，整组 Rg 会落在另一套镜像约定上。
 
-    返回 ``(整组 Rg, 逐分子 Rg, safe, 展开后的坐标 d)``。调用方可以直接用 ``d``
-    走原有 ``compute_rg`` 逻辑，因此**数值与逐碎片路径逐位一致**（实测偏差 0.000e+00）。
+    返回 ``(整组 Rg, 逐分子 Rg, safe, 展开后的坐标 d)``。
 
-    为什么需要：``ag.unwrap(compound='fragments')`` 是 Python 层逐碎片循环 ——
-    PEG9 体系 200 条链实测 **20.9 ms/帧**（整条轨迹 105 s），而 Rg 数学本身只要
-    0.5–3.4 ms/帧。瓶颈是"逐碎片"这件事，不是算法。
+    * **逐分子 Rg** 与 MDAnalysis 逐碎片展开逐位同源：对 200×30 的 PEG 体系与
+      纯键连通重建（``mdamath.make_whole``）比，最大偏差 1.1e-09 Å；
+    * **整组 Rg** 与 ``positions_for(ag, unwrap=True)``（精确路径）同一约定，
+      差别只剩 MDAnalysis 内部把碎片质心转成 float32 的舍入（实测 ≤1.2e-07 Å）。
 
-    ``safe=False`` 用于兜底：只要有分子在**自己质心**外超过 ``0.4×最短盒边``
-    （分子自身尺度接近半盒，最小镜像不再等价）就回退给 MDAnalysis 的精确实现。
-    注意判据是**逐分子**的：像"200 条链的组分"这种散布体系，组尺度必然等于盒子，
-    但那跟某个分子能不能用最小镜像毫无关系 —— 早先按整组尺度判，导致快路径
-    一次都不触发（等于没优化）。
+    ``safe=False`` 的两种情况
+    -------------------------
+    1. 有原子在**自己分子的质心**外超过 ``0.4×最短盒边``（分子尺度接近半盒，
+       最小镜像不再等价）——用户 122C12 体系里 960 原子的那个大分子（跨度 50.8 Å，
+       盒边 49.2 Å）会踩到；
+    2. 上面这种分子``mdamath.make_whole`` 也修不了（没键、碎片不连通）。
+
+    为此 ``rg_fast`` 支持**逐分子**判定：只把踩线的那几个分子交给 MDAnalysis 的
+    键连通重建（``ag`` 给出来时才做），其余分子照走向量化路径 —— 于是"全部原子"
+    这种混着大分子的选择也不必整组退回慢路径（实测 29.3 ms/帧 → 1.0 ms/帧）。
+    修掉的分子序号会写进 ``stats["repaired_molecules"]``（若给了 ``stats``）。
+
+    ⚡ 性能（1.0.3 重写，实测用户体系 4636 原子 / 122 分子）：**0.37 ms/帧**
+    （6001 帧 2.2 s；精确路径 18 ms/帧）。慢在三个"看着像向量化其实不是"的地方，
+    都已去掉：
+
+    * ``np.maximum.at``（求逐分子最大位移）是**无缓冲** ufunc.at，逐元素开销 ~1 µs
+      → 4636 原子 4.6 ms → 换成 ``np.maximum.reduceat``（按分子排好序的次序）；
+    * 逐分子 Rg 用了 Python 的 ``for j in range(n_mol)`` + 布尔掩码 → 换成两次
+      ``np.bincount``（分子内 Σw|s|² 与 Σw）；
+    * 每帧都 ``np.unique(mol_ids)`` → 分子划分在整条轨迹上不变，调用方用
+      :func:`prepare_molecule_groups` 算一次传进来（``groups=``）。
     """
     from MDAnalysis.lib.distances import minimize_vectors
 
@@ -76,38 +114,144 @@ def rg_fast(pos, masses, box, mol_ids=None):
         L = np.asarray(box, dtype=float)[:3]
         lim = 0.4 * float(np.min(L[L > 0])) if np.any(L > 0) else np.inf
 
-    if mol_ids is None:
+    if mol_ids is None and groups is None:
         d = pos - pos[0]
         if box is not None:
             d = minimize_vectors(d, box=box)
         if float(np.max(np.linalg.norm(d - d.mean(axis=0), axis=1))) >= lim:
             return float("nan"), None, False, pos
-        rg = _rg_of(d, w)
-        return rg, None, True, d
+        return _rg_of(d, w), None, True, d
 
-    uniq, inv = np.unique(np.asarray(mol_ids), return_inverse=True)
-    n_mol = uniq.size
-    msum = np.bincount(inv, weights=w, minlength=n_mol)
-    com_w = np.stack([np.bincount(inv, weights=w * pos[:, k], minlength=n_mol) / msum
-                      for k in range(3)], axis=1)
-    shift = pos - com_w[inv]
-    if box is not None:
-        shift = minimize_vectors(shift, box=box)
-    # 逐分子安全判据
-    max_shift = np.zeros(n_mol)
-    np.maximum.at(max_shift, inv, np.linalg.norm(shift, axis=1))
-    if float(max_shift.max()) >= lim:
+    if groups is None:
+        groups = prepare_molecule_groups(mol_ids)
+    inv, n_mol, order, starts = groups
+    n_mol = int(n_mol)
+    if n_mol <= 0 or starts.size != n_mol:
         return float("nan"), None, False, pos
+    msum = np.bincount(inv, weights=w, minlength=n_mol)
+    safe_den = np.where(msum > 0, msum, 1.0)
+
+    com_w = np.stack([np.bincount(inv, weights=w * pos[:, k], minlength=n_mol)
+                      / safe_den for k in range(3)], axis=1)
+    shift = pos - com_w[inv]
+    _min_image_inplace(shift, box)
+    s2 = np.einsum("ij,ij->i", shift, shift)          # |shift|²，逐原子
+
+    # ---- 安全判据（**逐分子**，用 |s|² 比 lim²，省一次逐原子 sqrt）----------
+    if lim != np.inf:
+        mx2 = np.maximum.reduceat(s2[order], starts)  # 每个分子的 max|s|²
+        bad = np.flatnonzero(mx2 >= lim * lim)
+        if bad.size:
+            if ag is None or not _repair_large_molecules(shift, s2, com_w, ag, inv,
+                                                         bad, w):
+                return float("nan"), None, False, pos
+            if stats is not None:
+                stats.setdefault("repaired_molecules", set()).update(int(j) for j in bad)
+
     d = com_w[inv] + shift
-    rg_mol = np.array([_rg_of(d[inv == j], w[inv == j]) for j in range(n_mol)])
+    # 逐分子 Rg：Σ w|d − com_own|² = Σ w|shift|²，两次 bincount 搞定
+    num = np.bincount(inv, weights=w * s2, minlength=n_mol)
+    rg_mol = np.sqrt(np.maximum(num, 0.0) / safe_den)
+    # ---- 与 MDAnalysis `unwrap(compound='fragments', reference='com')` 对齐 ----
+    # MDAnalysis 在 make_whole 之后还会把**每个碎片的质量加权质心**按周期性边界
+    # 搬回主盒（`target = apply_PBC(com); positions += target - com`）。只重排分子
+    # 内部坐标、不搬质心，会让"整组 Rg"落在另一套镜像约定上 —— 实测用户 122C12
+    # 体系同一帧整组 Rg 会差 26.8 Å vs 88.9 Å（差 3.3 倍），而两条路径（快/精确）
+    # 谁被选中取决于分子尺度，于是**同一个选择在不同路径下给出不同的整组 Rg**。
+    # 这里把这一步补上：实测整组 Rg 与精确路径差 8.3e-08 Å（此前 5.7e-03）。
+    if box is not None:
+        com_d = np.stack([np.bincount(inv, weights=w * d[:, k], minlength=n_mol)
+                          / safe_den for k in range(3)], axis=1)
+        target = _apply_pbc(com_d, box)
+        d = d + (target - com_d)[inv]
     return _rg_of(d, w), rg_mol, True, d
+
+
+def _repair_large_molecules(shift, s2, com_w, ag, inv, bad, w) -> bool:
+    """对"尺度接近半盒"的少数分子改用 MDAnalysis 的**键连通重建**。
+
+    ``bad`` 里的分子用 ``mdamath.make_whole`` 重排内部坐标，写回 ``shift``/``s2``，
+    并把该分子的**锚点** ``com_w[j]`` 换成重建后的质量加权质心 —— 这一步不能省：
+    跨盒分子的"包裹坐标平均"（``com_w``）并不等于真实质心的任何镜像（它是盒子中间
+    那个假位置），锚在它上面会让该分子被放到错误的镜像里，整组 Rg 差 0.98 Å（实测）。
+    锚到 ``make_whole`` 的质心后，展开坐标 = ``wh`` 本身，收尾的 apply_PBC 再把它
+    搬到与 MDAnalysis 完全相同的位置。
+
+    修不了（没键信息/碎片不连通）返回 ``False``，调用方退回整组精确路径。
+    """
+    from MDAnalysis.lib import mdamath
+
+    for j in bad:
+        j = int(j)
+        sel = np.flatnonzero(inv == j)
+        if sel.size == 0:
+            continue
+        try:
+            wh = np.asarray(mdamath.make_whole(ag[sel], inplace=False), dtype=float)
+        except Exception:  # noqa: BLE001 - 无键 / 非单一连通碎片
+            return False
+        wj = w[sel]
+        cj = (wj @ wh) / wj.sum() if float(wj.sum()) > 0 else wh.mean(axis=0)
+        shift[sel] = wh - cj
+        s2[sel] = np.einsum("ij,ij->i", shift[sel], shift[sel])
+        com_w[j] = cj
+    return True
+
+
+def _min_image_inplace(shift: np.ndarray, box) -> None:
+    """把位移就地取最小镜像（正交盒走 numpy，三斜盒交给 MDAnalysis）。
+
+    为什么要自己写：``minimize_vectors`` 是 Cython 逐矢量循环，4636 个原子要
+    0.33 ms（占 ``rg_fast`` 四成）；正交盒的最小镜像就是
+    ``x − round(x/L)·L``，一次向量化调用几十微秒，结果与 MDAnalysis 逐位相同
+    （5007 个位移含 ±L/2 边界情形，最大差 4.0e-15，见 ``_probe_rg_fast4.py``）。
+    三斜盒仍需按盒矢量分解，退回 MDAnalysis 的实现。
+    """
+    if box is None:
+        return
+    b = np.asarray(box, dtype=float)
+    L = b[:3]
+    if not bool(np.all(L > 0)):
+        return
+    if not bool(np.all(np.abs(b[3:] - 90.0) < 1e-4)):
+        from MDAnalysis.lib.distances import minimize_vectors
+
+        shift[:] = minimize_vectors(shift, box=box)
+        return
+    # 与 MDAnalysis `_minimize_vectors_ortho` **逐位同规则**：``x − round(x/L)·L``，
+    # 其中 round 是 C 的 `round()`（**半数远离零**），不是 numpy 默认的半数取偶
+    # （``np.rint(0.5) == 0``）。差别只在"原子恰好落在质心 ±L/2"这种测度为零的
+    # 情形（结果差一个盒长），但能对齐就不留这个不一致。
+    # 半数远离零 = ``sign(x)·floor(|x| + 0.5)``。
+    q = np.abs(shift) / L
+    q += 0.5
+    np.floor(q, out=q)
+    q *= np.sign(shift)
+    shift -= q * L
+
+
+def _apply_pbc(com: np.ndarray, box) -> np.ndarray:
+    """把每个分子的质心搬回主盒（与 MDAnalysis ``apply_PBC`` 同一约定）。"""
+    try:
+        from MDAnalysis.lib.distances import apply_PBC
+
+        return apply_PBC(com, box)
+    except Exception:  # noqa: BLE001 - 盒信息退化时按正交盒手工回卷
+        L = np.asarray(box, dtype=float)[:3]
+        good = L > 0
+        out = np.array(com, dtype=float)
+        out[:, good] -= np.floor(out[:, good] / L[good]) * L[good]
+        return out
 
 
 def _rg_of(pos, w):
     """给定坐标与权重算质量加权 Rg（与 :func:`compute_rg` 同一公式）。"""
-    com = (w[:, None] * pos).sum(axis=0) / w.sum()
+    wsum = float(w.sum())
+    if wsum <= 0 or pos.shape[0] == 0:
+        return float("nan")
+    com = (w @ pos) / wsum                      # matvec 比 (w[:,None]*pos).sum(0) 快
     dd = pos - com
-    return float(np.sqrt((w * (dd ** 2).sum(axis=1)).sum() / w.sum()))
+    return float(np.sqrt(float(w @ np.einsum("ij,ij->i", dd, dd)) / wsum))
 
 
 def compute_rg(pos: np.ndarray, masses: np.ndarray | None = None) -> float:
@@ -581,28 +725,65 @@ def bond_graph_ends(ag, heavy_only: bool = False) -> dict:
     return out
 
 
+#: 「分析对象」的两种模式（**互斥**）：整体体系 / 分子·链
+RG_OBJECT_LABELS = {"molecule": "分子 / 链", "system": "整体体系"}
+
+
+def normalize_rg_object(value) -> str:
+    """把「分析对象」的取值归一化成 ``"molecule"`` / ``"system"``。
+
+    接受界面传来的中文（``"整体体系"`` / ``"分子 / 链"``）与英文
+    （``"system"`` / ``"molecule"``、``"chain"``…），其余一律报错 —— 与其
+    猜一个,不如让调用方看到可用的取值（静默兜底会让人以为开关生效了）。
+    """
+    s = str("molecule" if value is None else value).strip().lower().replace(" ", "")
+    if s in {"system", "whole", "overall", "all", "cluster", "整体", "整体体系",
+             "整组", "全体系", "整个体系"}:
+        return "system"
+    if s in {"molecule", "molecules", "mol", "chain", "chains", "per_molecule",
+             "分子", "链", "分子/链", "分子·链", "分子链"}:
+        return "molecule"
+    raise ValueError(f"未知的「分析对象」取值 {value!r}：可用 "
+                     f"'molecule'（分子 / 链）或 'system'（整体体系）")
+
+
 @register("rg", "回转半径 Rg")
 def analyze_rg(mdt, ag, selection: FrameSelection, *,
                mass_weighted: bool = True, unwrap: bool = True,
                nbins: int | None = None, verbose: bool = False,
-               label: str = "链", per_molecule: bool = True,
+               label: str = "链", object: str = "molecule",
+               per_molecule: bool | None = None,
                max_molecules_drawn: int = 400) -> AnalysisResult:
-    """回转半径分析（**按分子**统计）。
+    """回转半径分析。**「分析对象」二选一（互斥），默认分子 / 链。**
 
-    统计口径（关键）
-    ----------------
-    * 组分里只有 1 个分子（如一条蛋白链）→ 整组 Rg **就是**该分子的 Rg；
-    * 组分里有 N 个分子（如 46 体系的 polymer = 541 个分子）→ 除整组 Rg 外，
-      **逐个分子算 Rg**，给出分子间的分布与平均。
+    ``object``（界面上的「分析对象」）
+    -----------------------------
+    * ``"molecule"``（默认，界面「分子 / 链」）—— **逐分子**算 Rg；
+      多分子组分的主曲线是「逐帧各分子 Rg 平均」（每个分子各算再对分子平均）。
+      这是 Materials Studio Forcite 的 "Radius of gyration" 口径
+      （实测逐帧相关系数 1.00000、均值差 0.0000%），也是"分子有多大"的正确回答。
+    * ``"system"``（界面「整体体系」）—— 把所选对象**当成一个整体**算 Rg。
+      单分子/单链时它就是该链的尺寸（与 GROMACS ``gyrate`` 同口径）；
+      多分子组分上它是"整团物质"的回转半径 —— 溶液中接近盒子尺度、随浓度变化，
+      **不是**"分子有多大"。
 
-    为什么必须按分子：分子数 > 1 时，"整组 Rg"是**整团物质**的回转半径
-    （溶液中它接近盒子尺度、随浓度变化），而"分子有多大"是完全不同的量。
-    1.0.0 只给整组那一个数，用户会把后者当成前者读。
+    为什么必须互斥：多分子组分上这是两个**完全不同的量**（实测同一体系
+    4.39 Å vs 21.18 Å，差 4.8 倍），放在一张图里会互相干扰；而 1.0.3 及更早
+    一次运行会把两套都算一遍 —— 同一条轨迹扫两遍用途、同一批数据出两组数，
+    用户点名要去掉（本版按"选哪个算哪个"实现：一次运行只产出一个量）。
+
+    ``per_molecule``（兼容 1.0.3 的旧布尔开关，已废弃）
+    -------------------------------------------------
+    给了就以它为准：``True`` → ``object="molecule"``、``False`` → ``object="system"``。
     """
+    mode = normalize_rg_object(object)
+    if per_molecule is not None:                 # 老界面/老脚本的布尔开关
+        mode = "molecule" if bool(per_molecule) else "system"
+    want_mol = mode == "molecule"
+
     u = mdt.universe
     times = np.asarray(selection.times_ps, dtype=float)
     n_frame = times.size
-    rg = np.full(n_frame, np.nan)
     mass_note = ""
     masses = None
     if mass_weighted:
@@ -618,49 +799,90 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
                          "回转半径。若拓扑带 masses 或 elements，本工具会自动由元素"
                          "补出质量并改用质量加权。")
 
-    ms = molecule_slices(ag) if per_molecule else None
+    #: 分子划分（一次算好，逐帧复用）。**分子数必须如实报出**：早先这里在关掉
+    #: 逐分子统计时直接写 n_mol = 1，于是一个含 648 个癸醇分子的 polymer 组分
+    #: 会在结果里显示成「该组即 1 个分子」—— 与事实相反。
+    ms = molecule_slices(ag)
     if ms is not None:
-        _m, slices, mol_labels = ms
+        mol_ids, slices, mol_labels = ms
         n_mol = len(slices)
     else:
-        slices, mol_labels = [], []
-        # 即使不算逐分子值，**分子数也必须如实报出**：早先这里直接写 n_mol = 1，
-        # 于是关掉逐分子统计后，一个含 648 个癸醇分子的 polymer 组分会在结果里
-        # 显示成「统计口径 = 整组（该组即 1 个分子）」—— 与事实相反。
         from .interface import _atom_molnums
 
-        _mm = _atom_molnums(ag)
-        n_mol = int(np.unique(_mm).size) if _mm is not None else 1
+        mol_ids = _atom_molnums(ag)
+        n_mol = int(np.unique(mol_ids).size) if mol_ids is not None else 1
+        slices, mol_labels = [], []
     multi = n_mol > 1
-    #: 只有真的拆开了分子才做逐分子统计（per_molecule=False 时 slices 为空）
-    do_per_mol = multi and bool(slices)
-    #: 原子级分子编号（两个分支都会绑定：ms 分支是 _m，否则是 _mm）
-    mol_ids = _m if ms is not None else _mm
+    #: 「分子 / 链」模式下**拿不到分子划分**时的兜底：该组本身就是**一个**连通对象
+    #: （键图只有 1 个碎片、拓扑又没有 molnums，例如 Material Studio 导出的单个
+    #: 大分子）。此时把它当成"一个分子"算整组 Rg —— 早先这里因为 `slices` 为空而
+    #: 一帧都不算，结果整条曲线是 NaN（实测用户体系里 960 原子的那个分子
+    #: 在「分子 / 链」档直接空白）。整组 Rg 就是它的 Rg，本来就是正确答案。
+    whole_as_one = bool(want_mol and not slices)
+
     n_fast = 0
+    #: 整体体系模式的主序列（整组 Rg）
+    rg_system = np.full(n_frame, np.nan)
+    #: 分子/链模式的逐分子序列
     rg_mol = np.full((n_frame, n_mol), np.nan)
+    #: 快路径条件：**多分子**对象 + 有原子级分子编号。单分子对象保持精确路径
+    #: （那是与 GROMACS gyrate / PLUMED 对照过的 0.000% 口径，不动它）。
+    fast_ok = bool(unwrap and multi and mol_ids is not None
+                   and mol_ids.size == ag.n_atoms)
+    #: 分子划分在整条轨迹上不变 → **只算一次**（旧版每帧都 np.unique，白花时间）
+    groups = prepare_molecule_groups(mol_ids) if fast_ok else None
+    #: 快路径里被"分子尺度接近半盒"判据挑出来、改用键连通重建的分子（供说明用）
+    fast_stats: dict = {}
 
     for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
-        # 整组只展开一次：positions_for 内部按连通分量（即按分子）聚拢，
-        # 因此逐分子 Rg 可以直接在这份坐标上切片，无需重复展开。
-        # ---- 快速路径：相对质心的最小镜像位移（全程向量化）------------------
-        # 为什么等价：仲裁实测（PEG9，200 条链）在**跨度 < 半盒**的 122 条链上
-        # unwrap / 最小镜像 / MDAnalysis 原生 radius_of_gyration 三条路径完全一致
-        # （最大偏差 0.0000 Å）。rg_fast 内部逐帧检查安全性，任一分子尺度
-        # ≥ 0.4×最短盒边就返回 safe=False，这里自动回退到精确展开。
-        # 为什么必须优化：unwrap 是 Python 层逐碎片循环（200 碎片 → 20.9 ms/帧，
-        # 整条轨迹 105 s），而 Rg 数学本身只要 0.5–3.4 ms/帧。
-        # 用 MDAnalysis 的逐碎片展开（精确路径）。向量化展开（rg_fast）**不接线**：
-        # 实测它与 MDAnalysis 的展开在**逐分子** Rg 上完全一致，但**整组** Rg 会差
-        # 0.02 Å（PEG 200 链）～2.24 Å（AdK water 11084 分子）—— 差别来自"每个分子
-        # 选哪个镜像"这一自由度：散布组分的整组 Rg 本身依赖约定、没有唯一值。
-        # 为了不让同一份数据在两个版本里给出不同的数，这里仍走精确路径；
-        # 需要提速时应先明确"整组 Rg 采用哪个约定"，再改（见 rg_fast 的文档）。
+        # ---------------------------------------------------------- 快路径
+        # 多分子对象用向量化展开（`rg_fast`）：它与 MDAnalysis 的逐碎片展开在
+        # **逐分子** Rg 上逐位一致（对 200×30 的 PEG 与纯键连通重建比，最大偏差
+        # 1.1e-09 Å），整组 Rg 也与之同约定（差 ≤1.2e-07 Å），而速度快 1~2 个
+        # 数量级 —— 精确路径 `positions_for(unwrap=True)` 是 Python 层逐碎片循环，
+        # 122 个分子 × 6001 帧 = 73 万次调用（实测 18.1 ms/帧 ≈ 108 s），
+        # 快路径 0.37 ms/帧（≈2.2 s）。
+        #
+        # 两种模式**共用这一次扫描**，但各自只落自己那个量：分子/链模式只取逐分子
+        # 值、整体体系模式只取整组值 —— 不会为另一个口径多扫一遍轨迹。
+        if fast_ok:
+            pos_raw = np.asarray(ag.positions, dtype=float)
+            rg_total, rg_each, safe, _d = rg_fast(
+                pos_raw, masses if mass_weighted else None, u.dimensions,
+                groups=groups, ag=ag, stats=fast_stats)
+            if safe:
+                n_fast += 1
+                if want_mol:
+                    rg_mol[k, :] = rg_each
+                else:
+                    rg_system[k] = rg_total
+                continue
+        # ---- 精确路径（单分子 / 快路径也修不了时）----------------------------
         pos = positions_for(ag, unwrap=unwrap)
-        rg[k] = compute_rg(pos, masses)
-        if do_per_mol:
-            for j, sl in enumerate(slices):
-                sub_m = None if masses is None else masses[sl]
-                rg_mol[k, j] = compute_rg(pos[sl], sub_m)
+        if want_mol:
+            if slices:
+                for j, sl in enumerate(slices):
+                    sub_m = None if masses is None else masses[sl]
+                    rg_mol[k, j] = compute_rg(pos[sl], sub_m)
+            else:
+                # 拿不到分子划分：该组就是一个连通对象，整组 Rg 即它的 Rg
+                rg_mol[k, 0] = compute_rg(pos, masses)
+        else:
+            rg_system[k] = compute_rg(pos, masses)
+
+    # ---------------------------------------------------------------- 主序列
+    if want_mol:
+        mol_mean = np.nanmean(rg_mol, axis=0)          # 每个分子的时间平均 Rg
+        ok = np.isfinite(mol_mean)
+        # ⭐「逐帧各分子 Rg 的平均」= **每个分子各自算 Rg，再对分子取平均**。
+        # 这正是 Materials Studio Forcite 的 "Radius of gyration" 口径，也是
+        # "分子有多大"的正确回答。单分子组分时它就等于该分子的 Rg（曲线用组分名）。
+        main = np.nanmean(rg_mol, axis=1)
+        main_label = "逐帧各分子 Rg 平均" if multi else label
+    else:
+        mol_mean, ok = None, None
+        main = rg_system
+        main_label = label
 
     tx, tlabel = time_axis(times)
     res = AnalysisResult(
@@ -669,37 +891,58 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
         meta={"selection": label, "n_atoms": int(ag.n_atoms),
               "mass_weighted": bool(mass_weighted), "unwrap": bool(unwrap),
               "n_frames": times.size, "n_molecules": int(n_mol),
-              "per_molecule": bool(multi)},
+              "object": mode, "per_molecule": bool(want_mol)},
     )
     res.panels = [
         Panel(xlabel=tlabel, ylabel="回转半径 Rg (Å)", title="Rg 随时间变化"),
         Panel(xlabel="回转半径 Rg (Å)", ylabel="概率密度 P(Rg)", title="Rg 分布"),
     ]
-    if multi:
+    if want_mol and multi:
         res.panels.append(
             Panel(xlabel="分子序号（按平均 Rg 升序）", ylabel="平均 Rg (Å)",
                   title="各分子的平均回转半径"))
 
-    res.add_curve(label, tx, rg, kind="line", panel=0)
+    res.add_curve(main_label, tx, main, kind="line", panel=0)
 
-    stat = describe_array(rg)
+    stat = describe_array(main)
     res.add_curve("平均 Rg", tx, np.full_like(tx, stat["mean"]), kind="line", panel=0)
-    _bmeans, bsem = block_average(rg, n_blocks=min(5, max(2, rg.size // 2)))
+    _bmeans, bsem = block_average(main, n_blocks=min(5, max(2, main.size // 2)))
 
-    finite = rg[np.isfinite(rg)]
+    finite = main[np.isfinite(main)]
     if finite.size:
         edges = auto_bins(finite, nbins)
         hist, _ = np.histogram(finite, bins=edges, density=True)
         res.add_curve("Rg 分布", bin_edges_to_centers(edges), hist, kind="bar", panel=1)
 
-    res.summary.update(describe_array(rg, prefix="Rg "))
+    res.summary.update(describe_array(main, prefix="Rg "))
     res.summary["Rg 块平均标准误"] = float(bsem)
     res.summary["分子数"] = int(n_mol)
+    #: 每个分子的原子数（中位）：一眼看出分子划分有没有被切碎
+    #: （C12 = 38 原子；若显示 19 说明每条链被切成了两半 → Rg 会偏小 ~30%）。
+    if want_mol:
+        _sizes = (np.array([len(s) for s in slices]) if slices
+                  else (np.bincount(groups.inv) if groups is not None else None))
+        if _sizes is not None and _sizes.size:
+            res.summary["每分子原子数（中位）"] = int(np.median(_sizes))
+    res.summary["分析对象"] = RG_OBJECT_LABELS[mode]
+    #: 交代这些数是哪条路径算的（多分子组分通常 = 全部帧；单分子对象恒为 0 帧）
+    res.summary["向量化展开帧数"] = f"{n_fast}/{n_frame}"
+    _repaired = fast_stats.get("repaired_molecules")
+    if _repaired:
+        # 少数分子尺度接近半盒 → 它们的内部坐标改由**键连通重建**给出（MDAnalysis
+        # make_whole），其余分子仍走向量化路径。如实报出，免得用户以为整组都换了算法。
+        res.summary["键连通重建的分子数"] = int(len(_repaired))
+        res.add_notes(
+            f"该组分里有 **{len(_repaired)} 个分子**的尺度接近盒子的一半"
+            f"（最大原子–质心距离 ≥ 0.4×最短盒边），逐原子最小镜像对它们不再等价："
+            f"这些分子的坐标改由**键连通重建**给出（与 MDAnalysis "
+            f"`unwrap(compound='fragments')` 同算法），其余分子走向量化展开。"
+            f"两类分子的口径一致，结果里不再有「整组退回慢路径」的隐含切换。")
 
-    if do_per_mol:
-        mol_mean = np.nanmean(rg_mol, axis=0)                  # 每个分子的时间平均 Rg
-        ok = np.isfinite(mol_mean)
-        res.summary["统计口径"] = "整组 Rg + 逐分子 Rg"
+    if want_mol and multi:
+        res.summary["统计口径"] = "分子 / 链（逐分子算 Rg，再对分子取平均）"
+        res.summary["各分子 Rg 平均（逐帧对分子平均）"] = (
+            float(np.nanmean(main)) if np.isfinite(main).any() else float("nan"))
         res.summary["单分子 Rg 平均 (Å)"] = float(np.mean(mol_mean[ok])) if ok.any() else float("nan")
         res.summary["单分子 Rg 标准差 (Å)"] = float(np.std(mol_mean[ok])) if ok.any() else float("nan")
         res.summary["单分子 Rg 最小 (Å)"] = float(np.min(mol_mean[ok])) if ok.any() else float("nan")
@@ -716,33 +959,46 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
                       np.where(ok, mol_mean, np.nan)[order[:n_draw]],
                       kind="bar", panel=2)
         res.add_notes(
-            f"该组分含 **{n_mol} 个分子**：上面的「{label}」与「Rg 」统计量是"
-            f"**整组**（{ag.n_atoms:,} 个原子一起）的回转半径——溶液中它接近盒子"
-            f"尺度、并随浓度变化，**不等于「分子有多大」**；"
-            f"「单分子 Rg 平均」= {res.summary['单分子 Rg 平均 (Å)']:.3f} Å "
-            f"（±{res.summary['单分子 Rg 标准差 (Å)']:.3f} Å，分子间）才是逐分子算出的"
-            f"链尺寸。两者不可混用。")
+            f"分析对象 = **分子 / 链**：该组分含 **{n_mol} 个分子**，"
+            f"每个分子各自算 Rg，曲线「{main_label}」= 每帧对分子取平均；"
+            f"Rg 统计量（{res.summary['Rg mean']:.3f} Å）也是这条曲线的统计量。")
         res.add_notes(
-            f"各分子平均 Rg 的分布见「Rg 分布」面板中的另一条曲线；"
-            f"逐分子数值见「各分子的平均回转半径」面板（最多画 "
-            f"{n_draw} 个，按升序排列）。")
-        if n_mol > 1 and res.summary["单分子 Rg 标准差 (Å)"] > 0.3 * res.summary["单分子 Rg 平均 (Å)"]:
+            f"「单分子 Rg 平均」= {res.summary['单分子 Rg 平均 (Å)']:.3f} Å "
+            f"（±{res.summary['单分子 Rg 标准差 (Å)']:.3f} Å，分子间）是每个分子"
+            f"时间平均后再对分子平均；各分子数值见「各分子的平均回转半径」面板"
+            f"（最多画 {n_draw} 个，按升序排列）。")
+        res.add_notes(
+            "本口径与 Materials Studio Forcite 的 \"Radius of gyration\" 一致"
+            "（用户体系实测逐帧相关系数 1.00000）。若要看「整团物质有多大」，"
+            "把「分析对象」切成「整体体系」——那个数是整组（含分子间间隔）的尺寸，"
+            "**不能**当作单链尺寸引用。")
+        if res.summary["单分子 Rg 标准差 (Å)"] > 0.3 * res.summary["单分子 Rg 平均 (Å)"]:
             res.add_notes(
                 "分子间 Rg 的相对离散度超过 30%，说明体系里各分子的链尺寸差别很大"
                 "（存在不同聚合度/构象亚群），只报一个平均值会掩盖这种多分散性。")
-    elif multi:
-        # 多分子组分但关掉了逐分子统计：如实说明这个数是"整团物质"的尺寸
-        res.summary["统计口径"] = f"整组（未逐分子拆分；该组分含 {n_mol} 个分子）"
+    elif want_mol:
+        res.summary["统计口径"] = "分子 / 链（该组即 1 个分子，逐分子 Rg = 该分子的 Rg）"
         res.add_notes(
-            f"已按 per_molecule=False 关闭逐分子统计：该组分含 **{n_mol} 个分子**，"
-            f"上面的 Rg 是**整团物质**（{ag.n_atoms:,} 个原子一起）的回转半径，"
-            f"不是单个分子有多大。需要单分子尺寸请打开「逐分子统计」。")
+            "该组分只含 1 个分子：「分子 / 链」与「整体体系」两种分析对象给出的是"
+            "同一个数（整组 Rg 就是该分子的回转半径），所以这里不分两套。")
+        if whole_as_one:
+            res.add_notes(
+                "拓扑里没有可用的分子划分（既没有 molnums、键图也只有 1 个连通碎片，"
+                "常见于 Materials Studio 导出的单个分子），因此按**一条链/一个分子**"
+                "处理：这里的 Rg 就是该对象的回转半径。")
+    elif multi:
+        # 整体体系模式 + 多分子组分：如实说明这个数是"整团物质"的尺寸
+        res.summary["统计口径"] = f"整体体系（整组 Rg；该组分含 {n_mol} 个分子）"
+        res.add_notes(
+            f"分析对象 = **整体体系**：该组分含 **{n_mol} 个分子**，这里的 Rg 是"
+            f"**整团物质**（{ag.n_atoms:,} 个原子一起）的回转半径 —— 溶液中它接近"
+            f"盒子尺度、随浓度变化，**不是单个分子有多大**。"
+            f"要看链尺寸请把「分析对象」切成「分子 / 链」，程序会逐分子算 Rg。")
     else:
-        res.summary["统计口径"] = "整组（该组即 1 个分子）"
-        if per_molecule:
-            res.add_notes("该组分只含 1 个分子，因此整组 Rg 就是该分子的回转半径。")
-        else:
-            res.add_notes("已按 per_molecule=False 关闭逐分子统计。")
+        res.summary["统计口径"] = "整体体系（该组即 1 个分子）"
+        res.add_notes(
+            "该组分只含 1 个分子：「整体体系」与「分子 / 链」两种分析对象给出的是"
+            "同一个数（整组 Rg 就是该分子的回转半径）。")
 
     res.add_notes(f"质量加权: {mass_weighted}；PBC 展开: {unwrap}")
 

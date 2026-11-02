@@ -81,9 +81,11 @@ from mdta.formats import (                                   # noqa: E402
     can_be_topology as _can_be_topology,
     can_be_trajectory as _can_be_trajectory,
     classify as _classify_suffix,
+    sniff_lammps_kind as _sniff_lammps_kind,
     suffix_of as _suffix_of,
     topology_help as _topology_help,
     trajectory_help as _trajectory_help,
+    unsupported_hint as _unsupported_hint,
 )
 
 TOPOLOGY_EXT = tuple(sorted(_TOP_SUFFIXES))
@@ -113,6 +115,38 @@ def file_roles(name: str) -> list[str]:
     if kind == "trajectory":
         return ["trajectory"]
     return ["topology"]
+
+
+def file_note(path: str) -> str | None:
+    """文件的**内容警示**（新字段，供文件列表提前提示，选中后才报错太晚）。
+
+    LAMMPS 项目里同一批后缀混着三种东西：`write_data` 的 data、`in.lammps`
+    输入脚本、`log.lammps` 日志。后缀分不出来，但内容能 —— 所以这里嗅一下，
+    让文件列表直接标出"这不是数据文件"（用户实测就是这么被绊住的）。
+    """
+    try:
+        kind = _sniff_lammps_kind(path)
+    except Exception:                                        # noqa: BLE001
+        kind = None
+    if kind == "input":
+        return "LAMMPS 输入脚本，不是数据文件（data 看 read_data 指到的那份）"
+    if kind == "log":
+        return "LAMMPS 日志/热力学输出，不含坐标"
+    if kind == "data":
+        return None                     # 正常 data 文件，别乱标
+    try:
+        hint = _unsupported_hint(path)
+        if hint:
+            return hint
+        # 后缀像 LAMMPS data、内容却不是 data（本工具自己的 `_msd_scratch/*.dat`
+        # 二进制缓存、或用户的一列数值结果表）—— 提前标出来，别等选中才报错
+        from mdta.formats import LAMMPS_TEXT_SUFFIXES
+
+        if _suffix_of(path) in LAMMPS_TEXT_SUFFIXES:
+            return "后缀像 LAMMPS data，但内容不是 data 文件（没有 atoms / atom types 表头）"
+    except Exception:                                        # noqa: BLE001
+        return None
+    return None
 
 
 def supported_formats() -> dict:
@@ -239,6 +273,18 @@ class Session:
         if getattr(mdt, "offsets_rebuilt", False):
             notes.append("偏移缓存与轨迹不符，已自动重建（轨迹可能在缓存建立后被"
                          "替换/重新转换过）")
+        # Materials Studio 文档（.car/.xsd/.xtd）：拓扑是自研解析的，把摘要说出来
+        # （帧数校验的说明由 mdta.io 写进 load_notes，下面统一 append）
+        mi = getattr(mdt, "ms_info", None) or {}
+        if mi:
+            nb = int(mi.get("n_bonds") or 0)
+            notes.append(
+                f"Materials Studio 文档（.{mi.get('format')}）："
+                f"{mi.get('n_atoms', 0):,} 原子 / "
+                + (f"{nb:,} 键" if nb else "文件里没有键表（已按坐标猜键）")
+                + (f"；剔除周期镜像 {mi['n_images_skipped']:,} 个"
+                   if mi.get("n_images_skipped") else ""))
+        notes.extend(str(x) for x in (getattr(mdt, "load_notes", None) or []))
         return notes
 
     def chains(self) -> list[dict]:
@@ -858,7 +904,9 @@ class SessionRegistry:
         # （它第一次访问 .universe），所以"读取"相关的阶段由 io 层上报、
         # "识别组分"必须在 auto_setup 之后才报，否则顺序会前后颠倒。
         _progress("打开体系")
-        az = Analyzer(topology, trajectory)
+        # `guess_bonds` 必须传给 Analyzer（它会**重新加载**拓扑）：否则校验用的
+        # load_trajectory 带了参数、真正分析的这一份却没带，等于开关失效。
+        az = Analyzer(topology, trajectory, guess_bonds=guess_bonds)
         az.auto_setup()
         _progress("识别组分与主链")
         # 体系信息在这里就算好（并缓存）：它的耗时全部来自"重复扫盘"，
@@ -942,6 +990,9 @@ def list_dir(path: str | None) -> dict:
                     # roles 是新增字段，列出"这个文件能放哪几个槽"
                     "kind": file_kind(name),
                     "roles": file_roles(name),
+                    # note 也是新增字段：内容是 LAMMPS 输入脚本/日志、
+                    # 或是本机读不了的格式时，提前在列表里标出来
+                    "note": file_note(full),
                 })
     except PermissionError as exc:
         raise SessionError(f"没有权限读取目录: {path}") from exc

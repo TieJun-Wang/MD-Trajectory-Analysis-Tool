@@ -16,6 +16,7 @@ MSD 在本项目中作为辅助分析，可用于比较原子运动、分子运�
 
 from __future__ import annotations
 
+import os
 from typing import Mapping
 
 import numpy as np
@@ -30,9 +31,246 @@ __all__ = ["compute_msd", "compute_msd_axes", "particle_series", "msd_fft",
 #: Å²/ps -> m²/s
 A2_PER_PS_TO_M2_PER_S = 1e-8
 
-#: 粒子坐标序列的内存上限（字节）。FFT 求 MSD 需要把整条序列放进内存，
-#: 粒子数超过预算时按等间隔抽稀（会在结果说明里写明抽稀比例）。
+#: 粒子坐标序列的内存上限（字节）。**不再用来抽稀粒子**（见下）：
+#: 超过它就切换到"分块 + 内存映射"模式，粒子一个不少，只是不再一次性驻留内存。
 DEFAULT_MEMORY_BUDGET = 1.2e9
+
+#: FFT 工作区预算（字节/批）。`rfft` 的中间量是 `n_fft × 批宽 × 16 B`（复数），
+#: 按它反推每批处理多少列，保证内存与"粒子数"无关。
+FFT_WORKSPACE_BUDGET = 2.0e8
+
+#: 序列落盘（内存映射）时用的目录
+SCRATCH_DIRNAME = "_msd_scratch"
+
+
+def _scratch_dir() -> str:
+    """放内存映射文件的目录（默认在本工具目录下，不可写则退到系统临时目录）。"""
+    import tempfile
+    from pathlib import Path
+
+    cand = Path(__file__).resolve().parent.parent.parent / SCRATCH_DIRNAME
+    for d in (cand, Path(tempfile.gettempdir()) / "mdta_msd"):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            probe = d / ".w"
+            probe.write_bytes(b"0")
+            probe.unlink()
+            return str(d)
+        except Exception:                                     # noqa: BLE001
+            continue
+    return tempfile.gettempdir()
+
+
+def msd_numerator_by_group(A, *, groups=None, batch: int | None = None,
+                           workers: int = 0, verbose: bool = False):
+    """MSD 的**分子**（``Σ_{t<N-τ}(A_{t+τ}-A_t)²``）按组求和，分块做 FFT。
+
+    为什么要"按组 + 分块"这两件事：
+
+    1. **按组**：总 MSD = MSD_x + MSD_y + MSD_z。老实现把三个分量各调一次
+       ``msd_fft``（还要再乘误差分块数），一次分析要跑 3×(1+块数) ≈ 18 遍 FFT。
+       这里把三个分量当成同一批**列**（`x` 的 P 列 + `y` 的 P 列 + `z` 的 P 列）
+       一次 FFT 算完，再按组求和 —— 结果逐位相同，FFT 次数降到 1/3。
+    2. **分块**：`rfft` 的中间量是 `n_fft × 列数 × 16 B`，P=50000、帧数 6001 时
+       单个分量就要十几 GB。按列切批后内存与粒子数无关，**因此不需要再抽稀粒子**：
+       每个原子/分子都能参与统计（这正是用户要的）。
+
+    参数
+    ----
+    A : ``(n_frames, n_columns)`` 数组或内存映射
+    groups : 长度 ``n_columns`` 的整数数组，列 → 组号；``None`` 表示全部一列一组
+    batch : 每批列数；``None`` 时按 ``FFT_WORKSPACE_BUDGET`` 自动定
+    workers : >1 时用多进程并行批（仅在 ``A`` 是磁盘映射时启用，避免拷贝数据）
+
+    返回 ``(num, counts)``：``num`` 形状 ``(n_frames, n_groups)``，
+    ``counts`` 形状 ``(n_groups,)``。第 g 组的 ``MSD(τ) = num[τ, g] / ((N-τ)·counts[g])``。
+    """
+    arr = A
+    n = int(arr.shape[0])
+    n_col = int(arr.shape[1])
+    if n < 2 or n_col < 1:
+        return np.zeros((max(n, 0), 1)), np.zeros(1, dtype=np.int64)
+    if groups is None:
+        groups = np.zeros(n_col, dtype=np.int64)
+    groups = np.asarray(groups, dtype=np.int64)
+    n_grp = int(groups.max()) + 1
+    counts = np.bincount(groups, minlength=n_grp).astype(np.int64)
+
+    n_fft = 1 << int(np.ceil(np.log2(2 * n)))
+    if not batch or batch <= 0:
+        batch = max(1, int(FFT_WORKSPACE_BUDGET / (n_fft * 16)))
+    batch = int(min(batch, n_col))
+    tau = np.arange(n)
+    num = np.zeros((n, n_grp), dtype=np.float64)
+
+    def _one(lo: int, hi: int):
+        """一批列的分子贡献（返回 ``(hi-lo, n_frames, n_groups)`` 的累加）。"""
+        blk = np.asarray(arr[:, lo:hi], dtype=np.float64)          # 逐批转 float64
+        F = np.fft.rfft(blk, n=n_fft, axis=0)
+        corr = np.fft.irfft(F * np.conjugate(F), n=n_fft, axis=0)[:n]
+        del F
+        cs = np.cumsum(blk * blk, axis=0)
+        tot = cs[-1]
+        p2 = cs[n - 1 - tau]
+        p1 = tot - np.concatenate([np.zeros((1, blk.shape[1])), cs[:-1]], axis=0)
+        del cs
+        nb = p1 + p2 - 2.0 * corr
+        del p1, p2, corr, blk
+        # 按列归属累加到组：列数很大时用 bincount 逐帧做，避免 (n, n_col, n_grp) 大数组
+        g = groups[lo:hi]
+        if n_grp == 1:
+            return nb.sum(axis=1)[:, None]
+        out = np.zeros((n, n_grp), dtype=np.float64)
+        for gi in range(n_grp):
+            m = (g == gi)
+            if m.any():
+                out[:, gi] = nb[:, m].sum(axis=1)
+        return out
+
+    use_mp = int(workers or 0) > 1 and isinstance(arr, np.memmap)
+    if use_mp:
+        # 多进程：只在"序列已落盘（内存映射）"时启用，避免把大数组 pickle 出去。
+        # 受限环境（沙箱禁命名管道等）里进程池可能建不起来 —— 这时**退回串行**，
+        # 只记一条说明，绝不能因为这个让整项分析失败。
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+
+            spans = [(lo, min(lo + batch, n_col)) for lo in range(0, n_col, batch)]
+            with ProcessPoolExecutor(max_workers=int(workers)) as ex:
+                for out in ex.map(_batch_worker,
+                                  [(str(arr.filename), arr.shape, arr.dtype.str,
+                                    lo, hi, groups[lo:hi], n, n_fft, n_grp)
+                                   for lo, hi in spans]):
+                    num += out
+            return num, counts
+        except Exception as exc:                              # noqa: BLE001
+            if verbose:
+                print(f"  [MSD] 多进程不可用（{type(exc).__name__}: {exc}），退回串行")
+    for lo in range(0, n_col, batch):
+        hi = min(lo + batch, n_col)
+        num += _one(lo, hi)
+        if verbose:
+            print(f"  [MSD] 列 {hi:,}/{n_col:,}")
+    return num, counts
+
+
+def msd_numerator_by_group_segmented(A, *, groups=None, max_lag: int,
+                                     block_frames: int | None = None,
+                                     overlap: float = 0.5,
+                                     batch: int | None = None, verbose: bool = False):
+    """**分段（滚动窗口）**版 MSD 分子：内存恒定、长轨迹可跑。
+
+    为什么需要它：完整版要在一次 FFT 里覆盖整条时间轴，长度取到
+    ``n_fft = 2^ceil(log2 2N)``。N=6001 时 n_fft=16384，50 000 个粒子实测
+    **150 s**（还得先把 3.6 GB 序列准备好）。而扩散系数的拟合窗口通常只用到
+    τ ≤ 20–50% 的最大 τ，也就是说**长 τ 的样本根本用不上**。
+
+    做法：把时间轴切成 ``block_frames`` 长的块（默认 ``2·max_lag+1``，相邻块
+    50% 重叠），每块只算 τ ≤ max_lag，再按"每个 τ 上实际用到的起点数"加权合并：
+
+        num[τ] = Σ_块 Σ_{t<L−τ} |r_{t+τ}−r_t|²，   origins[τ] = Σ_块 (L−τ)
+        MSD(τ) = num[τ] / (origins[τ] · n_particles)
+
+    好处：序列不必整体驻留内存（配合内存映射就是**常数内存**，任意长轨迹都能跑），
+    且每个 τ 的起点数由块内统计给出、不需要跨块配对。
+
+    ⚠️ **它不是"计算量上的加速"**：50% 重叠时总 FFT 工作量约为
+    ``2n·log L``，完整版是 ``n·log(2n)``，两者同量级（有时分段还更慢 ——
+    实测 47 453 原子 × 1001 帧：完整 47.9 s、分段 τ≤200 57.4 s）。
+    它的价值在于**内存与流式**：帧数上万时完整版 n_fft 会涨到 32768 且要 5.7 GB 序列，
+    分段版固定为块长的 FFT 且只驻留一块。要真正省时间，应该减少**帧数**
+    （时间分辨率）而不是开分段。
+
+    代价：τ 越接近块长，起点数越少、噪声越大 —— 所以默认块长取 ``2·max_lag+1``，
+    保证每个 τ 至少有约一半的起点。
+
+    返回 ``(num, origins, counts)``，形状 ``(n_lag, n_groups)`` / ``(n_lag,)``。
+    """
+    arr = A
+    n = int(arr.shape[0])
+    n_col = int(arr.shape[1])
+    if max_lag is None or max_lag <= 0:
+        raise ValueError("分段模式必须给正的最大 τ")
+    max_lag = int(min(max_lag, n - 1))
+    if groups is None:
+        groups = np.zeros(n_col, dtype=np.int64)
+    groups = np.asarray(groups, dtype=np.int64)
+    n_grp = int(groups.max()) + 1
+    counts = np.bincount(groups, minlength=n_grp).astype(np.int64)
+
+    L = int(block_frames or (2 * max_lag + 1))
+    L = max(L, max_lag + 1)
+    L = min(L, n)
+    ov = float(overlap if overlap is not None else 0.5)
+    ov = min(max(ov, 0.0), 0.95)
+    step = max(1, int(round(L * (1.0 - ov))))     # 默认 50% 重叠
+    n_fft = 1 << int(np.ceil(np.log2(2 * L)))
+    if not batch or batch <= 0:
+        batch = max(1, int(FFT_WORKSPACE_BUDGET / (n_fft * 16)))
+    batch = int(min(batch, n_col))
+
+    n_lag = max_lag + 1
+    num = np.zeros((n_lag, n_grp), dtype=np.float64)
+    origins = np.zeros(n_lag, dtype=np.float64)
+
+    for lo in range(0, n - max_lag, step):
+        hi = min(lo + L, n)
+        blk_frames = hi - lo
+        if blk_frames <= max_lag:
+            continue
+        # 该块在每个 τ 上贡献的起点数：min(L_b − τ, n_lag)，只累加到 τ ≤ max_lag
+        k_ = min(blk_frames, n_lag)
+        origins[:k_] += (blk_frames - np.arange(k_))
+        for c0 in range(0, n_col, batch):
+            c1 = min(c0 + batch, n_col)
+            sub = np.asarray(arr[lo:hi, c0:c1], dtype=np.float64)
+            F = np.fft.rfft(sub, n=n_fft, axis=0)
+            corr = np.fft.irfft(F * np.conjugate(F), n=n_fft, axis=0)[:blk_frames]
+            del F
+            cs = np.cumsum(sub * sub, axis=0)
+            tot = cs[-1]
+            tt = np.arange(blk_frames)
+            p2 = cs[blk_frames - 1 - tt]
+            p1 = tot - np.concatenate([np.zeros((1, sub.shape[1])), cs[:-1]], axis=0)
+            nb = p1 + p2 - 2.0 * corr
+            del cs, p1, p2, corr, sub
+            nb = nb[:n_lag]                       # 只留 τ ≤ max_lag 的部分
+            g = groups[c0:c1]
+            if n_grp == 1:
+                num[:, 0] += nb.sum(axis=1)
+            else:
+                for gi in range(n_grp):
+                    m = (g == gi)
+                    if m.any():
+                        num[:, gi] += nb[:, m].sum(axis=1)
+        if verbose:
+            print(f"  [MSD] 分段块 {lo}–{hi}/{n}")
+    return num, origins, counts
+
+
+def _batch_worker(args):
+    """多进程 worker：按文件名重新打开内存映射，只算自己那一段列。"""
+    fname, shape, dtype, lo, hi, g, n, n_fft, n_grp = args
+    arr = np.memmap(fname, dtype=np.dtype(dtype), mode="r", shape=tuple(shape))
+    g = np.asarray(g, dtype=np.int64)
+    tau = np.arange(n)
+    blk = np.asarray(arr[:, lo:hi], dtype=np.float64)
+    F = np.fft.rfft(blk, n=n_fft, axis=0)
+    corr = np.fft.irfft(F * np.conjugate(F), n=n_fft, axis=0)[:n]
+    del F
+    cs = np.cumsum(blk * blk, axis=0)
+    tot = cs[-1]
+    p2 = cs[n - 1 - tau]
+    p1 = tot - np.concatenate([np.zeros((1, blk.shape[1])), cs[:-1]], axis=0)
+    nb = p1 + p2 - 2.0 * corr
+    del cs, p1, p2, corr, blk
+    out = np.zeros((n, n_grp), dtype=np.float64)
+    for gi in range(n_grp):
+        m = (g == gi)
+        if m.any():
+            out[:, gi] = nb[:, m].sum(axis=1)
+    return out
+
 
 
 def _molecule_ids(ag) -> np.ndarray | None:
@@ -94,7 +332,10 @@ def _frame_com(ag, mol, n_mol, box, weights) -> np.ndarray:
 
 def particle_series(mdt, ag, frame_indices, *, object="molecule",
                     max_particles: int | None = None,
-                    memory_budget: float = DEFAULT_MEMORY_BUDGET,
+                    memory_budget: float | None = DEFAULT_MEMORY_BUDGET,
+                    dtype=None, stream: bool | None = None,
+                    scratch_dir: str | None = None,
+                    workers: int = 0,
                     verbose: bool = False):
     """把原子组变成逐帧的"被追踪粒子"坐标序列 ``(n_frames, n_particles, 3)``。
 
@@ -110,10 +351,14 @@ def particle_series(mdt, ag, frame_indices, *, object="molecule",
     use_com = obj.startswith("mol") or obj in ("com", "分子", "分子质心")
     notes: list[str] = []
 
-    # 内存预算：FFT 需要整条序列驻留内存，据此反推粒子数上限
-    if memory_budget and n_frame > 0:
-        cap = max(1, int(memory_budget / (n_frame * 3 * 8)))
-        max_particles = cap if not max_particles else min(int(max_particles), cap)
+    # ⚠️ 这里**不再**用内存预算反推"粒子数上限"。老实现按
+    # `budget / (帧×3×8)` 抽稀粒子，两个问题：
+    #   1. 用户要的是"每个原子都参与"，抽稀直接违背需求；
+    #   2. 抽稀是**原子级等间隔**取（`ag[::step]`），会把分子切碎 —— PEG
+    #      200×30 原子按 1/3 抽稀后每条链只剩 10 个原子，"分子质心"成了残缺
+    #      分子的质心，位移里混进内部振动，D 直接失真。
+    # 现在只有**显式** max_particles 才会抽稀（且按分子整取），超大序列改用
+    # 磁盘内存映射（下面 stream 分支），内存与粒子数无关。
 
     mol = _molecule_ids(ag) if use_com else None
     if use_com and mol is None:
@@ -128,8 +373,9 @@ def particle_series(mdt, ag, frame_indices, *, object="molecule",
         if max_particles and n_part_all > max_particles:
             step = int(np.ceil(n_part_all / float(max_particles)))
             keep = uniq[::step]
-            notes.append(f"分子数 {n_part_all:,} 超过上限 {int(max_particles):,}，"
-                         f"每 {step} 个分子取 1 个，抽稀到 {keep.size:,} 个。")
+            notes.append(f"分子数 {n_part_all:,} 超过**显式**上限 {int(max_particles):,}，"
+                         f"每 {step} 个分子取 1 个，抽稀到 {keep.size:,} 个"
+                         f"（按分子整取，不会切碎分子）。")
         mask = np.isin(mol, keep)
         ag_use = ag[mask]
         _, inv = np.unique(mol[mask], return_inverse=True)
@@ -149,7 +395,7 @@ def particle_series(mdt, ag, frame_indices, *, object="molecule",
         if max_particles and n_part_all > max_particles:
             step = int(np.ceil(n_part_all / float(max_particles)))
             ag_use = ag[::step]
-            notes.append(f"原子数 {n_part_all:,} 超过上限 {int(max_particles):,}，"
+            notes.append(f"原子数 {n_part_all:,} 超过**显式**上限 {int(max_particles):,}，"
                          f"每 {step} 个取 1 个，抽稀到 {ag_use.n_atoms:,} 个。")
         else:
             ag_use = ag
@@ -157,7 +403,31 @@ def particle_series(mdt, ag, frame_indices, *, object="molecule",
         n_part = int(ag_use.n_atoms)
         weights = None
 
-    series = np.empty((n_frame, n_part, 3), dtype=float)
+    if n_part == 0:
+        raise ValueError("没有可追踪的粒子。")
+
+    # 序列存储：默认 float32（省一半内存与 IO；FFT 前逐批转 float64 累积，
+    # 精度由 selftest 与 float64 对照钉住）。超过预算就落盘做内存映射。
+    dt = np.dtype(dtype) if dtype is not None else np.dtype(np.float32)
+    nbytes = int(n_frame) * n_part * 3 * dt.itemsize
+    use_stream = (bool(stream) if stream is not None
+                  else bool(memory_budget and nbytes > float(memory_budget)))
+    path = None
+    if use_stream:
+        import uuid
+
+        d = scratch_dir or _scratch_dir()
+        path = os.path.join(d, f"msd_{uuid.uuid4().hex[:8]}.dat")
+        series = np.memmap(path, dtype=dt, mode="w+", shape=(n_frame, n_part, 3))
+        mode = "memmap"
+        notes.append(
+            f"全粒子序列 {nbytes / 1e9:.2f} GB 超过内存预算 "
+            f"{float(memory_budget or 0) / 1e9:.2f} GB，改用**磁盘内存映射**"
+            f"（{os.path.basename(path)}）：粒子一个没少，只是不再一次性驻留内存。")
+    else:
+        series = np.empty((n_frame, n_part, 3), dtype=dt)
+        mode = "ram"
+
     boxes: list = []
     for k, i in enumerate(idx):
         u.trajectory[int(i)]
@@ -168,32 +438,52 @@ def particle_series(mdt, ag, frame_indices, *, object="molecule",
         else:
             series[k] = np.asarray(ag_use.positions, dtype=float)
 
+    if hasattr(series, "flush"):
+        series.flush()
+
     meta = {"object": "molecule" if use_com else "atom",
             "n_particles": n_part, "n_particles_total": n_part_all,
-            "n_frames": n_frame, "notes": notes}
+            "n_frames": n_frame, "notes": notes, "mode": mode,
+            "series_bytes": int(nbytes), "path": path, "dtype": dt.name,
+            "subsampled": bool(max_particles and n_part_all > max_particles)}
     if verbose:
-        print(f"  [MSD] 追踪对象={meta['object']}，粒子 {n_part:,}，帧 {n_frame:,}")
+        print(f"  [MSD] 追踪对象={meta['object']}，粒子 {n_part:,}"
+              f"（总 {n_part_all:,}），帧 {n_frame:,}，存储 {mode}")
     return series, boxes, meta
 
 
-def _unwrap_series(series: np.ndarray, boxes, *, verbose: bool = False):
+def _unwrap_series(series, boxes, *, verbose: bool = False, inplace: bool = False):
     """跨帧追踪粒子：对相邻帧做**最小镜像位移**累加，返回连续轨迹与诊断。
 
     比 ``NoJump`` 更可控的地方是它会统计"位移超过最小盒高度一半"的粒子比例，
     该比例即最小镜像近似可能失效的比例——这种误差是**随机**的，会让 MSD 曲线
     依然平滑线性（R² 甚至接近 1）却整体失真，所以必须显式报出来。
+
+    ``inplace=True``（磁盘内存映射时用）：直接改写 ``series``，不再分配第二份
+    同样大小的数组 —— 否则"落盘省内存"就白省了。注意 ``series`` 必须是可写的
+    ``np.memmap``（或普通 ndarray 且调用方愿意被改写）。
     """
     from MDAnalysis.lib.distances import minimize_vectors
 
     n = int(series.shape[0])
-    out = np.empty_like(series)
+    out = series if inplace else np.empty_like(series)
     if n == 0:
         return out, {"最小镜像近似失效粒子数": 0, "检查的粒子-帧数": 0, "失效比例": 0.0}
+    # ⚠️ inplace 时 `out is series`：`out[k-1]` 一旦被写成**展开后**的坐标，
+    #    就再也不能拿它当"上一帧原始坐标"用了 —— 否则位移算成
+    #    `raw[k] − unwrapped[k−1]`，误差会随帧数累积（实测 10 帧就差 0.43 Å，
+    #    MSD 偏 2.5 Å²）。所以这里把**上一帧的原始坐标**单独存一份，
+    #    并且**位移与累加都在 float64 里做**（只在写回 float32 内存映射时舍入一次），
+    #    这样内存映射版与内存版的差别只剩 float32 存储精度（实测 ~1e-7 Å²）。
+    prev_raw = np.array(series[0], dtype=np.float64)
     out[0] = series[0]
     n_big = 0
     n_tot = 0
     for k in range(1, n):
-        d = series[k] - series[k - 1]
+        # 必须**拷贝**（np.array 默认 copy）：dtype 相同时 asarray 会返回视图，
+        # 而 `out[k] = ...` 马上就会覆盖 memmap 的同一块内存 → 视图变脏
+        raw = np.array(series[k], dtype=np.float64)
+        d = raw - prev_raw
         box = boxes[k] if k < len(boxes) else None
         if box is not None and bool(np.all(np.asarray(box[:3], dtype=float) > 0)):
             d = minimize_vectors(d, np.asarray(box, dtype=np.float32))
@@ -202,6 +492,11 @@ def _unwrap_series(series: np.ndarray, boxes, *, verbose: bool = False):
             n_big += int(np.sum(mag > 0.5 * h))
             n_tot += mag.size
         out[k] = out[k - 1] + d
+        prev_raw = raw
+        if inplace and hasattr(out, "flush") and (k % 200 == 0):
+            out.flush()
+    if hasattr(out, "flush"):
+        out.flush()
     diag = {
         "最小镜像近似失效粒子数": int(n_big),
         "检查的粒子-帧数": int(n_tot),
@@ -214,7 +509,8 @@ def msd_fft(series: np.ndarray) -> np.ndarray:
     """``(n_frames, n_particles)`` → MSD(τ)，对全部时间起点与全部粒子求平均。
 
     用快速相关算法（FFT）算，复杂度 ``O(N log N)``，**保留完整时间分辨率**
-    （不做分块、不牺牲长 τ）。
+    （不做分块、不牺牲长 τ）。内部走 :func:`msd_numerator_by_group`
+    （分块 + 按组求和），因此粒子数很大时会自动分批，不会一次吃掉十几 GB。
 
     为什么不用 ``tidynamics.msd``：它把输入的第二轴当作**空间分量**求和
     （源码里逐列 ``autocorrelation_1d`` 后相加，``rsq = Σ_d pos²``），因此只
@@ -228,24 +524,18 @@ def msd_fft(series: np.ndarray) -> np.ndarray:
     .. math:: \\mathrm{MSD}(\\tau) = \\frac{1}{N-\\tau}\\sum_{t=0}^{N-\\tau-1}
               |\\mathbf r_{t+\\tau}-\\mathbf r_t|^2
     """
-    A = np.ascontiguousarray(series, dtype=float)
+    A = np.asarray(series)
     if A.ndim == 1:
         A = A[:, None]
+    if A.ndim != 2:
+        raise ValueError(f"msd_fft 需要 1D/2D 输入，得到 shape={A.shape}")
     n = int(A.shape[0])
     if n < 2:
         return np.zeros(n, dtype=float)
-    n_fft = 1 << int(np.ceil(np.log2(2 * n)))
-    F = np.fft.rfft(A, n=n_fft, axis=0)
-    corr = np.fft.irfft(F * np.conjugate(F), n=n_fft, axis=0)[:n]   # Σ_t A_t A_{t+τ}
-    sq = A * A
-    cs = np.cumsum(sq, axis=0)
-    tot = cs[-1]
+    num, counts = msd_numerator_by_group(A)
     tau = np.arange(n)
-    p2 = cs[n - 1 - tau]                                            # Σ_{t≤N-τ-1} A_t²
-    p1 = tot - np.concatenate([np.zeros((1, A.shape[1])), cs[:-1]], axis=0)
-    num = p1 + p2 - 2.0 * corr
-    den = (n - tau).astype(float) * float(A.shape[1])
-    return num.sum(axis=1) / den
+    den = (n - tau).astype(float) * float(counts[0] if counts.size else 1)
+    return num[:, 0] / den
 
 
 def unwrap_over_frames(mdt, ag, frame_indices, *, verbose: bool = False):
@@ -274,6 +564,10 @@ def _box_heights_from_dims(dims) -> np.ndarray:
 def compute_msd_axes(mdt, ag, selection: FrameSelection, *, object: str = "molecule",
                      remove_drift: bool = True, max_particles: int | None = None,
                      max_lag: int | None = None, n_error_blocks: int = 5,
+                     memory_budget: float | None = DEFAULT_MEMORY_BUDGET,
+                     stream: bool | None = None, dtype=None, workers: int = 0,
+                     max_lag_frames: int | None = None,
+                     block_frames: int | None = None,
                      verbose: bool = False):
     """逐轴 MSD：返回 ``(lag_t, msd_dict, diag)``。
 
@@ -283,6 +577,12 @@ def compute_msd_axes(mdt, ag, selection: FrameSelection, *, object: str = "molec
     为什么要把各轴分开：只有分子在某个方向上**取向有序**（界面吸附、拉伸、
     受限孔道）时，MSD 才会各向异性；``D∥/D⊥`` 是这类体系最直接的可观测量，
     而单一的 MSD 总值会把它平均掉。
+
+    ``max_particles``：默认 ``None`` = **全部粒子参与**（1.0.2 起不再按内存
+    预算自动抽稀）。真需要限制规模时显式给数，分子对象会**按分子整取**。
+    ``memory_budget`` / ``stream``：序列超过预算时自动落到磁盘内存映射
+    （粒子一个不少）；``dtype`` 默认 float32 存储、FFT 前逐批转 float64。
+    ``workers``：>1 时用多进程并行 FFT 分块（仅内存映射模式生效）。
 
     ``remove_drift``：减去全部粒子的平均位移轨迹（消除整体漂移，例如 NPT
     下整盒的缓慢平移）。粒子数 < 4 时不做（少数粒子时"平均位移"本身就是
@@ -294,20 +594,83 @@ def compute_msd_axes(mdt, ag, selection: FrameSelection, *, object: str = "molec
 
     series, boxes, meta = particle_series(mdt, ag, idx, object=object,
                                           max_particles=max_particles,
-                                          verbose=verbose)
-    unwrapped, diag = _unwrap_series(series, boxes, verbose=verbose)
+                                          memory_budget=memory_budget,
+                                          stream=stream, dtype=dtype,
+                                          workers=workers, verbose=verbose)
+    on_disk = isinstance(series, np.memmap)
+    unwrapped, diag = _unwrap_series(series, boxes, verbose=verbose, inplace=on_disk)
     drift_removed = False
     if remove_drift and unwrapped.shape[1] >= 4:
-        unwrapped = unwrapped - unwrapped.mean(axis=1, keepdims=True)
+        if on_disk:
+            # 逐帧减均值：内存映射上不能一次性做 (F,P,3) 的临时副本
+            for k in range(unwrapped.shape[0]):
+                unwrapped[k] -= unwrapped[k].mean(axis=0, keepdims=True)
+            unwrapped.flush()
+        else:
+            unwrapped = unwrapped - unwrapped.mean(axis=1, keepdims=True)
         drift_removed = True
 
-    msd = {k: msd_fft(unwrapped[:, :, i]) for i, k in enumerate(("x", "y", "z"))}
-    msd["total"] = msd["x"] + msd["y"] + msd["z"]
-    msd["para"] = msd["x"] + msd["y"]
-    msd["perp"] = msd["z"]
+    # 一次 FFT 算完 x/y/z 三个分量：把三组列拼在一起（列 → 组号 0/1/2），
+    # 再按组求和。老实现三个分量各跑一次 msd_fft（还有误差分块），
+    # 一次分析要 3×(1+块数) 遍 FFT；这里降到 1/3，结果逐位相同。
+    n_p = int(unwrapped.shape[1])
+    # ⚠️ 列的顺序必须与 `reshape` 出来的实际布局一致：`(F, P, 3)` 是 **C 序**，
+    # 展平成 `(F, 3P)` 后是**逐粒子**排的 `[p1x,p1y,p1z, p2x,p2y,p2z, …]`，
+    # 所以列 c 属于分量 `c % 3`（用 `tile`），**不是** `[x…, y…, z…]` 那种分量排布
+    # （那种要用 `repeat`）。写错的话总 MSD 还是对的（三项都加起来除以粒子数），
+    # 但 para/perp 会互相串味 —— 实测各向异性 D∥/D⊥ 从 4.0 变成 1.04，
+    # 正是 `test/selftest.py::test_msd_anisotropy_reports_in_plane_vs_normal` 抓到的。
+    col_groups = np.tile(np.arange(3, dtype=np.int64), n_p)
+    A = unwrapped.reshape(unwrapped.shape[0], n_p * 3)
+    assert col_groups.size == A.shape[1]
+    n_lag_max = A.shape[0] if max_lag_frames is None else int(max_lag_frames) + 1
+    n_lag_max = max(2, min(int(n_lag_max), A.shape[0]))
+    segmented = bool(max_lag_frames is not None) and n_lag_max < A.shape[0]
+    if segmented:
+        # 分段（滚动窗口）：内存恒定、长轨迹可跑，见函数文档
+        num, origins, counts = msd_numerator_by_group_segmented(
+            A, groups=col_groups, max_lag=n_lag_max - 1,
+            block_frames=block_frames, verbose=verbose)
+        tau = np.arange(n_lag_max)
+        den = np.maximum(origins, 1.0)
+
+        def _msd_of(cols) -> np.ndarray:
+            s = np.zeros(n_lag_max, dtype=np.float64)
+            for c in cols:
+                s += num[:, c]
+            return s / (den * max(n_p, 1))
+        algorithm = (f"FFT 分段快速相关（块 {int(block_frames or 2 * (n_lag_max - 1) + 1)} 帧、"
+                     f"50% 重叠，τ ≤ {n_lag_max - 1} 帧）")
+    else:
+        num, counts = msd_numerator_by_group(A, groups=col_groups, workers=workers)
+        tau = np.arange(A.shape[0])
+        den = (A.shape[0] - tau).astype(float)
+
+        def _msd_of(cols) -> np.ndarray:
+            """分量组求和后除以**粒子数**（不是列数）。
+
+            ⚠️ 必须除以 ``n_p`` 而不是 ``3·n_p``：总 MSD 的定义是
+            ``(1/n_p)Σ_p[(Δx²+Δy²+Δz²)]``，即"逐粒子三分量之和再对粒子平均"，
+            而不是"三个分量各自平均后相加再除 3"。分母用错会让 MSD 与 D **小 3 倍**
+            —— 这个坑我在改"分量合并"时真踩过（三条轴分开算是对的，合并后分母
+            写成列数就错了），所以这里单独写明，并靠 selftest 与暴力法对照钉住。
+            """
+            s = np.zeros(A.shape[0], dtype=np.float64)
+            for c in cols:
+                s += num[:, c]
+            return s / (den * max(n_p, 1))
+        algorithm = "FFT 快速相关（分量合并 + 分列分块）"
+
+    msd = {"x": _msd_of([0]), "y": _msd_of([1]), "z": _msd_of([2])}
+    msd["total"] = _msd_of([0, 1, 2])
+    msd["para"] = _msd_of([0, 1])
+    msd["perp"] = _msd_of([2])
 
     times = np.asarray(selection.times_ps, dtype=float)
     n_lag = times.size if max_lag is None else min(times.size, int(max_lag) + 1)
+    # 分段模式只算到 max_lag_frames：时间轴必须跟着截断，否则 lag_t 比 MSD 长，
+    # 后面拟合时两个数组广播不上（实测 ValueError: shapes (6001,) (301,)）。
+    n_lag = min(n_lag, int(np.asarray(msd["total"]).size))
     lag_t = times[:n_lag] - times[0]
     for k in list(msd):
         msd[k] = np.asarray(msd[k][:n_lag], dtype=float)
@@ -323,29 +686,54 @@ def compute_msd_axes(mdt, ag, selection: FrameSelection, *, object: str = "molec
             lo_b, hi_b = int(edges[b]), int(edges[b + 1])
             if hi_b - lo_b < 4:
                 continue
-            sub = unwrapped[lo_b:hi_b]
-            mb = {k: msd_fft(sub[:, :, i]) for i, k in enumerate(("x", "y", "z"))}
-            mb["total"] = mb["x"] + mb["y"] + mb["z"]
-            mb["para"] = mb["x"] + mb["y"]
-            mb["perp"] = mb["z"]
-            n_b = int(mb["total"].size)
+            sub = np.asarray(unwrapped[lo_b:hi_b], dtype=np.float64)
+            Ab = sub.reshape(sub.shape[0], n_p * 3)
+            nb, cb = msd_numerator_by_group(Ab, groups=col_groups, workers=workers)
+            db = (Ab.shape[0] - np.arange(Ab.shape[0])).astype(float)
+
+            def _blk(cols) -> np.ndarray:
+                s = np.zeros(Ab.shape[0], dtype=np.float64)
+                for c in cols:
+                    s += nb[:, c]
+                return s / (db * max(n_p, 1))   # 同样除以粒子数（见上面 _msd_of）
+
+            mb = {"total": _blk([0, 1, 2]), "para": _blk([0, 1]), "perp": _blk([2])}
+            # 分段模式下主曲线只到 n_lag：块的曲线也要截到同一长度，
+            # 否则拟合时 lag_t(301) 与块曲线(1200)广播不上
+            n_b = min(int(mb["total"].size), int(lag_t.size))
             bt = lag_t[:n_b]
             for k in block_curves:
                 block_curves[k].append((bt, np.asarray(mb[k][:n_b], dtype=float)))
+
 
     diag = dict(diag)
     diag["误差分块_curves"] = block_curves
     diag["误差分块数"] = len(block_curves.get("total", []))
     diag.update({"对象": meta["object"], "粒子数": int(meta["n_particles"]),
                  "粒子数_总": int(meta["n_particles_total"]),
-                 "去漂移": bool(drift_removed), "算法": "FFT 快速相关",
+                 "已抽稀": bool(meta.get("subsampled")),
+                 "存储": (f"{'磁盘内存映射' if meta.get('mode') == 'memmap' else '内存'}"
+                          f"（{meta.get('dtype', '?')}，"
+                          f"{float(meta.get('series_bytes', 0)) / 1e9:.2f} GB）"),
+                 "去漂移": bool(drift_removed), "算法": "FFT 快速相关（分量合并 + 分块）",
                  "说明": list(meta["notes"])})
+    # 清理落盘的序列（分析结束就不需要了）
+    if on_disk and meta.get("path"):
+        try:
+            unwrapped.flush()
+            del unwrapped, series
+            os.remove(meta["path"])
+        except Exception:                                     # noqa: BLE001
+            pass
     return lag_t, msd, diag
 
 
 def compute_msd(mdt, ag, selection: FrameSelection, *, max_lag: int | None = None,
                 object: str = "atom", remove_drift: bool = False,
-                max_particles: int | None = None, verbose: bool = False):
+                max_particles: int | None = None,
+                memory_budget: float | None = DEFAULT_MEMORY_BUDGET,
+                stream: bool | None = None, dtype=None, workers: int = 0,
+                verbose: bool = False):
     """计算原子组的总 MSD，返回 ``(lag_times_ps, msd_Å², diagnostics)``。
 
     默认仍按**原子**追踪（保持既有调用方的语义）；``analyze_msd`` 默认按
@@ -354,7 +742,10 @@ def compute_msd(mdt, ag, selection: FrameSelection, *, max_lag: int | None = Non
     lag_t, msd, diag = compute_msd_axes(mdt, ag, selection, object=object,
                                         remove_drift=remove_drift,
                                         max_particles=max_particles,
-                                        max_lag=max_lag, verbose=verbose)
+                                        max_lag=max_lag,
+                                        memory_budget=memory_budget,
+                                        stream=stream, dtype=dtype,
+                                        workers=workers, verbose=verbose)
     return lag_t, msd["total"], diag
 
 
@@ -497,6 +888,10 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 max_particles: int | None = None,
                 fit_method: str = "gls",
                 n_error_blocks: int = 5,
+                memory_budget: float | None = DEFAULT_MEMORY_BUDGET,
+                stream: bool | None = None, dtype=None, workers: int = 0,
+                max_lag_frames: int | None = None,
+                block_frames: int | None = None,
                 verbose: bool = False) -> AnalysisResult:
     """均方位移 MSD（默认追踪对象：**分子质心**）。
 
@@ -509,6 +904,18 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         得到的是"分子的平动扩散"（质量加权，跨周期边界先聚拢再求质心）；
         ``"atom"`` → 每个原子各算一个粒子，MSD 里会混进分子内部振动/转动。
         组分没有分子信息时自动退化为原子并注明。
+    max_particles
+        ``None``（默认）= **全部粒子参与**。1.0.2 起不再按内存预算自动抽稀；
+        序列过大时改用磁盘内存映射（见 ``memory_budget`` / ``stream``）。
+    max_lag_frames
+        ``None``（默认）= 完整时间分辨率（一次 FFT 覆盖整条时间轴）。
+        给正整数则切到**分段（滚动窗口）**模式：单次 FFT 只覆盖
+        ``block_frames``（默认 ``2·max_lag_frames+1``）帧、相邻块 50% 重叠。
+        **它的作用是省内存/支持流式**（常数内存，长轨迹也能跑），不是加速 ——
+        实测 1001 帧时反而略慢（47.9 s → 57.4 s）。要省时间请减少帧数。
+        代价是 τ 越接近块长样本越少，拟合窗口应落在 τ ≤ max_lag_frames 之内。
+    block_frames
+        分段模式下的块长（帧）；``None`` 时取 ``2·max_lag_frames+1``。
     remove_drift
         是否减去全体粒子的平均位移轨迹（消除整体漂移）。粒子数 < 4 时不做。
     fit_fraction
@@ -542,6 +949,11 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                                             remove_drift=remove_drift,
                                             max_particles=max_particles,
                                             n_error_blocks=n_error_blocks,
+                                            memory_budget=memory_budget,
+                                            stream=stream, dtype=dtype,
+                                            workers=workers,
+                                            max_lag_frames=max_lag_frames,
+                                            block_frames=block_frames,
                                             verbose=verbose)
         bl = diag.get("误差分块_curves") or {}
         if diag.get("粒子数", 0) < 2:
@@ -594,6 +1006,10 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         res.summary[f"{name} 原子数"] = int(ag.n_atoms)
         res.summary[f"{name} 追踪对象"] = obj_label
         res.summary[f"{name} 追踪粒子数"] = int(diag.get("粒子数", 0))
+        res.summary[f"{name} 追踪粒子数（总）"] = int(diag.get("粒子数_总",
+                                                              diag.get("粒子数", 0)))
+        res.summary[f"{name} 是否抽稀过粒子"] = "是" if diag.get("已抽稀") else "否（全部参与）"
+        res.summary[f"{name} 序列存储"] = str(diag.get("存储") or "")
         res.summary[f"{name} 去漂移"] = "是" if diag.get("去漂移") else "否"
         res.summary[f"{name} 算法"] = str(diag.get("算法", ""))
         res.summary[f"{name} MSD(最大 τ) (Å²)"] = float(y_tot[-1]) if y_tot.size else float("nan")

@@ -60,7 +60,8 @@ set_agg_backend()
 
 # ---------------------------------------------------------------- 公共参数
 def add_io_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("-t", "--top", dest="topology", help="拓扑文件（.tpr/.gro/.pdb ...）")
+    p.add_argument("-t", "--top", dest="topology",
+                   help="拓扑文件（.pdb/.gro/.tpr/.psf/.prmtop/.xyz…，见 mdta.formats）")
     p.add_argument("-x", "--traj", dest="trajectory", help="轨迹文件（.xtc/.trr/.dcd ...）")
     p.add_argument("--no-autodetect", action="store_true",
                    help="不自动寻找同名轨迹文件")
@@ -97,6 +98,12 @@ def add_selection_args(p: argparse.ArgumentParser) -> None:
                    help="结构有序度里「完全有序态」的 RDF 堆积峰高度；"
                         "不给则该分量不参与综合指数（先跑一次，"
                         "从 RDF 堆积峰高度 那一项读出数值后再传入）")
+    g.add_argument("--rg-object", default="molecule", dest="rg_object",
+                   choices=("molecule", "system"),
+                   help="Rg 的「分析对象」（**互斥**，只算选中的那种）："
+                        "molecule=分子/链（逐分子算 Rg 再平均，默认；"
+                        "与 Materials Studio Forcite 同口径）；"
+                        "system=整体体系（整组一个 Rg，多分子时是「整团物质」的尺寸）")
 
 
 def add_output_args(p: argparse.ArgumentParser) -> None:
@@ -153,6 +160,8 @@ def setup_selection(az: Analyzer, args, *, verbose: bool = True) -> None:
 
 def collect_params(args) -> dict:
     return {
+        # Rg 的「分析对象」两档互斥：molecule=分子/链（默认）、system=整体体系
+        "rg": {"object": getattr(args, "rg_object", "molecule") or "molecule"},
         "density": {"axis": args.axis, "nbins": args.nbins},
         "interface": {"axis": args.axis, "nbins": max(args.nbins, 60)},
         "rdf": {"rmax": args.rmax, "nbins": args.rdf_bins},
@@ -227,8 +236,11 @@ def cmd_batch(args) -> int:
     files = []
     for pat in args.paths:
         if os.path.isdir(pat):
-            for ext in ("*.tpr", "*.gro", "*.pdb", "*.xtc", "*.trr", "*.dcd"):
-                files += globmod.glob(os.path.join(pat, ext))
+            # 目录模式下要扫的后缀同样来自 mdta.formats（唯一来源）
+            from mdta.formats import ALL_SUFFIXES
+
+            for ext in sorted(ALL_SUFFIXES):
+                files += globmod.glob(os.path.join(pat, f"*{ext}"))
         else:
             files += globmod.glob(pat)
     tops, trajs = scan_input_files(sorted(set(files)))

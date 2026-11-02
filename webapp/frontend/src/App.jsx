@@ -65,10 +65,9 @@ export default function App() {
     cutoff: 5.0, axis: 2, nbins: 100, rmax: 12, dihedral_mode: 'auto',
     rdf_mode: 'inter', msd_object: 'molecule', gauche_edge: 120,
     orient_mode: 'repeat', orient_stride: 1, contact_mode: 'inter', g_ref: '',
-    // Rg / R_ee：两个布尔开关默认开（与后端函数签名一致），
-    // 关掉「逐分子统计」就只看整组 Rg（一团物质的尺寸），
-    // 关掉「质量加权」就用等权（几何）口径。
-    mass_weighted: true, per_molecule: true,
+    // Rg：「分析对象」是**二选一**（整体体系 / 分子·链，默认分子·链），程序只算
+    // 选中的那种，不再同时算整组与逐分子两套。`per_molecule` 现在只归 R_ee 用。
+    mass_weighted: true, rg_object: 'molecule', per_molecule: true,
     ree_ends: 'bond_graph', ree_atoms: '',
     // BOO / 晶体识别：邻域半径留空 = 自动（按最近邻距离中位数推定）
     boo_cutoff: '', boo_averaged: true, q6_solid: 0.5, min_cluster: 10,
@@ -205,9 +204,10 @@ export default function App() {
           ? null : Number(params.g_ref),
           // 与「二面角分析」共用同一个 trans/gauche 阈值（后端两个模块都收这个键）
           gauche_edge: Number(params.gauche_edge) || 120 },
-        // Rg / R_ee：布尔开关直接传（后端 analyze_rg / analyze_end_to_end 接受）
+        // Rg：「分析对象」二选一（互斥）—— object="molecule" 逐分子算 Rg（默认），
+        // object="system" 整组算 Rg。后端只算选中的那种。
         rg: { mass_weighted: params.mass_weighted !== false,
-              per_molecule: params.per_molecule !== false },
+              object: params.rg_object === 'system' ? 'system' : 'molecule' },
         ree: { ends: params.ree_ends || 'bond_graph',
                per_molecule: params.per_molecule !== false,
                // 手工指定两个成键原子作为链端（留空 = None，按 ends 自动判定）

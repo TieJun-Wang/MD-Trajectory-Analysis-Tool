@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .topology import residue_names
+
 from .selection import ChainType, classify_residues, list_chains
 
 
@@ -144,9 +146,19 @@ def describe_system(mdt_or_universe) -> SystemInfo:
     except Exception:  # noqa: BLE001
         info.has_charges = False
 
-    info.atom_names = Counter(np.asarray(u.atoms.names, dtype=str).tolist())
-    info.residue_names = Counter(np.asarray(u.residues.resnames, dtype=str).tolist())
-    info.segment_names = [str(s) for s in np.asarray(u.segments.segids, dtype=str)]
+    # ⚠️ 这三行**必须**容错：LAMMPS 的 data 文件没有原子名，.xyz 没有残基名，
+    #    缺属性时 MDAnalysis 抛 NoDataError —— 一行就能让整个体系打不开
+    #    （describe_system 是打开体系的必经之路）。缺了就给空表，并在退路里
+    #    用原子类型/元素、键图分子名代替，界面上仍有东西可看。
+    try:
+        info.atom_names = Counter(np.asarray(u.atoms.names, dtype=str).tolist())
+    except Exception:                                        # noqa: BLE001
+        info.atom_names = Counter()
+    info.residue_names = Counter(residue_names(u).tolist())
+    try:
+        info.segment_names = [str(s) for s in np.asarray(u.segments.segids, dtype=str)]
+    except Exception:                                        # noqa: BLE001
+        info.segment_names = []
 
     try:
         el = np.asarray(u.atoms.elements, dtype=str)

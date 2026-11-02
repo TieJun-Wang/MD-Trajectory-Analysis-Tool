@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """文件读取模块。
 
-第一阶段优先保证 **GROMACS TPR + XTC** 稳定运行；
-同时支持 :mod:`.gro` / :mod:`.pdb` / :mod:`.trr` / :mod:`.dcd` / :mod:`.xyz`
-等 MDAnalysis 原生支持的格式作为可扩展格式。
+格式支持面由 :mod:`mdta.formats` 统一定义（**唯一来源**，别在本文件里再写一份）：
+GROMACS（`.tpr/.gro/.xtc/.trr/.tng`）、AMBER（`.prmtop/.parm7/.nc/.mdcrd/.crd`）、
+CHARMM/NAMD（`.psf/.dcd/.trj/.trz`）、LAMMPS（`.data/.lammps/.lammpstrj/.dump`）、
+PDB / XYZ / MOL2 / DMS / H5MD / GSD 等 MDAnalysis 原生支持的格式。
 """
 
 from __future__ import annotations
@@ -17,14 +18,29 @@ from typing import Iterable
 
 import numpy as np
 
-# ------------------------------------------------------------------ 格式表
-TOPOLOGY_SUFFIXES = {".tpr", ".gro", ".pdb", ".psf", ".prmtop", ".parm7", ".top", ".xyz", ".data"}
-TRAJECTORY_SUFFIXES = {".xtc", ".trr", ".dcd", ".nc", ".nctraj", ".xyz", ".lammpstrj", ".trj"}
-SUPPORTED_SUFFIXES = TOPOLOGY_SUFFIXES | TRAJECTORY_SUFFIXES
+from .formats import (
+    BOND_GUESSABLE_SUFFIXES as _BOND_GUESSABLE,
+    CONVERT_SUFFIXES,
+    TOPOLOGY_SUFFIXES,
+    TRAJECTORY_SUFFIXES,
+    can_be_topology,
+    can_be_trajectory,
+    format_for,
+    is_ms_structure,
+    ms_sibling_trajectory,
+    suffix_of,
+    topology_format_for,
+    topology_help,
+    trajectory_help,
+    unsupported_hint,
+)
+
+SUPPORTED_SUFFIXES = set(TOPOLOGY_SUFFIXES) | set(TRAJECTORY_SUFFIXES)
 
 #: GROMACS 的力场拓扑 ``.top``（含 ``#include`` 的 .itp）：MDAnalysis **不能**解析，
 #: 给出明确的提示而不是让它用错误的解析器报一堆看不懂的错。
 GROMACS_TOP_SUFFIXES = {".top"}
+
 
 
 # ------------------------------------------- 只读数据目录的偏移缓存（防死锁）
@@ -86,27 +102,37 @@ def ensure_offsets_writable() -> Path | None:
     def offsets_filename(filename, ending="npz"):
         src = os.path.abspath(filename)
         inplace = orig(filename, ending)
-        # 已有就地缓存就搬过来复用，省掉一次整文件重扫（1.7 GB 轨迹差别很大）
+        # 已有就地缓存就搬过来复用，省掉一次整文件重扫（1.7 GB 轨迹差别很大）。
+        # ⚠️ 只在"缓存比轨迹新"时复用：如果轨迹在缓存建立之后被替换/重新转换过，
+        # 那份偏移就是**过期**的，复用会让读取器 seek 到帧中间，报
+        # `XDR read error = notfound`（用户实测踩到过）。这种情况下宁可重扫一次。
         if ending == "npz" and os.path.isfile(inplace):
-            h0 = hashlib.sha1(src.encode("utf-8")).hexdigest()[:12]
-            dst = _offsets_cache_dir() / f"{Path(filename).name}.{h0}_offsets.npz"
-            if not dst.exists():
-                try:
-                    shutil.copy2(inplace, dst)
-                except OSError:
-                    pass
+            fresh = True
+            try:
+                if os.path.isfile(filename):
+                    fresh = os.path.getmtime(inplace) >= os.path.getmtime(filename)
+            except OSError:
+                fresh = False
+            if fresh:
+                h0 = hashlib.sha1(src.encode("utf-8")).hexdigest()[:12]
+                dst = _offsets_cache_dir() / f"{Path(filename).name}.{h0}_offsets.npz"
+                if not dst.exists():
+                    try:
+                        shutil.copy2(inplace, dst)
+                    except OSError:
+                        pass
         key = f"{src}|{ending}"
         if key not in _OFFSETS_REDIRECT:
             h = hashlib.sha1(src.encode("utf-8")).hexdigest()[:12]
             _OFFSETS_REDIRECT[key] = str(
                 _offsets_cache_dir() / f"{Path(filename).name}.{h}_offsets.{ending}")
-            if src not in _OFFSETS_WARNED:
+            '''if src not in _OFFSETS_WARNED:
                 _OFFSETS_WARNED.add(src)
                 warnings.warn(
                     f"为避免 MDAnalysis 在数据目录不可写时因 filelock 无限重试而卡死，"
                     f"偏移缓存已重定向到 {_offsets_cache_dir()}（数据目录不再被写入）。"
                     f"如需原生就地缓存请设 MDTA_OFFSETS_INPLACE=1。",
-                    RuntimeWarning, stacklevel=2)
+                    RuntimeWarning, stacklevel=2)'''
         return _OFFSETS_REDIRECT[key]
 
     XDR.offsets_filename = offsets_filename
@@ -215,8 +241,8 @@ class TrajectoryError(RuntimeError):
 
 
 #: 这些格式**无法存储键连接**，加载后若发现没有键，就按坐标猜一遍
-#: （见 :mod:`mdta.topology`）。
-BOND_GUESSABLE_SUFFIXES = {".gro", ".pdb", ".ent", ".xyz", ".pdb1"}
+#: （见 :mod:`mdta.topology`）。清单来自 :mod:`mdta.formats`（唯一来源）。
+BOND_GUESSABLE_SUFFIXES = _BOND_GUESSABLE
 #: 超过这个原子数就不自动猜键了（猜键是 O(N) 但常数不小）
 AUTO_GUESS_MAX_ATOMS = 300_000
 
@@ -245,6 +271,12 @@ class MDTrajectory:
     bond_guess_info: dict | None = None
     #: 对象层属性补齐诊断（elements / masses / molnums）
     object_info: dict | None = None
+    #: Materials Studio 文档（``.car`` / ``.xsd`` / ``.xtd``）的解析摘要
+    ms_info: dict | None = None
+    #: 读取过程中值得告诉用户的话（自动配对轨迹、MS 单帧说明…）
+    load_notes: list[str] = field(default_factory=list)
+    #: 是否因偏移缓存过期而重建过（读取被替换/重转换的轨迹时会置位）
+    offsets_rebuilt: bool = False
     #: 每帧时间的**惰性缓存**（见 :attr:`times_ps`）
     _times_cache: np.ndarray | None = field(default=None, repr=False, compare=False)
     #: 首帧/末帧时间的**惰性缓存**（见 :meth:`time_range_ps`）
@@ -275,10 +307,34 @@ class MDTrajectory:
                 raise TrajectoryError("没有指定拓扑文件。")
             if not os.path.isfile(self.topology):
                 raise TrajectoryError(f"找不到拓扑文件: {self.topology}")
+            # Materials Studio 文档（.xsd/.xtd）常常**与轨迹同名不同后缀**：
+            # 只给了一个时自动把另一个配上（.xtd 里写着 <Trajectory End=…/>，
+            # 真正的坐标在同名 .trj 里；.trj 再由 ms_trj 转成 XTC 读取）。
+            if self.trajectory is None and is_ms_structure(self.topology):
+                sib = ms_sibling_trajectory(self.topology)
+                if sib:
+                    self.trajectory = sib
+                    self.load_notes.append(
+                        f"已自动配对同名轨迹：{os.path.basename(sib)}"
+                        f"（与拓扑 {os.path.basename(self.topology)} 同名前缀）")
             if self.trajectory is not None and not os.path.isfile(self.trajectory):
                 raise TrajectoryError(f"找不到轨迹文件: {self.trajectory}")
             if Path(self.topology).suffix.lower() in GROMACS_TOP_SUFFIXES:
                 raise TrajectoryError(self._gromacs_top_message())
+            # 槽位校验：把"轨迹文件当拓扑用""不认识的后缀"这类误操作挡在解析之前，
+            # 给一句人能看懂的话（以前会一路抛到 API 变成 HTTP 500，
+            # 实测 `.xtc` 当拓扑 / `.md` 当拓扑都会 500）。
+            if not can_be_topology(self.topology):
+                raise TrajectoryError(self._bad_topology_message())
+            if self.trajectory and not can_be_trajectory(self.trajectory):
+                raise TrajectoryError(self._bad_trajectory_message())
+            # MS 的 .trj 头部写着原子数：**转换之前**先跟拓扑对一下。
+            # 否则 `.car`(5400 原子) + 别的体系的 `.trj`(5596 原子 / 约 1.6 GB) 会先
+            # 把整个轨迹转完，最后抛一句"转换失败 / .trj 被截断"（实测用户踩到）。
+            self._precheck_ms_trj_atoms()
+            # `.lammps` / `.lmp` / `.dat` 可能是**输入脚本或日志**（`in.lammps`、`log.lammps`），
+            # 丢给 DATA 解析器只会报 EOFError；这里先闻一下内容。
+            self._check_lammps_text_file()
             _progress("读取拓扑与轨迹", topology=os.path.basename(self.topology),
                       trajectory=(os.path.basename(self.trajectory)
                                   if self.trajectory else None),
@@ -286,19 +342,48 @@ class MDTrajectory:
                                      if self.trajectory
                                      and os.path.isfile(self.trajectory) else None),
                       first_scan=_needs_frame_scan(self.trajectory))
+            # `.trj` 可能是 Materials Studio 的二进制轨迹（MDAnalysis 读不了）：
+            # 先按下标让 MDAnalysis 试（CHARMM ASCII 的 .trj 它能读），失败就调用
+            # 用户的 pymsdump/ms_trj 转成 XTC 再读（见 mdta.ms_trj）。
+            load_traj = self.trajectory
             try:
                 ensure_offsets_writable()   # 数据目录只读时重定向偏移缓存，避免死锁
-                if self.trajectory:
-                    self._universe = mda.Universe(self.topology, self.trajectory)
+                # `.lammpstrj` / `.dump` 这类"认格式名不认后缀"的格式必须显式传
+                # format（见 mdta.formats.EXPLICIT_FORMAT），否则按后缀找不到读取器。
+                kw = {}
+                fmt = format_for(load_traj or self.topology or "")
+                if fmt:
+                    kw["format"] = fmt
+                try:
+                    self._universe = self._open_universe(mda, kw, traj=load_traj)
+                except Exception as exc:  # noqa: BLE001 - 先判断是否偏移缓存问题
+                    if not (load_traj and self._looks_like_offsets_error(exc)):
+                        raise
+                    # 自愈：轨迹被替换/重新转换过时，旧偏移缓存会让"定位帧"失败
+                    # （实测用户遇到 `XDR read error = notfound`）。这里重建一次缓存，
+                    # 成功就继续并记一条说明，失败则把原异常抛出去做可读诊断。
+                    self._universe = self._open_universe(mda, kw, refresh=True,
+                                                         traj=load_traj)
+                    self.offsets_rebuilt = True
+            except Exception as first_exc:  # noqa: BLE001
+                # 第二次机会：`.trj` 走"转换后再读"
+                if (self.trajectory
+                        and suffix_of(self.trajectory) in CONVERT_SUFFIXES):
+                    try:
+                        load_traj = self._convert_trajectory()
+                        kw2 = {}
+                        self._universe = self._open_universe(mda, kw2, traj=load_traj)
+                    except Exception as conv_exc:  # noqa: BLE001
+                        raise TrajectoryError(
+                            self._read_error_message(conv_exc, converted=True)
+                        ) from conv_exc
                 else:
-                    self._universe = mda.Universe(self.topology)
-            except Exception as exc:  # noqa: BLE001 - 统一转成可读错误
-                # MDAnalysis 自己也会检查原子数；这时给出更有用的提示
-                n_top, n_traj = self._read_counts()
-                if n_top and n_traj and n_top != n_traj:
-                    raise TrajectoryError(self._mismatch_message(n_top, n_traj)) from exc
-                raise TrajectoryError(
-                    f"读取失败: {os.path.basename(self.topology)}: {exc}") from exc
+                    n_top, n_traj = self._read_counts()
+                    if n_top and n_traj and n_top != n_traj:
+                        raise TrajectoryError(
+                            self._mismatch_message(n_top, n_traj)) from first_exc
+                    raise TrajectoryError(
+                        self._read_error_message(first_exc)) from first_exc
             _progress("解析拓扑与帧数")
             self._validate()
             self._maybe_guess_bonds()
@@ -318,6 +403,351 @@ class MDTrajectory:
                   if self.trajectory else None)
         return n_top, n_traj
 
+    #: 这些错误字样说明"读取器定位帧失败"，最典型的原因是**偏移缓存过期**
+    #: （轨迹在缓存建立之后被替换/重新转换过，或转换写到一半就被读）
+    _OFFSET_HINTS = ("xdr", "notfound", "offsets", "seek", "unexpected end",
+                     "error reading", "bad magic")
+
+    def _looks_like_offsets_error(self, exc: BaseException) -> bool:
+        msg = f"{type(exc).__name__}: {exc}".lower()
+        return any(h in msg for h in self._OFFSET_HINTS)
+
+    def _check_lammps_text_file(self) -> None:
+        """`.lammps` / `.lmp` / `.dat` 若是**输入脚本或日志**，给出针对性报错。
+
+        真实情况：LAMMPS 项目里 `in.lammps`（输入脚本）、`log.lammps`（日志）非常常见，
+        而它们与 data 文件共用同一批后缀。直接丢给 DATA 解析器，用户看到的是
+        ``EOFError: Compressed file ended before the end-of-stream marker`` 这种
+        完全不相关的话（实测）。
+        """
+        from .formats import sniff_lammps_kind
+
+        for path, role in ((self.topology, "拓扑"), (self.trajectory, "轨迹")):
+            if not path or not os.path.isfile(path):
+                continue
+            kind = sniff_lammps_kind(path)
+            if kind == "input":
+                raise TrajectoryError(
+                    f"「{os.path.basename(path)}」是 LAMMPS 的**输入脚本**，不是结构/"
+                    f"轨迹文件，不能放在「{role}」槽里。\n"
+                    f"  脚本里 `read_data …` 指到的 data 文件（`.lmp`/`.data`）才是拓扑，"
+                    f"`dump … custom` 输出的 `.lammpstrj` 才是轨迹。")
+            if kind == "log":
+                raise TrajectoryError(
+                    f"「{os.path.basename(path)}」是 LAMMPS 的**日志/热力学输出**，"
+                    f"不含坐标，不能放在「{role}」槽里。\n"
+                    f"  坐标请看 `dump` 输出的轨迹（`.lammpstrj`），"
+                    f"原子身份请看 `write_data` 的 data 文件（`.lmp`/`.data`）。")
+
+    def _precheck_ms_trj_atoms(self) -> None:
+        """``.trj`` 的头部原子数 vs 拓扑原子数 —— **转换之前**先比一次。
+
+        真实故障：用户把 `C12-100-2.car`（5400 原子）和一个 5596 原子的
+        `122C12-450K.trj` 配在一起。旧行为是"先转成 XTC 再让 MDAnalysis 报
+        topology/轨迹原子数不一致"，而错误信息被包成
+        「.trj 被截断 / 模块放错位置」—— 与事实无关，而且为一个 1.6 GB 的轨迹
+        白转几分钟（C 盘只剩 0 GB 时还会把缓存写坏）。现在这里直接给结论。
+        """
+        if not self.trajectory or suffix_of(self.trajectory) != ".trj":
+            return
+        try:
+            from .ms_trj import trj_header
+
+            hdr = trj_header(self.trajectory)
+        except Exception:                                        # noqa: BLE001
+            return
+        n_trj = hdr.get("n_atoms")
+        if not n_trj:
+            return
+        n_top = None
+        try:
+            if is_ms_structure(self.topology or ""):
+                from .ms_structure import read_ms_structure
+
+                n_top = int(read_ms_structure(self.topology).get("n_atoms") or 0) or None
+            else:
+                n_top = count_topology_atoms(self.topology)
+        except Exception:                                        # noqa: BLE001
+            n_top = None
+        if not n_top or int(n_top) == int(n_trj):
+            self._trj_n_atoms = int(n_trj)
+            return
+        raise TrajectoryError(
+            f"拓扑与轨迹的**原子数不一致**，这两个文件不是同一个体系：\n"
+            f"  · 拓扑 {os.path.basename(self.topology)}：{int(n_top):,} 原子\n"
+            f"  · 轨迹 {os.path.basename(self.trajectory)}：{int(n_trj):,} 原子"
+            f"（读自 .trj 头部，尚未转换）\n"
+            f"Materials Studio 的 .trj 必须与**导出它的那份结构**配套："
+            f".car / .xsd / .xtd 与 .trj 的原子数与原子顺序都要一一对应。\n"
+            f"请检查是不是把不同次导出（或不同体系）的拓扑与轨迹配在了一起 —— "
+            f"文件名相近不代表同一体系。")
+
+    def _open_universe(self, mda, kw: dict, refresh: bool = False,
+                       traj: str | None = None) -> object:
+        """打开 Universe；``refresh=True`` 时让 XDR 读取器**重建偏移缓存**。"""
+        k = dict(kw)
+        t = self.trajectory if traj is None else traj
+        if refresh and suffix_of(t or "") in (".xtc", ".trr"):
+            k["refresh_offsets"] = True
+        # LAMMPS data（`.lmp`/`.dat`/`.lammps`）按后缀找不到拓扑解析器，必须显式
+        # 给 `topology_format="DATA"`；轨迹一侧的 `format` 由 `format_for()` 单独给。
+        tfmt = topology_format_for(self.topology or "")
+        if tfmt and "topology_format" not in k:
+            k["topology_format"] = tfmt
+        if is_ms_structure(self.topology or ""):
+            return self._open_ms_universe(t, k)
+        if t:
+            return mda.Universe(self.topology, t, **k)
+        return mda.Universe(self.topology, **k)
+
+    def _open_ms_universe(self, traj: str | None, kw: dict):
+        """用 :mod:`mdta.ms_structure` 解析 Materials Studio 拓扑，再挂轨迹。
+
+        MDAnalysis 不认识 ``.car`` / ``.xsd`` / ``.xtd``，所以拓扑这一侧自己解析
+        （原子/元素/键表/晶胞），然后按普通方式把轨迹挂上去：
+
+        * ``.xsd`` 带**完整键表**（实测 5596 原子 / 5891 键），分子划分直接可用；
+        * ``.car`` 通常没有键表 → 后面由 `_maybe_guess_bonds` 按坐标猜；
+        * ``.xtd`` 只有拓扑 + ``<Trajectory End="6001">`` 声明，坐标在同名 ``.trj`` 里
+          —— 没显式给轨迹时自动配上（见 :func:`mdta.formats.ms_sibling_trajectory`）。
+        """
+        from .ms_structure import build_universe, read_ms_structure
+
+        _progress("解析 Materials Studio 拓扑",
+                  topology=os.path.basename(self.topology or ""))
+        try:
+            doc = read_ms_structure(self.topology)
+        except Exception as exc:                                # noqa: BLE001
+            raise TrajectoryError(
+                f"读取失败：{os.path.basename(self.topology or '')} 不是可解析的 "
+                f"Materials Studio 文件（{type(exc).__name__}: {exc}）") from exc
+        u = build_universe(doc)
+        self.ms_info = {
+            "format": doc.get("format"),
+            "n_atoms": int(doc.get("n_atoms") or 0),
+            "n_bonds": len(doc.get("bonds") or []),
+            "n_images_skipped": int(doc.get("n_images_skipped") or 0),
+            "trajectory_hint": doc.get("trajectory_hint"),
+            "cell": (None if doc.get("cell") is None
+                     else [float(x) for x in doc["cell"]]),
+        }
+        _progress("Materials Studio 拓扑已解析",
+                  atoms=self.ms_info["n_atoms"], bonds=self.ms_info["n_bonds"])
+        if traj:
+            u.load_new(traj, **kw)
+            hint = self.ms_info.get("trajectory_hint") or {}
+            n_decl = hint.get("n_frames")
+            try:
+                got = len(u.trajectory)
+            except Exception:                                   # noqa: BLE001
+                got = None
+            if n_decl and got is not None:
+                if int(n_decl) != int(got):
+                    self.load_notes.append(
+                        f"⚠️ 轨迹帧数与 MS 文档声明不符：文档写的是 {int(n_decl):,} 帧"
+                        f"（<Trajectory End=\"{int(n_decl)}\" "
+                        f"Type=\"{hint.get('type')}\"/>），实际读到 {int(got):,} 帧"
+                        f"—— 轨迹文件可能被截断，或与这份拓扑不是同一次计算。")
+                else:
+                    self.load_notes.append(
+                        f"轨迹帧数校验通过：MS 文档声明 {int(n_decl):,} 帧，"
+                        f"实际读到 {int(got):,} 帧")
+        elif self.ms_info["trajectory_hint"]:
+            self.load_notes.append(
+                f"{os.path.basename(self.topology or '')} 声明了 "
+                f"{self.ms_info['trajectory_hint'].get('n_frames')} 帧轨迹"
+                f"（<Trajectory Type=\"{self.ms_info['trajectory_hint'].get('type')}\">），"
+                f"但坐标不在这个文件里 —— 同名的 .trj 才是轨迹；"
+                f"没找到同名轨迹文件时只能按单帧分析。")
+        return u
+
+    def _convert_trajectory(self) -> str:
+        """把需要转换的轨迹（Materials Studio ``.trj``）转成 XTC，返回新路径。
+
+        转换器来自用户自己的 pymsdump / md_convert（纯 Python，无需编译），
+        见 :mod:`mdta.ms_trj`；结果按「路径+大小+修改时间」缓存，重复打开秒开。
+        """
+        from . import ms_trj as _ms
+
+        if not _ms.available(self.trajectory):
+            raise TrajectoryError(_ms.unavailable_message(self.trajectory))
+        info = _ms.trj_info(self.trajectory)
+        _progress("转换 Materials Studio .trj → XTC",
+                  frames=info.get("n_frames"), atoms=info.get("n_atoms"))
+        out = _ms.convert_trj(
+            self.trajectory,
+            progress=lambda msg: _progress("转换 Materials Studio .trj → XTC",
+                                           note=msg))
+        self.converted_xtc = str(out)
+        self.converted_note = (
+            f"轨迹 {os.path.basename(self.trajectory)} 是 Materials Studio 的 .trj，"
+            f"MDAnalysis 读不了；已用 pymsdump/ms_trj 转成 XTC 后读取"
+            f"（缓存：{out.name}）。")
+        return str(out)
+
+    def _read_error_message(self, exc: BaseException, *,
+                            converted: bool = False) -> str:
+        """读取失败时的可读诊断：**点名是哪个文件**+可能原因+可操作建议。
+
+        为什么要专门写：用户实测遇到的是
+        ``读取失败: 122C12450K.pdb: XDR read error = notfound`` ——
+        报的是**拓扑**文件名，实际失败的是**轨迹**（XDR 是轨迹读取器），
+        而且没有任何"该怎么办"的信息。这里改成点名 + 给原因 + 给做法。
+        """
+        traj = os.path.basename(self.trajectory or "")
+        top = os.path.basename(self.topology or "")
+        offsets_like = self._looks_like_offsets_error(exc)
+        who = (f"轨迹文件 {traj}" if (self.trajectory and offsets_like)
+               else f"{top}（拓扑）" if not self.trajectory
+               else f"{top} + {traj}")
+        lines = [f"读取失败（{who}）：{type(exc).__name__}: {exc}"]
+        n_mismatch = "number of atoms" in str(exc) or "原子数" in str(exc)
+        if n_mismatch and self.trajectory:
+            n_top, n_traj = self._atom_counts_for_message()
+            lines += [
+                "  这是**拓扑与轨迹的原子数不一致** —— 两个文件不是同一个体系"
+                "（或不是同一次导出），改名/挪目录都不会让它配套。",
+                f"    · 拓扑 {top}：{n_top if n_top is not None else '?'} 原子",
+                f"    · 轨迹 {traj}：{n_traj if n_traj is not None else '?'} 原子",
+                "  Materials Studio 的 .trj 必须与**导出它的那份结构**配套；"
+                "请换成同一批导出的 .car/.xsd/.xtd ↔ .trj 组合。",
+            ]
+        # LAMMPS 的 `.lmp` / `.dat` / `.data` / `.lammps` 里，只有 `write_data`
+        # 导出的才是 data 文件；同名后缀也常被普通结果表/缓存占用（本工具自己的
+        # `_msd_scratch/msd_*.dat` 就是二进制缓存）。内容嗅探认不出来时直接说清楚，
+        # 而不是把 `gbk codec can't decode` 这种底层错误丢给用户。
+        if not converted and not n_mismatch:
+            for path in (self.topology, self.trajectory):
+                if not path or not os.path.isfile(path):
+                    continue
+                try:
+                    from .formats import LAMMPS_TEXT_SUFFIXES, sniff_lammps_kind
+
+                    if (suffix_of(path) not in LAMMPS_TEXT_SUFFIXES
+                            or sniff_lammps_kind(path) is not None):
+                        continue
+                except Exception:                               # noqa: BLE001
+                    continue
+                lines += [
+                    f"  「{os.path.basename(path)}」的后缀像 LAMMPS data，但前 40 行里"
+                    "没有 data 文件该有的表头（`N atoms` / `M atom types` / `Masses` 段），"
+                    "所以它**不是** LAMMPS data 文件。",
+                    "    · 真正的 data 文件由 LAMMPS 的 `write_data` 导出"
+                    "（后缀 `.lmp` / `.data` / `.dat` / `.lammps` 都行）；",
+                    "    · LAMMPS 的输入脚本（`in.lammps`）与日志（`log.lammps`）不是数据文件；",
+                    "    · 若这个 `.dat` 其实是一列数值结果/缓存表，请换一份真拓扑"
+                    "（`.pdb` / `.gro` / `.tpr` / `.xsd` …）。",
+                ]
+                break
+
+        if converted:
+            lines += [
+                "  该文件是 `.trj`：MDAnalysis 读不了 Materials Studio 的二进制 .trj，"
+                "本工具尝试用 pymsdump/ms_trj 转换后读取，**转换或读取失败了**。",
+                "  常见原因：",
+                "    · .trj 被截断/拷贝不完整（解析器报「文件长度与帧步长不匹配」）；",
+                "    · 该 .trj 不是 Materials Studio 格式（也可能是坏文件）；",
+                "    · pymsdump / md_convert 模块放错位置。",
+                r"  可用环境变量指定模块目录：set MDTA_MS_CONVERT=D:\md_convert;D:\pymsdump",
+            ]
+            # 有头部信息就能把"截断"这件事说得很具体（用户实测就是磁盘满写不完）
+            try:
+                from .ms_trj import trj_header
+
+                hdr = trj_header(self.trajectory or "")
+            except Exception:                                   # noqa: BLE001
+                hdr = {}
+            if hdr.get("n_atoms"):
+                got_fr = hdr.get("n_frames_declared")
+                size_mb = (os.path.getsize(self.trajectory) / 1048576
+                           if self.trajectory and os.path.isfile(self.trajectory) else 0)
+                decl = ((self.ms_info or {}).get("trajectory_hint") or {}).get("n_frames")
+                lines.append(
+                    f"  实测这个 .trj：头部写着 {int(hdr['n_atoms']):,} 原子，"
+                    f"按帧长推算**只有 {got_fr:,} 帧是完整的**（文件 {size_mb:.1f} MB）"
+                    + (f"，而这套 MS 文档声明了 {int(decl):,} 帧" if decl else "")
+                    + " —— 典型是**磁盘写满/拷贝中断**导致的截断。")
+                lines.append("  建议：腾出磁盘空间后**重新从 Materials Studio 导出**"
+                             "完整轨迹（或直接导出 .xtc），再打开。")
+        elif offsets_like and self.trajectory:
+            lines += [
+                "  这是**轨迹读取/定位帧**失败，最常见的原因：",
+                "    · 轨迹文件在「偏移缓存」建立之后被**替换或重新转换**过"
+                "（例如 trj→xtc 又跑了一遍、或转换还没写完就开始读）；",
+                "    · 文件被截断（下载/拷贝中断），末尾帧不完整；",
+                "    · 它其实不是该格式（例如把别的格式改名成 .xtc）。",
+                f"  已自动尝试**重建偏移缓存**仍失败；建议：",
+                "    · 确认文件大小不再变化后重试（拷贝/转换完成再打开）；",
+                "    · 重新转换一次，或改用其它轨迹格式（.trr / .dcd / .nc）；",
+                "    · 用 gmx check / gmx trjconv 校验一下这条轨迹。",
+            ]
+        elif self.trajectory and not n_mismatch:
+            lines.append("  如果怀疑是拓扑与轨迹不配套，请确认两者原子数一致"
+                         f"（当前：拓扑 {count_topology_atoms(self.topology)}、"
+                         f"轨迹 {count_trajectory_atoms(self.trajectory)}）。")
+        return "\n".join(lines)
+
+    def _atom_counts_for_message(self) -> tuple[int | None, int | None]:
+        """给"原子数不一致"这类报错用的原子数（MS 文档要自己解析才算得出）。"""
+        n_top = n_traj = None
+        try:
+            if is_ms_structure(self.topology or ""):
+                from .ms_structure import read_ms_structure
+
+                n_top = int(read_ms_structure(self.topology).get("n_atoms") or 0) or None
+            else:
+                n_top = count_topology_atoms(self.topology)
+        except Exception:                                        # noqa: BLE001
+            n_top = None
+        try:
+            n_traj = count_trajectory_atoms(self.trajectory)
+        except Exception:                                        # noqa: BLE001
+            n_traj = None
+        if n_traj is None and self.trajectory:
+            try:
+                from .ms_trj import trj_header
+
+                n_traj = trj_header(self.trajectory).get("n_atoms")
+            except Exception:                                    # noqa: BLE001
+                n_traj = None
+        return n_top, n_traj
+
+    def _bad_topology_message(self) -> str:
+        """选错槽位/后缀时的提示：说清"这个文件不能当拓扑"+ 该选什么。"""
+        top = os.path.basename(self.topology or "")
+        suf = suffix_of(self.topology or "") or "（无后缀）"
+        lines = [f"「{top}」不能用作拓扑文件（后缀 {suf}）。"]
+        hint = unsupported_hint(self.topology or "")
+        if can_be_trajectory(self.topology or ""):
+            lines += [
+                "  它看起来是**轨迹**格式（只有坐标，没有原子名/元素/键表）。"
+                "把轨迹当拓扑读进来，质量与键表都会是错的（QC 会标「不可引用」）。",
+            ]
+            if suf in (".lammpstrj", ".dump", ".lammpsdump"):
+                lines.append(
+                    "  LAMMPS 的 dump 只记录原子**类型号**，没有元素/质量 —— "
+                    "请把同体系的 **data 文件**（`.lmp` / `.dat` / `.data`）放进「拓扑」槽，"
+                    "dump 放进「轨迹」槽（两个文件同名时会自动配对）。")
+            else:
+                lines.append("  请把它在「轨迹」槽里选择，并在「拓扑」槽里选同体系的"
+                             " .pdb / .gro / .tpr 等。")
+        elif hint:
+            lines.append("  " + hint)
+        else:
+            lines.append("  该后缀不在支持列表里。")
+        lines.append(f"  可用拓扑格式：{topology_help()}")
+        return "\n".join(lines)
+
+    def _bad_trajectory_message(self) -> str:
+        traj = os.path.basename(self.trajectory or "")
+        suf = suffix_of(self.trajectory or "") or "（无后缀）"
+        lines = [f"「{traj}」不能用作轨迹文件（后缀 {suf}）。"]
+        hint = unsupported_hint(self.trajectory or "")
+        if hint:
+            lines.append("  " + hint)
+        lines.append(f"  可用轨迹格式：{trajectory_help()}")
+        return "\n".join(lines)
+
     def _gromacs_top_message(self) -> str:
         """``.top`` 是 GROMACS 力场拓扑，MDAnalysis 解析不了——告诉用户该用什么。"""
         lines = [
@@ -331,25 +761,56 @@ class MDTrajectory:
         try:
             d = os.path.dirname(os.path.abspath(self.topology)) or "."
             cands = [n for n in sorted(os.listdir(d))
-                     if Path(n).suffix.lower() in {".gro", ".pdb", ".tpr", ".psf", ".prmtop"}]
+                     if Path(n).suffix.lower() in TOPOLOGY_SUFFIXES
+                     and not n.lower().endswith(".top")]
             if cands:
-                lines.append("  同目录下这些文件可以用作拓扑：")
-                lines.extend(f"    · {c}" for c in cands[:8])
+                lines += ["  同目录下这些文件可以用作拓扑："]
+                lines += [f"    · {c}" for c in cands[:8]]
         except Exception:  # noqa: BLE001
             pass
         return "\n".join(lines)
 
     # ------------------------------------------------------------ 键补全
     def _maybe_guess_bonds(self) -> None:
-        """``.gro`` 之类没有键表的格式：按坐标猜键，把分子/链划分补回来。"""
+        """按共价半径补/修键表，把分子与链的划分弄对。
+
+    三种情形：
+
+    1. **拓扑没有键**（``.gro`` / 无 CONECT 的 ``.pdb`` / ``.xyz``）→ 猜键（老行为）；
+    2. **拓扑有键但明显不完整**（``CONECT`` 只写了一部分）→ **自动改用猜键结果**
+       并写明；实测 Material Studio 导出的 PDB：自带 4393 个键 → 键图碎片 1203 个
+       （真实分子约 122 个），而按坐标猜键得到 5954 个键 / 123 个碎片（补键后 122）。
+       键表不全会让"逐分子 Rg/R_ee、分子质心 MSD、RDF 的同分子剔除"**静默变差**，
+       所以这里不靠用户勾选，直接在**证据充分**时自动替换（判据见下）。
+    3. **拓扑有键且完整**（``.tpr``/``.psf``/作者给的 PDB）→ 什么都不做（也不猜）。
+    """
         from .topology import guess_bonds as _guess
         from .topology import needs_bond_guessing
 
         u = self._universe
-        if not needs_bond_guessing(u):
-            return                                   # 拓扑自带键表
-        if self.guess_bonds is False:
+        has_bonds = False
+        try:
+            has_bonds = len(u.bonds) > 0
+        except Exception:  # noqa: BLE001
+            has_bonds = False
+        forced = self.guess_bonds is True
+        if not forced and not has_bonds and not needs_bond_guessing(u):
             return
+        # 用户/旧版界面显式说了"不猜键"：一般照办，但**自带键表明显残缺时仍然修**
+        # （实测 MS 的 PDB：polymer[P] 被 CONECT 切成 243 个碎片，其中 121 个是孤立
+        #  H —— 逐分子 Rg 被这些"0 Å 的单原子"拉低到 2.19 Å，而真值 4.39 Å）。
+        # 不修就得靠用户自己发现，而这条错误**不会报任何异常**。
+        repair_broken = False
+        degen_note = ""
+        if self.guess_bonds is False:
+            from .topology import topology_degeneracy
+
+            degen = topology_degeneracy(u.atoms)
+            if not degen.get("degenerate"):
+                return
+            repair_broken = True
+            degen_note = str(degen.get("note", ""))
+            forced = True                     # 走"替换旧键表"的路径
         suf = Path(self.topology or "").suffix.lower()
         if self.guess_bonds is None and suf not in BOND_GUESSABLE_SUFFIXES:
             return                                   # .tpr 等本应带键，不强猜
@@ -359,10 +820,72 @@ class MDTrajectory:
                            f"{AUTO_GUESS_MAX_ATOMS:,}，已跳过",
             }
             return
+
+        n_bonds_before = len(u.bonds) if has_bonds else 0
+        n_frag_before = 0
+        old_bonds = None
+        if has_bonds and not forced:
+            try:
+                n_frag_before = len(u.atoms.fragments)
+                # `u.bonds.indices` 是 (n_bonds, 2)：**逐行**才是一对原子
+                # （写成 `for a, b in arr.T` 会试图把长度为 n 的列拆成两个 → ValueError，
+                #  于是快照失败、退化成"在旧键表上追加"，实测键数 5953 而不是 5954）
+                old_bonds = [(int(a), int(b)) for a, b in
+                             np.asarray(u.bonds.indices, dtype=int)]
+            except Exception:  # noqa: BLE001
+                old_bonds = None
         try:
-            self.bond_guess_info = _guess(u)
+            # 有旧键表时一律"替换后重猜"（旧键表已快照，判定不通过会还原）
+            info = _guess(u, replace=bool(forced or has_bonds))
+            info = dict(info or {})
         except Exception as exc:  # noqa: BLE001 - 猜键失败不应阻断加载
             self.bond_guess_info = {"skipped": f"猜键失败: {exc}"}
+            return
+
+        if old_bonds is not None:
+            # 猜键 vs 自带键表：只有当"自带键表把分子切得更碎"时才采用猜键结果。
+            # 判据：碎片数降到自带结果的 60% 以下（说明自带键表漏了成键关系）。
+            n_frag_guess = int(info.get("fragments", 0) or 0)
+            adopt = bool(n_frag_guess and n_frag_before
+                         and n_frag_guess < 0.6 * n_frag_before)
+            if not adopt:
+                try:
+                    u.delete_bonds(u.bonds)
+                except Exception:                             # noqa: BLE001
+                    u.delete_TopologyAttr("bonds")
+                u.add_TopologyAttr("bonds", old_bonds)
+                self.bond_guess_info = {
+                    "skipped": (f"拓扑自带的键表看起来是完整的"
+                                f"（碎片 {n_frag_before:,} vs 按坐标猜键 "
+                                f"{n_frag_guess:,}），保留原键表不猜"),
+                    "kept_topology_bonds": True,
+                    "bonds": n_bonds_before,
+                    "fragments": n_frag_before,
+                }
+                return
+            info["note"] = (
+                f"拓扑自带的键表**不完整**（碎片 {n_frag_before:,} → 猜键 "
+                f"{n_frag_guess:,}，键 {n_bonds_before:,} → {info.get('bonds', 0):,}），"
+                f"已自动改用按坐标猜键的结果 —— 逐分子 Rg/R_ee、分子质心 MSD、"
+                f"RDF 的同分子剔除都依赖这个划分。")
+            info["replaced_existing"] = n_bonds_before
+            info["fragments_before"] = n_frag_before
+        elif forced:
+            info["replaced_existing"] = n_bonds_before
+            if repair_broken:
+                info["forced_repair"] = True
+                info["degenerate_note"] = degen_note
+                info["fragments_before"] = int(degen.get("n_frag", 0) or 0)
+                info["isolated_frac"] = float(degen.get("isolated_frac", 0.0) or 0.0)
+                info["note"] = (
+                    f"拓扑自带的键表**明显残缺**（{degen_note}），已自动改用**按坐标"
+                    f"猜键**的结果（忽略原有 {n_bonds_before:,} 个键，重猜 "
+                    f"{info.get('bonds', 0):,} 个）—— 否则逐分子 Rg/R_ee、分子质心 "
+                    f"MSD、RDF 的同分子剔除都会被碎片污染，而这些都不会报错。")
+            else:
+                info["note"] = (f"已忽略拓扑里原有的 {n_bonds_before:,} 个键，"
+                                f"按坐标重新猜出 {info.get('bonds', 0):,} 个")
+        self.bond_guess_info = info
 
     def _ensure_object_attrs(self) -> None:
         """补齐对象模型必需的 ``elements`` / ``masses`` / ``molnums``。
@@ -600,11 +1123,21 @@ class MDTrajectory:
 
 # ------------------------------------------------------------------ 加载器
 def _autodetect_trajectory(topology: str) -> str | None:
-    """给定了拓扑文件时，自动寻找同名轨迹文件。"""
+    """给定了拓扑文件时，自动寻找同名轨迹文件。
+
+    候选后缀按"常用程度"排序（`.xtc` 最先），**只挑真能当轨迹的格式**；
+    `.pdb` / `.gro` 这类"两者皆可"的格式**不参与自动匹配** —— 否则拿
+    `sys.pdb` 打开时会把自己当成轨迹，变成"拓扑=轨迹=同一文件"的怪状态。
+    """
     stem = Path(topology).with_suffix("")
-    for suf in (".xtc", ".trr", ".dcd", ".nc", ".trj", ".lammpstrj"):
+    order = [".xtc", ".trr", ".dcd", ".nc", ".ncdf", ".trj", ".trz",
+             ".tng", ".lammpstrj", ".dump", ".lammpsdump", ".mdcrd", ".crd",
+             ".h5md", ".gsd"]
+    for suf in order:
+        if not can_be_trajectory("x" + suf):
+            continue
         for cand in (stem.with_suffix(suf), Path(str(stem) + suf)):
-            if cand.is_file():
+            if cand.is_file() and str(cand) != str(topology):
                 return str(cand)
     return None
 
@@ -634,12 +1167,23 @@ def load_trajectory(
 
     # 只给了一个参数：判断它是拓扑还是轨迹
     if topology is not None and trajectory is None:
-        suf = Path(topology).suffix.lower()
-        if suf in TRAJECTORY_SUFFIXES and suf not in TOPOLOGY_SUFFIXES:
+        if not can_be_topology(topology):
+            if can_be_trajectory(topology):
+                suf = suffix_of(topology)
+                extra = ""
+                if suf in (".lammpstrj", ".dump", ".lammpsdump"):
+                    extra = ("\n  LAMMPS 的 dump 只有原子类型号，没有元素/质量 —— "
+                             "请把同体系的 **data 文件**（`.lmp` / `.dat` / `.data`）"
+                             "当拓扑，dump 当轨迹（同名会自动配对）。")
+                raise TrajectoryError(
+                    f"{topology} 看起来是轨迹文件，缺少拓扑文件；"
+                    f"请同时指定拓扑文件。{extra}"
+                    f"可用拓扑格式：{topology_help()}")
+            hint = unsupported_hint(topology)
             raise TrajectoryError(
-                f"{topology} 看起来是轨迹文件，缺少拓扑文件；"
-                f"请同时指定 .tpr/.gro/.pdb 等拓扑文件。"
-            )
+                f"不认识的文件格式: {topology}"
+                + (f"\n  {hint}" if hint else "")
+                + f"；可用拓扑格式：{topology_help()}")
         if autodetect:
             found = _autodetect_trajectory(topology)
             if found:
@@ -652,13 +1196,16 @@ def load_trajectory(
 
 
 def scan_input_files(paths: Iterable[str]) -> tuple[list[str], list[str]]:
-    """把一批文件分成（拓扑文件, 轨迹文件）。用于命令行/图形界面。"""
+    """把一批文件分成（拓扑文件, 轨迹文件）。用于命令行/图形界面。
+
+    "两者皆可"的格式（`.pdb` / `.gro` / `.xyz` …）优先算**拓扑**，
+    与旧行为一致（命令行给一堆文件时，`.pdb` 通常是结构文件）。
+    """
     tops: list[str] = []
     trajs: list[str] = []
     for p in paths:
-        suf = Path(p).suffix.lower()
-        if suf in TOPOLOGY_SUFFIXES:
+        if can_be_topology(p):
             tops.append(p)
-        elif suf in TRAJECTORY_SUFFIXES:
+        elif can_be_trajectory(p):
             trajs.append(p)
     return tops, trajs

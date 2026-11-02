@@ -221,6 +221,21 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     </label>
   )
 
+  // 单选组：**互斥**选项（目前只有 Rg 的「分析对象」）用 radio，不用复选框 ——
+  // 两个复选框会让人以为可以同时选。值是字符串，直接原样传给后端。
+  const radio = (key, opts, title = '') => (
+    <span className="pradio" title={title || undefined}>
+      {opts.map(([v, t]) => (
+        <label key={v} className={`pchk${params[key] === v ? ' on' : ''}`}>
+          <input type="radio" name={key} value={v}
+                 checked={params[key] === v}
+                 onChange={() => setParams({ ...params, [key]: v })} />
+          {t}
+        </label>
+      ))}
+    </span>
+  )
+
   const show = (mods) => {
     if (mods === null) return true
     if (which === null || !Array.isArray(which)) return true
@@ -261,16 +276,28 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         numInput('10', { step: 1, min: 1, ...p('min_cluster') }), '10'),
     ]],
     ['回转半径 Rg / 端到端距离 R_ee', ['rg', 'ree'], [
+      // 「分析对象」是**互斥**的两档：选哪个就只算哪个（后端 object=...）。
+      // 独占一行放在最前面，避免和下面的口径开关混在一起看漏。
+      F('rg_object', '分析对象', 'radio',
+        radio('rg_object', [['system', '整体体系'], ['molecule', '分子 / 链']],
+          singleMol
+            ? '该组分只有 1 个分子：两档给出同一个数（整组 Rg 就是该分子的 Rg）'
+            : '二选一，程序只算选中的那种：'
+              + '整体体系 = 把所选对象当成一个整体算 Rg（多分子时是「整团物质」的'
+              + '尺寸，接近盒子尺度）；'
+              + '分子 / 链 = 每个分子各算 Rg、再对分子取平均'
+              + '（= Materials Studio Forcite 的 "Radius of gyration" 口径）'),
+        '整体体系 分子 / 链', 6),
       F('mass_weighted', '质量加权 Rg', 'check',
         chk('mass_weighted', '用质量加权', '开：质量加权回转半径（默认）；'
           + '关：等权（几何）口径，每个原子权重相同'), '用质量加权'),
-      F('per_molecule', '逐分子统计', 'check',
+      // 下面这个开关**只影响 R_ee**：Rg 的「整组 / 逐分子」由上面的「分析对象」决定。
+      F('per_molecule', 'R_ee 逐分子', 'check',
         chk('per_molecule', '按分子分别算',
           singleMol
             ? '该组分只有 1 个分子'
-            : '开（默认）：Rg/R_ee 逐分子计算后再对分子取平均（多分子组分才有'
-              + '「单分子 Rg 平均」等统计量）；关：只给整组值（多分子组分的整组 '
-              + 'Rg 接近盒子尺度，不是「分子有多大」）',
+            : '只影响 R_ee：开（默认）＝每个分子各算自己的端到端距离；'
+              + '关＝只给整组的。Rg 的「整组 / 逐分子」请用上面的「分析对象」。',
           { disabled: singleMol }), '按分子分别算'),
       F('ree_ends', 'R_ee 链端来源', 'select', sel('ree_ends', [
         ['bond_graph', 'bond_graph（键连图端基，默认）'],

@@ -577,24 +577,37 @@ class MDTAGui:
 
     # ================================================================ 文件
     def choose_top(self) -> None:
+        # 后缀表来自 mdta.formats（唯一来源）：以前这里硬编码 7 种，
+        # 新增格式（.ent/.dms/.lammpstrj…）永远漏在这个入口外面。
+        from mdta.formats import TOPOLOGY_SUFFIXES, TRAJECTORY_SUFFIXES
+
+        top_pat = " ".join(f"*{s}" for s in sorted(TOPOLOGY_SUFFIXES))
+        traj_pat = " ".join(f"*{s}" for s in sorted(TRAJECTORY_SUFFIXES))
         p = filedialog.askopenfilename(
             title="选择拓扑文件",
-            filetypes=[("拓扑文件", "*.tpr *.gro *.pdb *.psf *.prmtop *.top *.xyz"),
+            filetypes=[("拓扑文件", top_pat),
+                       ("轨迹文件（多帧格式也能当拓扑）", traj_pat),
                        ("GROMACS TPR", "*.tpr"), ("所有文件", "*.*")])
         if p:
             self.var_top.set(p)
             if not self.var_traj.get():
                 stem = os.path.splitext(p)[0]
-                for suf in (".xtc", ".trr", ".dcd", ".nc"):
+                # 候选顺序与 `mdta.io._autodetect_trajectory` 一致（LAMMPS dump 也在里面）
+                for suf in (".xtc", ".trr", ".dcd", ".nc", ".ncdf", ".trj", ".trz",
+                            ".tng", ".lammpstrj", ".dump", ".lammpsdump", ".mdcrd",
+                            ".crd", ".h5md", ".gsd"):
                     if os.path.isfile(stem + suf):
                         self.var_traj.set(stem + suf)
                         self.log(f"自动匹配到轨迹文件: {os.path.basename(stem + suf)}")
                         break
 
     def choose_traj(self) -> None:
+        from mdta.formats import TRAJECTORY_SUFFIXES
+
+        traj_pat = " ".join(f"*{s}" for s in sorted(TRAJECTORY_SUFFIXES))
         p = filedialog.askopenfilename(
             title="选择轨迹文件",
-            filetypes=[("轨迹文件", "*.xtc *.trr *.dcd *.nc *.trj"),
+            filetypes=[("轨迹文件", traj_pat),
                        ("所有文件", "*.*")])
         if p:
             self.var_traj.set(p)
@@ -609,7 +622,7 @@ class MDTAGui:
         top = self.var_top.get().strip()
         traj = self.var_traj.get().strip() or None
         if not top:
-            messagebox.showwarning("提示", "请先选择拓扑文件（.tpr / .gro / .pdb）。")
+            messagebox.showwarning("提示", "请先选择拓扑文件（.pdb / .gro / .tpr 等）。")
             return
         self.set_status("正在读取体系…")
         self.root.update_idletasks()

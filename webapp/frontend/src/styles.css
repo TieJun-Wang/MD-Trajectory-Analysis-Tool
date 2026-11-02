@@ -360,6 +360,16 @@ table.notes-table tr + tr td { border-top: 1px solid #f1f5f9; }
 .pchk.off { opacity: .55; cursor: not-allowed; }
 .pchk.off input { cursor: not-allowed; }
 
+/* 单选组（目前只有 Rg 的「分析对象：整体体系 / 分子 · 链」）：
+   互斥选项并排显示、中间留足间距，整组**不换行**（同 .pchk 的单行保证）。 */
+.pradio {
+  display: inline-flex; align-items: center; gap: 16px;
+  flex-wrap: nowrap; white-space: nowrap;
+  max-width: 100%; min-width: 0;
+}
+.pradio .pchk { gap: 4px; }
+.pradio input[type="radio"] { margin: 0; }
+
 /* ------------------------------------------------------- 预估用时（分析项） *//* 分析功能里每项后面的小标签：数值来自「开始分析」时的实测外推 */
 .est-tag {
   margin-left: 6px; font-size: 11px; color: var(--dim, #6b7280);
@@ -392,15 +402,17 @@ table.notes-table tr + tr td { border-top: 1px solid #f1f5f9; }
    容器（一行胶囊、一行参数）当然可以换行，但一个"☑ 文字"控件本身不能拆成两行 ——
    否则视觉上勾选框与文字会分家。
    已核查的用法：
-     .pchk     参数表里的复选框（质量加权 / 逐分子统计 / 用平均版 q̄_l / 用最小镜像）
+     .pchk     参数表里的复选框（质量加权 / R_ee 逐分子 / 用平均版 q̄_l / 用最小镜像）
+     .pradio   参数表里的单选组（Rg 的分析对象：整体体系 / 分子 · 链）
      .check    分析功能勾选项、运行区的「先预估用时…」
      .inline   导出区「每个面板单独出图」
      .chinline 导出模块 / 文件形式的胶囊（CSV 数据表、PNG 图…）
-   最后一条 :has() 兜底：任何没写 class 的 label 只要里面是复选框，也强制单行。
+   最后两条 :has() 兜底：任何没写 class 的 label 只要里面是复选框/单选钮，也强制单行。
    ⚠️ 单行不等于会溢出 —— 参数表的跨度估算已把复选框文字宽度算进去
    （见 SetupPanel 的 F(..., ph) 与 span 覆盖），新增控件请沿用同样做法。 */
-.pchk, .check, .inline, .chinline,
-label:has(> input[type="checkbox"]) {
+.pchk, .pradio, .check, .inline, .chinline,
+label:has(> input[type="checkbox"]),
+label:has(> input[type="radio"]) {
   white-space: nowrap;
 }
 
@@ -718,6 +730,8 @@ button.link {
 .browser-list .filerow { display: flex; align-items: center; gap: 3px; }
 .browser-list .filerow > .item.file { flex: 1; min-width: 0; }
 .browser-list .filerow .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 「内容不像数据文件」的小标记（LAMMPS 的 in.lammps / log.lammps 等，见后端 file_note） */
+.browser-list .fnote { flex: none; color: #d97706; font-size: 10.5px; line-height: 1.4; }
 .browser-list .roles { display: flex; gap: 2px; flex: none; }
 .browser-list .roles .mini { padding: 1px 5px; font-size: 10.5px; line-height: 1.5; }
 .browser-list .size { margin-left: auto; color: var(--dim); font-size: 10.5px; }

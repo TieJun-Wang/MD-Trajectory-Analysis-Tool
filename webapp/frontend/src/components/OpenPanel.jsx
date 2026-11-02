@@ -11,10 +11,6 @@ export default function OpenPanel({ onOpened, log }) {
   const [trajectory, setTrajectory] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  //: 忽略拓扑里已有的键、按坐标重新猜。给 CONECT 不完整的 PDB（Material Studio
-  //: 导出的常见）用：实测某体系自带 4393 个键 → 键图碎片 1203 个（分子被切碎），
-  //: 重新猜键后 5953 键 / 124 个分子。
-  const [reguess, setReguess] = useState(false)
   //: 上一次读取的加载诊断（猜键/分子划分/缓存重建），读进来后显示给用户
   const [loadNotes, setLoadNotes] = useState([])
 
@@ -75,28 +71,24 @@ export default function OpenPanel({ onOpened, log }) {
   }
 
   // 「文件读取」进度：打开大轨迹首次要扫全文件（46 体系 1.7 GB 实测 >135 s），
-  // 这里一边等 POST 返回、一边并发轮询后端记录的阶段与耗时，给出进度条与已用时间。
+  // 这里一边等 POST 返回、一边并发轮询后端记录的阶段，给出进度条与"当前在做什么"。
   const [phase, setPhase] = useState(null)
-  const [tick, setTick] = useState(0)
 
   const open = async () => {
     if (!topology) { setError('请先选择拓扑文件（.tpr/.gro/.pdb）'); return }
     setBusy(true); setError('')
     const token = `open-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-    setPhase({ stage: '准备中', elapsed: 0, stages: [], done: false })
+    setPhase({ stage: '准备中', stages: [], done: false })
     const t0 = Date.now()
     // **流式**接收读取进度（SSE）：阶段一变就推过来；断流自动退回轮询
     let stopStream = () => {}
     try {
-      stopStream = streamOpenProgress(token, {
-        onStage: (p) => setPhase(p),
-        onTick: () => setTick((n) => n + 1),   // 本地秒表：保证时间一直在走
-      })
+      stopStream = streamOpenProgress(token, { onStage: (p) => setPhase(p) })
     } catch (e) {
       stopStream = () => {}                     // 订阅失败也不该阻断打开
     }
     try {
-      const data = await api.open(topology, trajectory, token, reguess)
+      const data = await api.open(topology, trajectory, token)
       log?.(`体系已打开: sid=${data.sid}, ${data.info?.n_atoms ?? '?'} 原子, `
         + `${data.info?.n_frames ?? '?'} 帧（用时 ${((Date.now() - t0) / 1000).toFixed(1)} s）`)
       const notes = data.load_notes || []
@@ -121,6 +113,9 @@ export default function OpenPanel({ onOpened, log }) {
   return (
     <>
       {busy && (
+        // 只保留「进度条 + 当前工作项」。
+        // 以前这里还显示"已用 X s"、首次扫描提示、以及最近 4 个阶段各自的耗时
+        // （`· 阶段名  0.4 s`）—— 用户要求删掉这些计时展示，只留进度与当前在做什么。
         <div className="openprog">
           <div className="progress">
             <div className="bar" style={{ width: `${Math.min(
@@ -129,14 +124,7 @@ export default function OpenPanel({ onOpened, log }) {
           </div>
           <div className="openmeta dim small">
             正在读取文件：{phase?.stage || '准备中'}
-            {' '}· 已用 <b>{(((phase?.elapsed ?? 0) + (tick % 3) * 0.4)).toFixed(1)} s</b>
-            {phase?.first_scan ? ' · 首次打开需扫描全文件建立帧索引（之后会走缓存）' : ''}
           </div>
-          {(phase?.stages || []).slice(-4).map((s, i) => (
-            <div key={i} className="openstage dim small">
-              · {s.stage}{s.dt != null ? `　${s.dt} s` : ''}
-            </div>
-          ))}
         </div>
       )}
       <div className="picked">
@@ -176,16 +164,20 @@ export default function OpenPanel({ onOpened, log }) {
             const canTop = roles.includes('topology')
             const canTraj = roles.includes('trajectory')
             const dual = canTop && canTraj
+            // 后端按**内容**嗅出来的警示（LAMMPS 的 in.lammps / log.lammps 与 data
+            // 文件共用后缀，只靠后缀分不出来）；老后端没有这个字段，为 undefined
+            const note = f.note ? String(f.note) : ''
             return (
               <div key={f.path} className="filerow">
                 <button className={`item file ${canTop ? 'topology' : 'trajectory'}`}
                         onClick={() => pick(f)}
-                        title={`${f.path}\n${dual
+                        title={`${f.path}${note ? '\n⚠ ' + note : ''}\n${dual
                           ? '该格式拓扑/轨迹都能用：点一下进**拓扑**槽；'
                             + '想当轨迹请点右侧「轨迹」'
                           : canTop ? '点击选择为拓扑' : '点击选择为轨迹'}`}>
                   {canTop ? '🧬' : '📈'}
                   <span className="fname">{f.name}</span>
+                  {note ? <span className="fnote" title={note}>⚠</span> : null}
                   <span className="size">{(f.size / 1048576).toFixed(1)} MB</span>
                 </button>
                 {dual && (
@@ -203,29 +195,7 @@ export default function OpenPanel({ onOpened, log }) {
             <div className="empty">此目录下没有子目录或 MD 文件</div>
           )}
         </div>
-        {listing?.help && (
-          <div className="hint dim" style={{ fontSize: 10.5 }}
-               title={`拓扑：${listing.help.topology}\n轨迹：${listing.help.trajectory}`}>
-            支持格式：拓扑 {String(listing.help.topology).split(' ').length} 种、
-            轨迹 {String(listing.help.trajectory).split(' ').length} 种
-            （鼠标悬停看全部；带「拓扑/轨迹」小按钮的文件两个槽都能用）
-          </div>
-        )}
       </div>
-
-      {/* 键表重猜：给 CONECT 不完整的 PDB（Material Studio 导出常见）用。
-          实测某体系自带 4393 键 → 分子被切成 1203 个碎片；重新猜键 5953 键 /
-          124 个分子，逐分子 Rg/R_ee、分子质心 MSD、RDF 同分子剔除才对。 */}
-      <label className="check" style={{ marginTop: 6 }}
-             title={'勾上后忽略拓扑里已有的键（.pdb 的 CONECT / .gro 无键），'
-               + '按共价半径重新猜键。适用于 CONECT 不完整的 PDB：'
-               + '实测某 Material Studio 体系自带 4393 个键 → 分子被切成 1203 个碎片，'
-               + '重新猜键后 5953 个键 / 124 个分子。'
-               + '注意：力场拓扑（.tpr/.psf/.prmtop）本身键表可信，不要勾。'}>
-        <input type="checkbox" checked={reguess} disabled={busy}
-               onChange={(e) => setReguess(e.target.checked)} />
-        忽略拓扑里的键，按坐标重新猜键
-      </label>
 
       {loadNotes.length > 0 && (
         <div className="hint dim" style={{ fontSize: 10.5 }}

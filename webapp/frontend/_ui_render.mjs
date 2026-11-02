@@ -534,14 +534,23 @@ ok(h.includes('est-tag'), '分析功能的分析项上标出预估用时')
 ok(h.includes('≈1 min 40 s') && h.includes('≈1 h 7 min'),
    '分析项标签用可读单位（min/h）')
 
-// ------------------------------- Rg / R_ee 的口径开关（质量加权 / 逐分子 / 链端）
-const rgParams = { mass_weighted: true, per_molecule: true,
+// ------------------------------- Rg / R_ee 的口径开关（分析对象 / 质量加权 / 链端）
+const rgParams = { mass_weighted: true, rg_object: 'molecule', per_molecule: true,
                    ree_ends: 'bond_graph', ree_atoms: '' }
 h = flat(render(() => React.createElement(M.ParamBlock, {
   params: rgParams, setParams: () => {}, which: ['rg', 'ree'],
 })))
 ok(h.includes('质量加权 Rg'), 'ParamBlock 有「质量加权 Rg」开关')
-ok(h.includes('逐分子统计'), 'ParamBlock 有「逐分子统计」开关')
+// Rg 的「分析对象」是**互斥**单选组（默认分子 / 链），不再是复选框
+ok(h.includes('分析对象'), 'ParamBlock 有「分析对象」')
+ok(h.includes('type="radio"'), '「分析对象」渲染成单选钮（互斥），不是复选框')
+ok(h.includes('整体体系'), '「分析对象」含选项「整体体系」')
+ok(h.includes('分子 / 链'), '「分析对象」含选项「分子 / 链」')
+ok(h.includes('class="pradio"') || h.includes('pradio'),
+   '单选组带 .pradio 样式（并排、不换行）')
+ok(!h.includes('逐分子统计'),
+   '旧文案「逐分子统计」已换成「R_ee 逐分子」（避免与「分析对象」混淆）')
+ok(h.includes('R_ee 逐分子'), 'R_ee 仍保留自己的逐分子开关，且标明只影响 R_ee')
 ok(h.includes('R_ee 链端来源') && h.includes('bond_graph'),
    'ParamBlock 有 R_ee 链端来源（含 bond_graph 选项）')
 ok(h.includes('selection（所选原子组首尾原子）'), 'R_ee 链端来源含 selection 选项')
@@ -550,21 +559,38 @@ ok(h.includes('pchk') && h.includes('type="checkbox"'),
    '布尔开关渲染成复选框并带 .pchk 样式')
 ok(!flat(render(() => React.createElement(M.ParamBlock, {
   params: rgParams, setParams: () => {}, which: ['rdf'],
-}))).includes('逐分子统计'), '未勾选 rg/ree 时不显示这些开关')
+}))).includes('分析对象'), '未勾选 rg/ree 时不显示「分析对象」')
+ok(!flat(render(() => React.createElement(M.ParamBlock, {
+  params: rgParams, setParams: () => {}, which: ['rdf'],
+}))).includes('R_ee 逐分子'), '未勾选 rg/ree 时不显示 R_ee 开关')
 
-// 单分子主链：直接不给选（置灰），**不额外加说明文字**
+// 「分析对象」的默认选中项必须是「分子 / 链」（源码断言：初始 state）
+const appSrc2 = readFileSync(new URL('./src/App.jsx', import.meta.url), 'utf8')
+ok(/rg_object:\s*'molecule'/.test(appSrc2), '「分析对象」默认选中「分子 / 链」')
+ok(!/rg:\s*\{[^}]*per_molecule/.test(appSrc2),
+   'Rg 请求不再携带旧的 per_molecule（改传 object，两档互斥）')
+ok(/object:\s*params\.rg_object/.test(appSrc2), '前端把「分析对象」当 object 传给后端')
+// 选中「整体体系」时第二个钮不勾、选了分子时第一个不勾（互斥）
+const hSys = flat(render(() => React.createElement(M.ParamBlock, {
+  params: { ...rgParams, rg_object: 'system' }, setParams: () => {}, which: ['rg'],
+})))
+ok((hSys.match(/type="radio"/g) || []).length === 2,
+   '「分析对象」恰好两个选项（整体体系 / 分子 · 链）')
+
+// 单分子主链：R_ee 的逐分子开关直接不给选（置灰），**不额外加说明文字**
 h = flat(render(() => React.createElement(M.ParamBlock, {
   params: rgParams, setParams: () => {}, which: ['rg', 'ree'], primaryMolecules: 1,
 })))
 ok(h.includes('pchk off') && h.includes('disabled'),
-   '单分子主链时「逐分子统计」被置灰（不给选）')
+   '单分子主链时「R_ee 逐分子」被置灰（不给选）')
 ok(!h.includes('完全一样') && !h.includes('想看到'), '置灰时不再插入解释性提示文字')
 ok(!h.includes('pm_hint'), '参数表里没有额外的「提示」行')
+ok(h.includes('两档给出同一个数'), '单分子主链时「分析对象」的 tooltip 说明两档同值')
 h = flat(render(() => React.createElement(M.ParamBlock, {
   params: rgParams, setParams: () => {}, which: ['rg', 'ree'], primaryMolecules: 11084,
 })))
 ok(!h.includes('pchk off'), '多分子主链时不置灰')
-ok(h.includes('逐分子统计'), '多分子主链时开关正常可用')
+ok(h.includes('R_ee 逐分子'), '多分子主链时开关正常可用')
 
 // 分析对象下拉里带分子数
 h = flat(render(() => React.createElement(M.SelectionBlock, {
@@ -669,8 +695,40 @@ ok(hBoth.includes('roles') && hBoth.includes('>拓扑<') && hBoth.includes('>轨
 const rowsBoth = hBoth.split('filerow')
 const xtcRow = rowsBoth.find((r) => r.includes('.xtc')) || ''
 ok(xtcRow && !xtcRow.includes('roles'), '纯轨迹文件不出现用途按钮')
-ok(hBoth.includes('支持格式：拓扑 3 种、轨迹 3 种'), '文件列表下方给出支持格式数量提示')
+ok(hBoth.includes('支持格式：拓扑 3 种、轨迹 3 种'), '文件列表下方给出支持格式数量提示（该提示已从组件里删掉，见下）')
 ok(!listHtml([TPR], null).includes('roles'), '纯拓扑文件不出现用途按钮')
+
+// ------------------------------------------------ 文件内容警示（LAMMPS 输入脚本/日志）
+// 后端 `/api/files` 新增 `note` 字段（按**内容**嗅探：`in.lammps` / `log.lammps`
+// 与 data 文件共用后缀，只看后缀分不出来）。前端必须把它显示出来 ——
+// 否则用户还是会先点一次、挨一次报错才知道选错了文件。
+const openSrcNote = readFileSync(new URL('./src/components/OpenPanel.jsx', import.meta.url), 'utf8')
+ok(openSrcNote.includes('f.note'), 'OpenPanel 读列表项的后端字段 note')
+ok(openSrcNote.includes('f.note ?'), 'OpenPanel 对带 note 的文件打标记')
+ok(openSrcNote.includes('⚠'), 'OpenPanel 用 ⚠ 标出"内容不是数据文件"')
+const cssSrcNote = readFileSync(new URL('./src/styles.css', import.meta.url), 'utf8')
+ok(cssSrcNote.includes('.browser-list .fnote'), '样式表里有 .fnote（警示标记不会撑破行）')
+ok(M.fileRoles({ path: 'a.sys.lmp', roles: ['topology', 'trajectory'] }).length === 2,
+   'LAMMPS data 后缀（.lmp/.dat）在界面上两个槽都能选')
+
+// ------------------------------------------------ 文件读取面板：计时/提示的删减
+// modify.md 要求：
+//   ① 删掉各环节**读取时间**显示，只留进度条 + "当前正在做什么"；
+//   ② 删掉「支持格式：拓扑 21 种、轨迹 27 种…」提示；
+//   ③ 删掉「忽略拓扑里的键，按坐标重新猜键」这一模块。
+// SSR 只能渲染初始（非 busy）状态、看不到进度块，所以这里直接对**源码**做静态检查
+// —— 比渲染断言更能防止"哪天又把计时加回去"。
+const openSrc = readFileSync(new URL('./src/components/OpenPanel.jsx',
+  import.meta.url), 'utf8')
+ok(openSrc.includes('正在读取文件'), '文件读取面板保留「正在读取文件：<当前工作项>」')
+// 注意：源码里保留了解释"为什么删掉计时"的注释，所以断言要针对**JSX 代码**本身
+// （`已用 <b>`、`openstage`、`{s.dt}`、秒表 state `tick`），而不是广搜"已用"两个字。
+ok(!openSrc.includes('已用 <b>') && !openSrc.includes('openstage')
+   && !openSrc.includes('{s.dt') && !/useState\(0\)\s*\/\/[^\n]*秒表/.test(openSrc)
+   && !openSrc.includes('onTick'),
+   '文件读取面板已删掉各环节耗时（已用秒表 / 阶段耗时列表）')
+ok(!openSrc.includes('支持格式：拓扑'), '已删掉「支持格式：拓扑 N 种、轨迹 M 种」提示')
+ok(!openSrc.includes('忽略拓扑里的键'), '已删掉「忽略拓扑里的键，按坐标重新猜键」模块')
 
 // 老前端兼容性回归（用户实际踩的坑）：**老代码只看 kind**
 const oldClientRole = (file) => (file.kind === 'topology' ? 'topology' : 'trajectory')

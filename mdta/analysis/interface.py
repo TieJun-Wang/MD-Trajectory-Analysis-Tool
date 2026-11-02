@@ -376,19 +376,59 @@ RDF_MODE_LABELS = {
 _BOND_EXCLUDE = 2.2
 
 
+def _atom_label(a) -> str:
+    """原子的可读标签，**容忍缺属性**：``resname+resid(name)`` → ``name`` → ``#索引``。
+
+    为什么：`.xyz` 之类拓扑没有 residue 信息、甚至没有原子名，直接读
+    ``a.resname`` 会抛 ``NoDataError`` 把整项分析搞崩（实测无 resname 的合成体系）。
+    """
+    try:
+        return f"{a.resname}{a.resid}({a.name})"
+    except Exception:                                          # noqa: BLE001
+        pass
+    try:
+        return str(a.name)
+    except Exception:                                          # noqa: BLE001
+        return f"#{int(a.index)}"
+
+
 def _atom_molnums(ag) -> np.ndarray | None:
     """原子级分子编号。
 
     ``molnums`` 在 MDAnalysis 里是**残基级**属性，取 ``ag.molnums`` 时会自动
     广播到原子级。返回 ``None`` 表示体系没有分子信息（例如猜键失败），
     此时按分子区分配对无法进行。
+
+    ⚠️ 自带 molnums 也可能是**退化**的：Material Studio 导出的 PDB 会把整个体系
+    塞进 1–2 个残基（实测 5596 原子 / 2 个残基 → 全体原子算"2 个分子"），
+    这会让"分子间 RDF"把所有配对都当成分子内而全部剔除、逐分子 Rg 变成整组 Rg，
+    且**不报错**。所以这里加一道判据：若"分子数"远小于键图连通分量数，
+    就改用**键连通分量**作为分子编号（那才是真实的分子划分）。
     """
+    m = None
     try:
-        m = np.asarray(ag.molnums, dtype=np.int64)
+        cand = np.asarray(ag.molnums, dtype=np.int64)
+        if cand.size == ag.n_atoms:
+            m = cand
     except Exception:  # noqa: BLE001 - 无该属性时抛 NoDataError
-        return None
-    if m.size != ag.n_atoms:
-        return None
+        m = None
+
+    frag_ids = None
+    try:
+        frags = ag.fragments
+        if len(frags) > 1:
+            frag_ids = np.empty(ag.n_atoms, dtype=np.int64)
+            for k, f in enumerate(frags):
+                pos = np.searchsorted(np.asarray(ag.indices), np.asarray(f.indices))
+                frag_ids[pos] = k
+    except Exception:  # noqa: BLE001
+        frag_ids = None
+
+    if m is None:
+        return frag_ids
+    n_mol = int(np.unique(m).size)
+    if frag_ids is not None and n_mol * 4 < int(np.unique(frag_ids).size):
+        return frag_ids          # 自带划分退化 → 用键连通分量
     return m
 
 
@@ -849,6 +889,42 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
     return res
 
 
+def _first_inplane_peak(x: np.ndarray, g: np.ndarray, *, r_min: float = 2.2,
+                        window: float = 25.0, min_g: float = 1.2) -> dict | None:
+    """2D 面内 RDF 的**第一壳层**峰：``r_min ≤ r ≤ window`` 内的最大值。
+
+    三种定义都试过，实测对比（跨体系回归 3 个体系的原始曲线）：
+
+    ==========================  ==========================================
+    定义                        问题（都是实测踩到的）
+    ==========================  ==========================================
+    全区间 ``argmax``（原实现）   rmax=70 Å 时远端噪声尖峰会盖过真峰：TOCL
+                                 （每叶层 24 个珠子）的"第一峰"落到 43.5 Å
+    "先上升后下降"（3D 的判据）  2D 曲线在 2–4 Å 有**排斥洞**（g≈0 且噪声
+                                 大），"第一次下降"发生在洞里 → 报出 3–4 Å
+                                 的假峰、g 只有 0.02–0.3
+    "第一个 g≥1 的局部极大"      会抓到真峰前的**肩峰**：POPGK 的曲线在
+                                 5.1 Å 有 g=1.10 的肩，主峰在 8.7 Å(g=1.37)
+    ==========================  ==========================================
+
+    因此取"窗口内最大值"：窗口默认 25 Å（第一壳层与第二壳层的合理范围），
+    既不会被几十 Å 外的噪声骗走，也只会抓到该窗口内的主峰。显著性另由调用方
+    按 ``g_max ≥ min_g`` **且每叶层珠子数够多**判定（珠子少时曲线涨落本来就大，
+    实测每叶层 24 个珠子时 g 能到 1.3，那不是可引用的结构峰）。
+    """
+    x = np.asarray(x, dtype=float)
+    g = np.asarray(g, dtype=float)
+    m = (x >= float(r_min)) & (x <= float(window)) & np.isfinite(g)
+    if not m.any() or int(m.sum()) < 3:
+        return None
+    xs, gs = x[m], g[m]
+    i = int(np.argmax(gs))
+    return {"position": float(xs[i]), "height": float(gs[i]),
+            "significant": bool(gs[i] >= float(min_g)),
+            "reason": "" if gs[i] >= float(min_g) else
+                      f"窗口内最大 g={gs[i]:.2f} < {min_g:g}"}
+
+
 def _first_peak(r: np.ndarray, g: np.ndarray, r_min: float = 0.8) -> dict | None:
     """找第一峰位置、高度以及第一峰之后的第一极小。
 
@@ -995,6 +1071,7 @@ def analyze_com_distance(mdt, groups: Mapping[str, object], selection: FrameSele
 def analyze_rdf_inplane(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                         plane_axis: int = 2, rmax: float = 70.0, nbins: int = 140,
                         slab: tuple | None = None, max_group_atoms: int = 3000,
+                        slab_ref=None, slab_side: str = "upper",
                         verbose: bool = False) -> AnalysisResult:
     """膜平面内的 **2D 自 RDF** ``g2D(r_xy)``（膜体系的标准做法，3D g(r) 不适用）。
 
@@ -1003,7 +1080,12 @@ def analyze_rdf_inplane(mdt, groups: Mapping[str, object], selection: FrameSelec
     - 距离只取**面内两个分量**（忽略法向），且只对这两个分量做最小镜像；
     - 归一化用**面内面密度** ``rho2D = N/(Lx*Ly)`` 与 **2D 壳面积** ``2*pi*r*dr``
       （而不是 3D 的球壳与体积密度）；
-    - ``slab=(lo, hi)`` 只统计某一叶层（作者用 z > 膜质心）。
+    - ``slab=(lo, hi)`` 只统计某一叶层（固定阈值，用于"膜整体位置不涨落"的场合）；
+    - ``slab_ref=<AtomGroup>``：**逐帧**用该组的质心当阈值 —— 作者的做法就是
+      ``z > 膜质心(t)``（``Lipid_RDF.py`` 里 ``z_mid = membrane_beads.center_of_mass()``
+      在帧循环内取），``slab_side="upper"`` 取上半叶、``"lower"`` 取下半叶。
+      ⚠️ 膜质心 z 的涨落 std 实测可达 5 Å 量级，用**固定**阈值（时间平均质心或盒中心）
+      会把叶层圈错、归一化直接失真 —— 这就是必须有逐帧模式的原因。
 
     作者参考实现见 ``Lipid_RDF.py`` 的 ``compute_rdf()``：逐对（i != j）取面内距离、
     直方图计数后除以 ``N * rho2D * 2*pi*r*dr``。本实现向量化等价，并保留他们
@@ -1025,11 +1107,17 @@ def analyze_rdf_inplane(mdt, groups: Mapping[str, object], selection: FrameSelec
         dims = np.asarray(mdt.universe.dimensions, dtype=float)
         L_in = dims[in_ax]
         A = float(np.prod(L_in))
+        # 逐帧叶层阈值：取参考组（膜）的质心，而不是任何固定数值
+        band = slab
+        if slab_ref is not None:
+            z_ref = float(np.asarray(slab_ref.center_of_mass(), dtype=float)[ax])
+            band = ((z_ref, float(dims[ax])) if str(slab_side) == "upper"
+                    else (0.0, z_ref))
         for name, ag in groups.items():
             allpos = np.asarray(ag.positions, dtype=float)
-            if slab is not None:
+            if band is not None:
                 z = allpos[:, ax]
-                allpos = allpos[(z >= float(slab[0])) & (z <= float(slab[1]))]
+                allpos = allpos[(z >= float(band[0])) & (z <= float(band[1]))]
             n = allpos.shape[0]
             n_atoms[name] = max(n_atoms.get(name, 0), n)
             if n < 2:
@@ -1072,13 +1160,35 @@ def analyze_rdf_inplane(mdt, groups: Mapping[str, object], selection: FrameSelec
                         title="面内径向分布")]
     if slab is not None:
         res.add_notes(f"仅统计法向位置在 {slab[0]:.1f}-{slab[1]:.1f} Å 之间的原子（叶层）。")
+    elif slab_ref is not None:
+        res.add_notes(
+            f"叶层阈值**逐帧**取参考组的质心（{'上半叶 z > z_ref' if str(slab_side) == 'upper' else '下半叶 z < z_ref'}）。"
+            "膜/界面的位置本身在涨落（实测膜质心 z 的 std 可达 5 Å 量级），"
+            "固定阈值会把叶层圈错、归一化失真。")
     for name, gs in gsum.items():
         g = gs / max(n_acc, 1)
         res.add_curve(f"{name}-{name}", centers, g, kind="line", panel=0)
-        i = int(np.argmax(np.where(np.isfinite(g), g, -np.inf)))
-        res.summary[f"{name}-{name} 第一峰位置 (Å)"] = float(centers[i])
-        res.summary[f"{name}-{name} 第一峰高度 g_max"] = float(g[i])
-        res.summary[f"{name}-{name} 原子数"] = int(n_atoms.get(name, 0))
+        # ⚠️ 不能对整条曲线取 argmax：rmax 默认 70 Å，珠子少的脂质曲线远端噪声
+        # 尖峰（g≈1.1）会盖过真正的第一壳层峰；也不能用 3D 那套"先上升后下降"
+        # 判据（2D 曲线在小 r 有排斥洞，会在 3–4 Å 报假峰）。判据见
+        # _first_inplane_peak 的文档。显著性额外要求每叶层珠子够多 —— 实测每叶层
+        # 二三十个珠子时（TOCL）曲线涨落大到 g 能到 1.4，那不是可引用的结构峰。
+        pk = _first_inplane_peak(centers, g, r_min=float(_BOND_EXCLUDE))
+        n_leaf = int(n_atoms.get(name, 0))
+        if pk is None:
+            i = int(np.argmax(np.where(np.isfinite(g), g, -np.inf)))
+            pk = {"position": float(centers[i]), "height": float(g[i]),
+                  "significant": False, "reason": "曲线没有可用的极大"}
+        sig = bool(pk.get("significant")) and n_leaf >= 50
+        why = ""
+        if not sig:
+            why = (pk.get("reason") or "") if n_leaf >= 50 else (
+                f"每叶层只有 {n_leaf} 个珠子，涨落过大（<50 时第一峰不可引用）")
+        res.summary[f"{name}-{name} 第一峰位置 (Å)"] = float(pk["position"])
+        res.summary[f"{name}-{name} 第一峰高度 g_max"] = float(pk["height"])
+        res.summary[f"{name}-{name} 第一峰是否显著"] = (
+            "是" if sig else f"否（{why}）" if why else "否")
+        res.summary[f"{name}-{name} 原子数"] = n_leaf
     res.summary["统计帧数"] = int(n_acc)
     for note in notes_subsample:
         res.add_notes(note)
@@ -1090,6 +1200,11 @@ def analyze_rdf_inplane(mdt, groups: Mapping[str, object], selection: FrameSelec
         f"已剔除面内距离 < {_BOND_EXCLUDE:g} Å 的配对（1-2 成键）：作者的实现对每个脂质"
         "只取一个头基珠子、不存在分子内配对；若对整个组分统计而不剔除，最近邻就是共价键，"
         "会出现 0.25 Å 量级的假「第一峰」。")
+    res.add_notes(
+        "「第一峰位置」按**第一壳层**判据给出（跳过近距区、取首次下降之前的极大），"
+        "不是整条曲线的最大值 —— 叶层内珠子很少时（实测 TOCL 每叶层约 24 个珠子）"
+        "远端噪声尖峰会让「全区间最大值」落到几十 Å 处，那个位置没有物理含义。"
+        "「第一峰是否显著」按 g_max ≥ 1.2 判定，与 3D g(r) 用同一阈值。")
     return res
 
 
@@ -1220,7 +1335,10 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
             n_kept_pairs += int(keep.sum())
         else:
             n_kept_pairs += int(pairs.shape[0])
-            if pairs.size and ma is not None:
+            # ⚠️ 不能只判 `ma is not None`：`mb` 在异组（same=False）时可能为 None
+            # （B 组没有分子信息），下面立刻下标访问就会
+            # `TypeError: 'NoneType' object is not subscriptable`（实测 MS 体系踩过）。
+            if pairs.size and ma is not None and (same or mb is not None):
                 mi = ma[np.asarray(pairs[:, 0], dtype=np.int64)]
                 mj = (ma if same else mb)[np.asarray(pairs[:, 1], dtype=np.int64)]
                 n_intra_pairs += int(np.sum(mi == mj))
@@ -1380,8 +1498,13 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
             key = int(occ_key[idx])
             ia, ib = divmod(key, nb_u)
             ra, rb = atoms[int(ia)], atoms[int(ib)]
+            # ⚠️ 不是每个拓扑都有 residue 信息：`.xyz` 顶多只有原子名，
+            # 甚至二者皆无 —— 直接读 `.resname` 会抛
+            # `NoDataError: This Universe does not contain resname information`
+            # 把整项接触分析搞崩（实测：无 resname 的合成体系）。这里逐段降级：
+            # `resname+resid(name)` → `name` → `#索引`。
             res.summary[f"最持久接触对 #{rank}"] = (
-                f"{ra.resname}{ra.resid}({ra.name}) – {rb.resname}{rb.resid}({rb.name})"
+                f"{_atom_label(ra)} – {_atom_label(rb)}"
                 f"  占据率 {occ[idx]:.3f}")
         # 占据率分布
         e = np.linspace(0.0, 1.0, 21)

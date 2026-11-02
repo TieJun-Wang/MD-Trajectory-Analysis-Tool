@@ -13,7 +13,7 @@
    再求模），它才是识别固-液最稳的判据：单原子 q_l 在液相里也会有涨落，而 q̄_l 在
    液相里被邻居平均压低。
 
-   解析参考值（本模块的测试就是拿它钉死实现，见 ``selftest.py``）：
+   解析参考值（本模块的测试就是拿它钉死实现，见 ``test/selftest.py``）：
 
    ============  ========  ========
    结构            q4        q6
@@ -312,10 +312,10 @@ def analyze_boo(mdt, ag, selection: FrameSelection, *,
     times = np.asarray(selection.times_ps, dtype=float)
     n_f = times.size
     u = mdt.universe
-    ls = [int(x) for x in l_list]
-    keys = [f"q{l}" for l in ls] + ([f"q{l}bar" for l in ls] if averaged else [])
-    series = {k: np.full((n_f, ag.n_atoms), np.nan) for k in keys}
-    n_nb = np.full((n_f, ag.n_atoms), np.nan)
+    # 抽稀必须放在**分配输出数组之前**：series / n_nb 的列数要等于真正参与计算的
+    # 原子数（sub 的），否则 "ag 45005 列 而 q 只有 7565 个" 会在赋值时抛
+    # ValueError: could not broadcast ... —— 46 体系（polymer 组分 45,005 原子，
+    # 超过逐原子球谐上限 8,000）实测就是这样整项崩掉的。
     sub = ag
     note_sub = ""
     if ag.n_atoms > 8000:                    # 逐原子球谐是大开销，给个上限
@@ -324,6 +324,11 @@ def analyze_boo(mdt, ag, selection: FrameSelection, *,
         sub, n0, n1, how = _subsample_group(ag, 8000)
         note_sub = (f"分析对象 {n0:,} 个原子超过逐原子球谐的实用上限，"
                     f"已抽稀到 {n1:,} 个（{how}）——q_l 是**局部**量，抽稀不改分布。")
+    n_sel = int(sub.n_atoms)
+    ls = [int(x) for x in l_list]
+    keys = [f"q{l}" for l in ls] + ([f"q{l}bar" for l in ls] if averaged else [])
+    series = {k: np.full((n_f, n_sel), np.nan) for k in keys}
+    n_nb = np.full((n_f, n_sel), np.nan)
 
     cut = cutoff
     for k, (_frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):

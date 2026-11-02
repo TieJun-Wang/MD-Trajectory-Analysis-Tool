@@ -138,12 +138,12 @@ export const api = {
   close: (sid) => request(`/session/${sid}`, { method: 'DELETE' }),
 }
 
-/** 自动匹配同名轨迹文件（选完 tpr 后找同目录的 xtc/trr/dcd） */
+/** 自动匹配同名轨迹文件（选完 tpr 后找同目录的 xtc/trr/dcd…） */
 export function guessTrajectory(topologyPath, files) {
   if (!topologyPath) return null
   const stem = topologyPath.replace(/\.[^.]+$/, '')
   const exts = ['.xtc', '.trr', '.dcd', '.nc', '.ncdf', '.trj', '.trz',
-    '.tng', '.lammpstrj', '.dump', '.mdcrd', '.h5md', '.gsd']
+    '.tng', '.lammpstrj', '.dump', '.lammpsdump', '.mdcrd', '.h5md', '.gsd']
   for (const ext of exts) {
     const hit = files.find((f) => f.path === stem + ext)
     if (hit) return hit.path

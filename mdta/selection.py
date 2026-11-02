@@ -16,6 +16,8 @@ from typing import Iterable, Sequence
 
 import numpy as np
 
+from .topology import residue_names
+
 # 常见水分子 / 离子 residue 名（GROMACS、AMBER、CHARMM 命名习惯）
 WATER_RESNAMES = {
     "SOL", "HOH", "WAT", "H2O", "OH2", "TIP", "TIP2", "TIP3", "TIP3P", "TIP4P",
@@ -120,7 +122,7 @@ def classify_residues(universe) -> "OrderedDict[str, np.ndarray]":
     n_res = u.residues.n_residues
     labels = np.array(["other"] * n_res, dtype=object)
 
-    resnames = np.asarray(u.residues.resnames, dtype=str)
+    resnames = residue_names(u)
     res_counts = np.bincount(np.asarray(u.atoms.resindices, dtype=int), minlength=n_res)
 
     is_water = np.isin(resnames, list(WATER_RESNAMES))
@@ -234,6 +236,21 @@ class ChainType:
         return f"{self.label}: 共 {self.count} 个碎片 —— {parts}"
 
 
+def _first_resname(ag) -> str:
+    """取第一个原子的残基名；拓扑若**没有 resnames**（LAMMPS data）返回空串。
+
+    g.resnames 在缺属性时抛 NoDataError，而链清单（list_chains）与
+    chains() 是打开体系必走的路径 —— 一个缺属性就能让整个体系打不开。
+    """
+    try:
+        return str(ag.resnames[0]) if ag.n_atoms else ""
+    except Exception:                                        # noqa: BLE001
+        try:
+            return str(residue_names(ag.universe)[int(ag.resindices[0])]) if ag.n_atoms else ""
+        except Exception:                                    # noqa: BLE001
+            return ""
+
+
 def _fragments(universe) -> list:
     """返回分子/链列表，**元素一定是 AtomGroup**（这点很关键）。
 
@@ -284,7 +301,7 @@ def list_chains(universe, min_atoms: int = 1) -> list[ChainType]:
         if f.n_atoms < min_atoms:
             continue
         seg = str(f.segids[0]) if f.n_atoms else ""
-        resn = str(f.resnames[0]) if f.n_atoms else ""
+        resn = _first_resname(f)
         key = (seg, resn)
         if key not in buckets:
             label = f"{seg}:{resn}" if seg else resn
@@ -316,7 +333,7 @@ def chains(universe, *, segid: str | None = None, resname: str | None = None,
             continue
         if segid is not None and str(f.segids[0]) != segid:
             continue
-        if resname is not None and str(f.resnames[0]) != resname:
+        if resname is not None and _first_resname(f) != resname:
             continue
         out.append(f)
     return out
