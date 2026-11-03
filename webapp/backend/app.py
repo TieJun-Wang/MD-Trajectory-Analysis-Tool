@@ -286,6 +286,30 @@ async def session_run(sid: str, payload: Mapping[str, Any] = Body(...)) -> JSONR
 
 
 # ---------------------------------------------------------------- 实时运行
+@app.get("/api/session/{sid}/state")
+def session_state(sid: str) -> dict:
+    """**刷新页面后恢复现场**：体系信息 + 选择 + 帧选择 + 全部结果 + 运行状态。
+
+    分析跑在后端线程里，F5 只是前端断开连接 —— 所以这里把"当前有什么"
+    一次性交给新的页面实例，正在跑的任务继续跑，前端接着轮询进度。
+    """
+    sess = _sess(sid)
+    try:
+        return sess.state()
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.post("/api/session/{sid}/clear")
+def session_clear(sid: str) -> dict:
+    """清空已有结果（界面上"清空结果重跑"）。"""
+    sess = _sess(sid)
+    try:
+        return sess.clear_results()
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
 @app.post("/api/session/{sid}/run/start")
 def session_run_start(sid: str, payload: Mapping[str, Any] = Body(...)) -> dict:
     """开始跑分析并**立即返回**；之后用 ``GET /run/progress`` 拉增量结果。"""

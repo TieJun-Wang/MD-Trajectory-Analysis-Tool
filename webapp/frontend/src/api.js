@@ -115,6 +115,16 @@ export const api = {
   runProgress: (sid, after = 0) =>
     request(`/session/${sid}/run/progress?after=${after}`),
 
+  /**
+   * **刷新页面后恢复现场**：体系信息 + 选择 + 帧选择 + 全部已完成结果 + 运行状态。
+   * 分析跑在后端线程里，所以 F5 只断开前端连接，任务本身继续；恢复后接着轮询即可。
+   */
+  sessionState: (sid) => request(`/session/${sid}/state`),
+
+  /** 清空已有结果（"清空结果重跑"按钮） */
+  clearResults: (sid) =>
+    request(`/session/${sid}/clear`, { method: 'POST' }),
+
   /** 「文件读取」进度（打开文件时并发轮询，token 由前端生成） */
   openProgress: (token) =>
     request(`/session/open/progress?token=${encodeURIComponent(token)}`),

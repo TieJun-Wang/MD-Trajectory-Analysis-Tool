@@ -3,24 +3,41 @@
  *
  * 一次只显示一张图（由父组件通过 title/结果决定显示哪张），
  * 图表自适应容器大小；缩放 / 平移 / hover / 图例开关由 ECharts 提供。
+ *
+ * 图例只剩**一条曲线**时（用户点掉了其它曲线），按这条曲线的数据自适应
+ * 坐标轴（轴型 + 范围），保证它的全部数据点都能画出来 —— 见
+ * `chartOption.pickScaleByData`。这里只更新坐标轴，不动 series / 缩放状态。
  */
 import { useEffect, useRef } from 'react'
 import * as echarts from 'echarts'
 import { buildOption } from '../chartOption'
 
 export default function ChartView({ result, panelIndex, height = '100%',
-                                   onVisibleChange }) {
+                                   onVisibleChange, visible = null }) {
   const boxRef = useRef(null)
   const chartRef = useRef(null)
+  // 最近一次「可见曲线」：图例事件里直接读它，避免闭包拿到旧值
+  const visibleRef = useRef(null)
 
   // 初始化 / 销毁
   useEffect(() => {
     if (!boxRef.current) return undefined
     const chart = echarts.init(boxRef.current, null, { renderer: 'canvas' })
-    // 图例点选 → 上报"当前可见的曲线"，供右侧说明区动态过滤
+    // 图例点选 → 上报"当前可见的曲线"（供右侧说明区过滤），同时让坐标轴跟着变
     chart.on('legendselectchanged', (ev) => {
       const vis = Object.entries(ev.selected || {}).filter(([, v]) => v).map(([k]) => k)
+      visibleRef.current = vis
       onVisibleChange?.(vis)
+      const res = chart.__mdta_result
+      const idx = chart.__mdta_panel
+      if (res && vis.length === 1) {
+        const opt = buildOption(res, idx, vis)
+        // 只换坐标轴：series / dataZoom / 图例选中态都保留
+        chart.setOption({ xAxis: opt.xAxis, yAxis: opt.yAxis }, { lazyUpdate: true })
+      } else if (res) {
+        const opt = buildOption(res, idx, null)
+        chart.setOption({ xAxis: opt.xAxis, yAxis: opt.yAxis }, { lazyUpdate: true })
+      }
     })
     chartRef.current = chart
 
@@ -55,10 +72,22 @@ export default function ChartView({ result, panelIndex, height = '100%',
   useEffect(() => {
     const chart = chartRef.current
     if (!chart || !result) return
+    chart.__mdta_result = result
+    chart.__mdta_panel = panelIndex
     chart.clear()
-    chart.setOption(buildOption(result, panelIndex), true)
+    chart.setOption(buildOption(result, panelIndex, null), true)
+    visibleRef.current = null
     onVisibleChange?.(null)   // 换图/换面板时清掉上一次的图例筛选
   }, [result, panelIndex])
+
+  // 外部（父组件）改动可见曲线时，同步坐标轴
+  useEffect(() => {
+    const chart = chartRef.current
+    if (!chart || !result) return
+    if (visible === null || visible === undefined) return
+    const opt = buildOption(result, panelIndex, visible)
+    chart.setOption({ xAxis: opt.xAxis, yAxis: opt.yAxis }, { lazyUpdate: true })
+  }, [visible, result, panelIndex])
 
   return <div ref={boxRef} className="chart-box" style={{ height }} />
 }

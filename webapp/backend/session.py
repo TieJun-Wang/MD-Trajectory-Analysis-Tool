@@ -41,6 +41,10 @@ class OpenProgress:
         self.stages: list[dict] = []
         self.done = False
         self.error = ""
+        # 完成后的会话 id / 本次打开的文件：前端 F5 后靠它把会话接回来
+        self.sid: str = ""
+        self.topology: str = ""
+        self.trajectory: str = ""
         self._lock = threading.Lock()
 
     def __call__(self, stage: str, **info) -> None:
@@ -62,6 +66,10 @@ class OpenProgress:
             "n_stages": len(stages),
             "done": bool(self.done),
             "error": self.error,
+            # 刷新恢复用：会话建好后前端凭 `sid` 直接接回（见 App.restoreSession）
+            "sid": self.sid,
+            "topology": self.topology,
+            "trajectory": self.trajectory,
         }
 from mdta.pipeline import (ANALYSIS_TITLES, DEFAULT_ORDER, Analyzer,
                            sort_by_estimate)
@@ -170,6 +178,8 @@ class RunJob:
     ``GET /run/progress?after=N`` 只取自己还没有的结果，从而边算边显示。
     """
 
+    #: extend 模式下已有结果的条数（completion 列表里排在最前面）
+    preexisting: int = 0
     order: list[str] = field(default_factory=list)
     #: 已完成的**分析名，按完成顺序**——``after`` 索引就是它的下标
     completion: list[str] = field(default_factory=list)
@@ -472,6 +482,68 @@ class Session:
                 (name, serialize.result_to_json(res)) for name, res in raw.items())
             return self._payload(prep)
 
+    # ------------------------------------------------------------- 状态恢复
+    def state(self) -> dict:
+        """完整的会话快照：前端 **F5 刷新后**据此把界面恢复原样。
+
+        包含：体系信息、组分/链清单、当前选择、帧选择、**全部已完成结果**、
+        以及后台运行的当前状态（正在跑 / 已跑完 / 报错）。
+        分析本身跑在后端线程里，所以刷新页面**不会**让计算停下来，
+        前端恢复后接着拉进度即可；只有显式「取消」才会停。
+        """
+        with self._lock:
+            az = self.az
+            sel_info = {
+                "primary_label": az.primary_label,
+                "primary_atoms": int(az.primary.n_atoms) if az.primary is not None else 0,
+                "primary_molecules": self.primary_molecules(),
+                "components": self.components(),
+            }
+            frames = None
+            try:
+                fs = self.az.frames
+                if fs is not None:
+                    frames = {
+                        "n_frames": fs.n_frames,
+                        "describe": fs.describe(),
+                        "notes": list(fs.notes),
+                        "start_ps": getattr(fs, "start_ps", None),
+                        "stop_ps": getattr(fs, "stop_ps", None),
+                        "equil_ps": getattr(fs, "equil_ps", None),
+                        "interval_ps": getattr(fs, "interval_ps", None),
+                    }
+            except Exception:                                # noqa: BLE001
+                frames = None
+            prog = self.run_progress(0)
+            prog.pop("results", None)       # 完整结果走顶层 results
+            prog.pop("summary_rows", None)
+            prog.pop("titles", None)
+            return {
+                "sid": self.sid,
+                "info": self.info(),
+                "load_notes": self.load_notes(),
+                "chains": self.chains(),
+                "components": self.components(),
+                "selection": sel_info,
+                "frames": frames,
+                "results": self.results_json,
+                "summary_rows": serialize.summary_rows(self.results_json),
+                "titles": {k: ANALYSIS_TITLES.get(k, k) for k in DEFAULT_ORDER},
+                "timings": dict(getattr(self.az, "timings", {})),
+                "elapsed_sec": round(sum(getattr(self.az, "timings", {}).values()), 2),
+                "job": prog,
+            }
+
+    def clear_results(self) -> dict:
+        """清空已有结果（界面上"清空结果重跑"用）。"""
+        with self._lock:
+            self.assert_idle()
+            self.results_json = OrderedDict()
+            self.az.results = OrderedDict()
+            self.az.timings = {}
+            self._job = None
+        return {"ok": True, "results": 0}
+
     # ------------------------------------------------------- 实时（流式）运行
     @property
     def job(self) -> "RunJob | None":
@@ -484,15 +556,34 @@ class Session:
             raise SessionError("分析正在运行中，请先等待完成或点「取消」")
 
     def start_run(self, req: Mapping[str, Any]) -> dict:
-        """**立即返回**并在线程里跑分析；前端轮询 :meth:`run_progress` 拿增量结果。"""
+        """**立即返回**并在线程里跑分析；前端轮询 :meth:`run_progress` 拿增量结果。
+
+        ``extend=True``（用户要求）：**保留已有结果**，只算本次请求的分析项，
+        算完把新结果并进去 —— 这样"先跑几项、再补几项"不用重算前面的。
+        默认 ``extend=False`` = 清空重跑（老行为）。
+        """
+        req = dict(req or {})
+        extend = bool(req.get("extend"))
         with self._lock:
             self.assert_idle()
             prep = self._prepare_run(req)
             job = RunJob(order=list(prep["which"]))
-            # 新一轮开始：清空上一轮，避免旧结果与新选择混在一起
-            self.results_json = OrderedDict()
-            self.az.results = OrderedDict()
-            self.az.timings = {}
+            if extend:
+                # 已有结果全部预填进 completion，这样 after 仍表示
+                # "客户端手上已有几条结果"（前端带着旧结果，索引必须对得上）。
+                have = list(self.results_json)
+                job.preexisting = len(have)
+                job.completion = list(have)
+                skip = [n for n in prep["which"] if n in self.results_json]
+                job.message = (
+                    f"扩展分析：保留已有的 {len(have)} 项结果"
+                    + (f"，本次选中的 {len(skip)} 项已有结果、直接跳过" if skip else "")
+                    + f"，新算 {len(prep["which"]) - len(skip)} 项")
+            else:
+                # 新一轮开始：清空上一轮，避免旧结果与新选择混在一起
+                self.results_json = OrderedDict()
+                self.az.results = OrderedDict()
+                self.az.timings = {}
             self._job = job
         th = threading.Thread(target=self._run_worker, args=(prep,),
                               name=f"mdta-run-{self.sid}", daemon=True)
@@ -588,7 +679,16 @@ class Session:
                         if not prep.get("estimate", True)
                         else "只勾选了 1 项，无需预估排序，直接跑")
 
-            self.az.run_all(prep["which"], params=prep["params"], outdir=None,
+            # 扩展模式：已经在结果里的项不再重算（省掉重复计算）
+            to_run = [n for n in prep["which"] if n not in self.results_json]
+            if not to_run:
+                with self._lock:
+                    job.status = "done"
+                    job.frac = 1.0
+                    job.message = "这些分析项都已经有结果，无需重算"
+                    job.finished = time.time()
+                return
+            self.az.run_all(to_run, params=prep["params"], outdir=None,
                             verbose=False, raise_errors=False,
                             progress=_progress, on_result=_on_result,
                             order="shortest" if estimates else "given",
@@ -645,7 +745,7 @@ class Session:
                 "estimate_note": job.estimate_note,
                 "after": after,
                 "n_total": len(job.order),
-                "n_done": len(job.completion),
+                "n_done": max(0, len(job.completion) - job.preexisting),
                 "order": list(job.order),
                 "completion": list(job.completion),
                 "pending": [n for n in job.order if n not in job.completion],
@@ -845,6 +945,8 @@ class SessionRegistry:
         prog: OpenProgress | None = None
         if progress_token:
             prog = OpenProgress()
+            prog.topology = str(topology or "")
+            prog.trajectory = str(trajectory or "")
             with self._prog_lock:
                 self._open_progress[progress_token] = prog
                 if len(self._open_progress) > 8:          # 只留最近几次
@@ -919,6 +1021,7 @@ class SessionRegistry:
         _progress("完成")
         if prog is not None:
             prog.done = True
+            prog.sid = sid          # 刷新后前端据此接回会话
         sess = Session(sid=sid, az=az, outdir=outdir)
 
         with self._lock:

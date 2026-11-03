@@ -17,14 +17,35 @@
 from __future__ import annotations
 
 import math
+import os
 from typing import Any, Mapping
 
 import numpy as np
 
 from mdta.qc import checks_digest
 
-#: 单条曲线返回给前端的最大点数（超过则等间隔抽稀，并标记 ``downsampled``）
-MAX_POINTS = 4000
+
+def _max_points_from_env() -> int | None:
+    """单条曲线返回给前端的点数上限；``0``/``空``/``off`` = **不抽稀**（默认）。
+
+    为什么默认改成不抽稀：用户要看**完整分辨率**的曲线与数据表 —— 抽稀只发生在
+    展示层，数值（D、误差棒、QC）本来就用全量数据算，展示时再丢 1/3 的点会让人
+    怀疑"是不是少算了"。代价是 JSON 更大、前端渲染更慢，需要时可以调回去：
+
+        set MDTA_MAX_POINTS=4000      # 恢复等间隔抽稀（保留末点）
+        set MDTA_MAX_POINTS=0         # （默认）原样返回全部点
+    """
+    raw = str(os.environ.get("MDTA_MAX_POINTS", "0")).strip().lower()
+    if raw in ("", "0", "none", "off", "false", "all"):
+        return None
+    try:
+        return max(2, int(float(raw)))
+    except ValueError:
+        return None
+
+
+#: 单条曲线返回给前端的最大点数；``None`` = 不抽稀（默认，见上面的环境变量说明）
+MAX_POINTS: int | None = _max_points_from_env()
 
 
 def _num(v: Any) -> Any:
@@ -41,16 +62,20 @@ def _num(v: Any) -> Any:
     return v
 
 
-def _downsample(x: np.ndarray, y: np.ndarray, max_points: int = MAX_POINTS):
-    """曲线太长时等间隔抽稀（并保留末点），避免 JSON 过大拖慢前端。"""
+def _downsample(x: np.ndarray, y: np.ndarray,
+                max_points: int | None = MAX_POINTS):
+    """曲线太长时等间隔抽稀（并保留末点）。
+
+    ``max_points`` 为 ``None`` / ``0`` → **原样返回**（不抽稀，当前默认行为）。
+    """
     n = int(x.size)
-    if n <= max_points:
+    if not max_points or n <= max_points:
         return x, y, False
     idx = np.unique(np.linspace(0, n - 1, int(max_points)).round().astype(int))
     return x[idx], y[idx], True
 
 
-def curve_to_json(curve, max_points: int = MAX_POINTS) -> dict:
+def curve_to_json(curve, max_points: int | None = MAX_POINTS) -> dict:
     x, y, ds = _downsample(np.asarray(curve.x, dtype=float),
                            np.asarray(curve.y, dtype=float), max_points)
     return {
@@ -78,7 +103,7 @@ def panel_to_json(result, index: int) -> dict:
     }
 
 
-def result_to_json(result, max_points: int = MAX_POINTS) -> dict:
+def result_to_json(result, max_points: int | None = MAX_POINTS) -> dict:
     n_panels = max(result.panel_count, 1)
     return {
         "name": result.name,
@@ -99,7 +124,7 @@ def result_to_json(result, max_points: int = MAX_POINTS) -> dict:
     }
 
 
-def results_to_json(results: Mapping[str, Any], max_points: int = MAX_POINTS) -> dict:
+def results_to_json(results: Mapping[str, Any], max_points: int | None = MAX_POINTS) -> dict:
     """``{分析名: AnalysisResult}`` -> ``{分析名: {...}}``（保持顺序）。"""
     return {name: result_to_json(res, max_points) for name, res in results.items()}
 

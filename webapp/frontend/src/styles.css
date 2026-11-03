@@ -1188,3 +1188,31 @@ table.filetable td { text-align: center; vertical-align: middle; }
     --nav-width: 200px;
   }
 }
+
+/* ---------------------------------------------------------------- 进度条
+   用户要求：读取/计算时进度条要**动态闪烁**，别让人以为卡死了；并显示已用时间。 */
+.progress { position: relative; overflow: hidden; }
+.progress .bar.shimmer::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, rgba(255,255,255,0) 0%,
+    rgba(255,255,255,0.55) 50%, rgba(255,255,255,0) 100%);
+  animation: mdta-shimmer 1.15s linear infinite;
+}
+@keyframes mdta-shimmer {
+  from { transform: translateX(-100%); }
+  to   { transform: translateX(100%); }
+}
+/* 进度未知（刚起步 / 无法估算）时：来回跑的条子 + 更明显的流光 */
+.progress .bar.indeterminate {
+  width: 38% !important;
+  animation: mdta-indet 1.5s ease-in-out infinite;
+}
+@keyframes mdta-indet {
+  0%   { margin-left: 0%; }
+  50%  { margin-left: 62%; }
+  100% { margin-left: 0%; }
+}
+.progress-meta { display: flex; gap: 8px; align-items: baseline; }
+.progress-meta .elapsed { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }

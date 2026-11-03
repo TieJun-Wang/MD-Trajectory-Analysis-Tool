@@ -890,6 +890,8 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 n_error_blocks: int = 5,
                 memory_budget: float | None = DEFAULT_MEMORY_BUDGET,
                 stream: bool | None = None, dtype=None, workers: int = 0,
+                tau_intervals: int | None = None,
+                max_lag: int | None = None,
                 max_lag_frames: int | None = None,
                 block_frames: int | None = None,
                 verbose: bool = False) -> AnalysisResult:
@@ -914,6 +916,15 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         **它的作用是省内存/支持流式**（常数内存，长轨迹也能跑），不是加速 ——
         实测 1001 帧时反而略慢（47.9 s → 57.4 s）。要省时间请减少帧数。
         代价是 τ 越接近块长样本越少，拟合窗口应落在 τ ≤ max_lag_frames 之内。
+    tau_intervals
+        **可选的 τ 上限**：把总时长均分成 ``tau_intervals`` 个区间，MSD 只画/只拟合到
+        **一个区间的长度**（例如 5 → τ_max = 总时长 / 5）。
+        **默认 ``None`` = 用满整条轨迹**（用户要求：6000 ps 的轨迹就该看到 0–6000 ps，
+        不要悄悄截成 1200 ps）。想收缩范围时再在界面填「时间区间数」
+        （5 = 每段 T/5，10 = T/10）。
+    max_lag
+        直接指定 τ 上限（帧数，不经过 ``tau_intervals`` 换算）；``None`` 时由
+        ``tau_intervals`` 决定。两者都给时 ``max_lag`` 优先。
     block_frames
         分段模式下的块长（帧）；``None`` 时取 ``2·max_lag_frames+1``。
     remove_drift
@@ -926,19 +937,49 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
     if not groups:
         raise ValueError("必须提供至少一个组分")
 
+    # ---- τ 上限：默认把总时长**均分成 5 个区间**，只用到其中一个区间的长度
+    n_frame = int(len(selection.indices))
+    tau_cap: int | None = max_lag
+    tau_note = ""
+    try:
+        n_int = int(tau_intervals or 0)
+    except (TypeError, ValueError):
+        n_int = 0
+    if tau_cap is None and n_int >= 1 and n_frame >= 2:
+        tau_cap = max(1, (n_frame - 1) // n_int)
+        # 帧数太少时不截断：6 帧按 5 段切只剩 τ=1 一个点，拟合直接失效。
+        if tau_cap < 8 or n_frame < 20:
+            tau_note = (f"帧数只有 {n_frame}，未按总时长均分 {n_int} 段截断 τ"
+                        f"（否则 τ 只剩 {tau_cap} 步，拟合没有意义）")
+            tau_cap = None
+        else:
+            tau_note = (
+                f"τ 上限 = 总时长 / {n_int} 段 = {tau_cap} 帧"
+                f"（共 {n_frame - 1} 个 τ 步，占整条轨迹的"
+                f" {tau_cap / float(n_frame - 1) * 100:.0f}%）")
+
     res = AnalysisResult(
         name="msd",
         title="均方位移 MSD",
-        meta={"n_frames": int(len(selection.indices)),
+        meta={"n_frames": n_frame,
               "fit_fraction": list(map(float, fit_fraction)), "dim": int(dim),
-              "object": str(object), "remove_drift": bool(remove_drift)},
+              "object": str(object), "remove_drift": bool(remove_drift),
+              "tau_intervals": n_int, "tau_max_frames": tau_cap},
     )
+    # 坐标轴**保持原来的双对数**（用户要求：改回原来的样子）。
+    # "想看全部数据点"这种情况由前端处理：在图例里**只留下一条曲线**时，
+    # `chartOption.js` 会按那条曲线自己的数据自适应横/纵轴（含 τ=0 这种
+    # 对数轴画不出来的点会改走线性），并把范围收到数据本身。
+    # 横轴保留对数，**纵轴改线性** —— 用户明确要求：
+    # 「msd 图表纵坐标为什么还是对数，你改为线性的给我看看」。
     res.panels = [
         Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)", title="MSD 随时间间隔变化",
-              xscale="log", yscale="log"),
-        Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)", title="MSD 线性区拟合"),
+              xscale="log", yscale="linear"),
+        Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)", title="MSD 线性区拟合",
+              xscale="linear", yscale="linear"),
         Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)",
-              title="各轴分解与各向异性（x/y/z 及 ∥、⊥）"),
+              title="各轴分解与各向异性（x/y/z 及 ∥、⊥）",
+              xscale="linear", yscale="linear"),
     ]
 
     fail_by_group: dict[str, float] = {}
@@ -952,6 +993,7 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                                             memory_budget=memory_budget,
                                             stream=stream, dtype=dtype,
                                             workers=workers,
+                                            max_lag=tau_cap,
                                             max_lag_frames=max_lag_frames,
                                             block_frames=block_frames,
                                             verbose=verbose)
@@ -1012,6 +1054,8 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         res.summary[f"{name} 序列存储"] = str(diag.get("存储") or "")
         res.summary[f"{name} 去漂移"] = "是" if diag.get("去漂移") else "否"
         res.summary[f"{name} 算法"] = str(diag.get("算法", ""))
+        res.summary[f"{name} τ 上限 (ps)"] = float(lag_t[-1]) if lag_t.size else float("nan")
+        res.summary[f"{name} τ 轴点数"] = int(lag_t.size)
         res.summary[f"{name} MSD(最大 τ) (Å²)"] = float(y_tot[-1]) if y_tot.size else float("nan")
         res.summary[f"{name} MSD∥(最大 τ) (Å²)"] = float(msd["para"][-1]) if lag_t.size else float("nan")
         res.summary[f"{name} MSD⊥(最大 τ) (Å²)"] = float(msd["perp"][-1]) if lag_t.size else float("nan")
@@ -1059,6 +1103,13 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
 
     bad_fail = [n for n, f in fail_by_group.items() if f > 0.20]
     res.add_notes("MSD = <|r(t+τ) − r(t)|²>，对全部时间起点与全部粒子求平均。")
+    if tau_note:
+        res.add_notes(tau_note + "。这样做是为了让横轴范围合理：τ 接近整条轨迹长度时"
+                      "只有极少数时间起点参与平均，曲线末端的统计噪声很大，"
+                      "而且分子可能早已跑出盒子。想用满整条轨迹就把「时间区间数」设为 1"
+                      "（或留空 = 不限制）。")
+    if max_lag_frames:
+        res.add_notes(f"τ 上限还受「分段模式」限制（max_lag_frames={max_lag_frames}）。")
     res.add_notes("默认追踪对象是**分子质心**：得到的是分子的平动扩散；"
                   "若选「原子」，MSD 会额外包含分子内部的振动与转动"
                   "（长 τ 下斜率仍趋于同一个 D，但截距更大）。")

@@ -30,26 +30,126 @@ function buildPoints(curve, logX, logY) {
   return pts
 }
 
-export function buildOption(result, panelIndex) {
+/** 一组数值的有限值统计（忽略 null / NaN / ±Inf）。 */
+function rangeOf(values) {
+  let lo = Infinity
+  let hi = -Infinity
+  let nonPositive = 0
+  let n = 0
+  for (const v of values) {
+    if (typeof v !== 'number' || !Number.isFinite(v)) continue
+    n += 1
+    if (v <= 0) nonPositive += 1
+    if (v < lo) lo = v
+    if (v > hi) hi = v
+  }
+  if (!n) return null
+  return { lo, hi, n, nonPositive }
+}
+
+/**
+ * 单条曲线时**按这条曲线的数据**决定用对数还是线性轴。
+ *
+ * 用户要求：「选取单个曲线的时候应该适配这个曲线的坐标方式，让其尽可能完整
+ * 展示全部时间点的数据」。两条判据：
+ *  1. **有 ≤0 的值就必须用线性**（对数轴画不出 0，例如 MSD/τ=0 那一点、
+ *     有负值的残差曲线会被整点丢掉 —— 这正是"数据看不全"的主因）；
+ *  2. 数据跨度决定对数是否有用：跨度 ≥ 2.5 个数量级才值得上对数，
+ *     否则线性更好读（小数跨度的对数轴刻度全是 10⁰/10¹ 这种噪声）。
+ */
+export function pickScaleByData(values, preferLog) {
+  const r = rangeOf(values)
+  if (!r) return preferLog ? 'log' : 'linear'
+  if (r.nonPositive > 0) return 'linear'
+  const lo = r.lo
+  const hi = r.hi
+  if (!(lo > 0) || !(hi > 0) || hi === lo) return 'linear'
+  const decades = Math.log10(hi / lo)
+  // **只降级、不升级**：面板声明线性就保持线性（用户要线性就别偷偷改回对数）；
+  // 声明对数时，跨度小于 0.7 个数量级才退回线性（对数刻度全是 10⁰/10¹ 噪声）。
+  if (!preferLog) return 'linear'
+  return decades >= 0.7 ? 'log' : 'linear'
+}
+
+/** 轴范围：线性留 2% 余量、对数按比例扩一点，保证首末点都在画布内。 */
+function axisBounds(r, scale) {
+  if (!r) return {}
+  if (scale === 'log') {
+    if (!(r.lo > 0) || !(r.hi > 0)) return {}
+    if (r.hi === r.lo) return { min: r.lo / 2, max: r.hi * 2 }
+    const pad = Math.log10(r.hi / r.lo) * 0.03
+    return { min: r.lo / 10 ** pad, max: r.hi * 10 ** pad }
+  }
+  if (r.hi === r.lo) {
+    const d = Math.abs(r.hi) * 0.05 || 1
+    return { min: r.hi - d, max: r.hi + d }
+  }
+  const pad = (r.hi - r.lo) * 0.02
+  return { min: r.lo - pad, max: r.hi + pad }
+}
+
+/**
+ * @param {object} result   一个分析结果（panels / curves / summary / notes）
+ * @param {number} panelIndex 第几张图
+ * @param {string[]|null} visible 图例里当前可见的曲线名；只留下 1 条时
+ *        按那条曲线自适应坐标（轴型），传 null/undefined = 全部可见
+ */
+export function buildOption(result, panelIndex, visible = null) {
   const panel = result.panels[panelIndex] || {
     title: result.title, xlabel: '', ylabel: '', xscale: 'linear', yscale: 'linear',
   }
-  const logX = panel.xscale === 'log'
-  const logY = panel.yscale === 'log'
   const curves = result.curves.filter((c) => c.panel === panelIndex)
+
+  // ---- 只留一条曲线时：轴型按它自己的数据选（含 0/负数 → 线性）
+  const solo = (Array.isArray(visible) && visible.length === 1)
+    ? curves.find((c) => c.label === visible[0])
+    : null
+  let xscale = panel.xscale === 'log' ? 'log' : 'linear'
+  let yscale = panel.yscale === 'log' ? 'log' : 'linear'
+  if (solo) {
+    const raw = buildPoints(solo, false, false)
+    xscale = pickScaleByData(raw.map((p) => p[0]), xscale === 'log')
+    yscale = pickScaleByData(raw.map((p) => p[1]), yscale === 'log')
+  }
+  const logX = xscale === 'log'
+  const logY = yscale === 'log'
+
+  // ---- 轴范围 = 当前可见曲线的数据范围（小余量，见 axisBounds）
+  const shown = (Array.isArray(visible) && visible.length)
+    ? curves.filter((c) => visible.includes(c.label))
+    : curves
+  const pool = shown.length ? shown : curves
+  const xsAll = []
+  const ysAll = []
+  for (const c of pool) {
+    for (const p of buildPoints(c, false, false)) {
+      xsAll.push(p[0])
+      ysAll.push(p[1])
+    }
+  }
+  const xBounds = axisBounds(
+    rangeOf(logX ? xsAll.filter((v) => v > 0) : xsAll), xscale)
+  const yBounds = axisBounds(
+    rangeOf(logY ? ysAll.filter((v) => v > 0) : ysAll), yscale)
 
   const legend = []
   const series = curves.map((c, ci) => {
     legend.push(c.label)
     const data = buildPoints(c, logX, logY)
     const color = PALETTE[ci % PALETTE.length]
+    // ⚠️ 用户要求"图表不抽稀"：这里**不能**开 ECharts 的降采样/大数组渲染
+    //    - LTTB 降采样会按像素宽度把折线压到几百个点（放大后看不出来，
+    //      但导出的图与 hover 读数都是压缩后的）—— 已移除；
+    //    - large 渲染路径（>3000 点自动切换）同样可能丢点 —— 已移除；
+    //    6001 点的折线 ECharts 直接画完全没问题，只是动画要关掉。
     const common = {
       name: c.label,
       data,
       color,
-      large: data.length > 3000,
-      largeThreshold: 3000,
       animation: data.length < 2000,
+      // 点不太密时画出数据点标记，方便确认"每一帧都在图上"
+      showSymbol: data.length <= 1200,
+      symbolSize: 4,
     }
     if (c.kind === 'bar') {
       return { ...common, type: 'bar', barMaxWidth: 26, itemStyle: { opacity: 0.85 } }
@@ -60,11 +160,8 @@ export function buildOption(result, panelIndex) {
     return {
       ...common,
       type: 'line',
-      showSymbol: false,
-      symbol: 'none',
       step: c.kind === 'step' ? 'middle' : false,
       lineStyle: { width: 1.9 },
-      sampling: 'lttb',
     }
   })
 
@@ -127,6 +224,7 @@ export function buildOption(result, panelIndex) {
       axisLabel: { hideOverlap: true, fontSize: 11 },
       splitLine: { show: true, lineStyle: { color: '#eef1f5' } },
       minorTick: { show: logX },
+      ...xBounds,
     },
     yAxis: {
       type: logY ? 'log' : 'value',
@@ -137,9 +235,22 @@ export function buildOption(result, panelIndex) {
       axisLabel: { hideOverlap: true, fontSize: 11 },
       splitLine: { show: true, lineStyle: { color: '#eef1f5' } },
       minorTick: { show: logY },
+      ...yBounds,
     },
     series,
   }
+}
+
+/** 只有一条曲线可见时，这句会告诉界面"现在是按这条曲线自适应坐标"。 */
+export function soloAxisInfo(result, panelIndex, visible) {
+  if (!Array.isArray(visible) || visible.length !== 1) return null
+  const panel = result.panels?.[panelIndex]
+  const c = result.curves?.find((x) => x.panel === panelIndex && x.label === visible[0])
+  if (!c || !panel) return null
+  const raw = buildPoints(c, false, false)
+  const xscale = pickScaleByData(raw.map((p) => p[0]), panel.xscale === 'log')
+  const yscale = pickScaleByData(raw.map((p) => p[1]), panel.yscale === 'log')
+  return { label: c.label, xscale, yscale }
 }
 
 /** 图表里的统计量卡片内容 */

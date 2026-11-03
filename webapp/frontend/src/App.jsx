@@ -30,6 +30,7 @@ import {
   ParamBlock,
   RunBlock,
   SelectionBlock,
+  fmtElapsed,
 } from './components/SetupPanel'
 
 //: 结果区标签页。统计量与导出是**两个同级的独立页面**：
@@ -90,8 +91,20 @@ export default function App() {
   const [estimateOn, setEstimateOn] = useState(true)
   const [live, setLive] = useState(null)
   const [error, setError] = useState('')
-  const [opsCollapsed, setOpsCollapsed] = useState(false)
-  const [notesCollapsed, setNotesCollapsed] = useState(false)
+  // 折叠状态要**跨刷新保持**（用户：F5 之后操作台/说明栏都被自动展开了）
+  const readBool = (key, dflt) => {
+    try {
+      const v = window.localStorage.getItem(key)
+      return v == null ? dflt : v === '1'
+    } catch { return dflt }
+  }
+  const writeBool = (key, v) => {
+    try { window.localStorage.setItem(key, v ? '1' : '0') } catch { /* 隐私模式 */ }
+  }
+  const [opsCollapsed, setOpsCollapsed] = useState(() => readBool('mdta.opsCollapsed', false))
+  const [notesCollapsed, setNotesCollapsed] = useState(() => readBool('mdta.notesCollapsed', false))
+  useEffect(() => { writeBool('mdta.opsCollapsed', opsCollapsed) }, [opsCollapsed])
+  useEffect(() => { writeBool('mdta.notesCollapsed', notesCollapsed) }, [notesCollapsed])
   // 当前图表里**仍然显示**的曲线（由图例点选决定）：说明区据此动态过滤
   const [visibleCurves, setVisibleCurves] = useState(null)
   const abortRef = useRef(null)
@@ -103,6 +116,110 @@ export default function App() {
     setLog((prev) => [...prev.slice(-300), `[${ts}] ${line}`])
   }, [])
 
+  // 刷新恢复：把 sid 存在 localStorage，F5 之后据此把整个界面接回去
+  const SID_KEY = 'mdta.sid'
+
+  // 轮询一次并合并结果（doRun 与"刷新后接着跑"共用）
+  const pumpOnce = async (sid, acc, got) => {
+    const p = await api.runProgress(sid, got)
+    let nextGot = got
+    const fresh = Object.entries(p.results || {})
+    for (const [name, res] of fresh) acc.results[name] = res
+    nextGot += fresh.length
+    const merged = {
+      results: { ...acc.results },
+      timings: p.timings || acc.timings || {},
+      titles: p.titles || acc.titles || {},
+      frames: p.frames || acc.frames || null,
+      summary_rows: p.summary_rows || acc.summary_rows || [],
+      elapsed_sec: p.elapsed_sec,
+    }
+    setRun(merged)
+    setProgress(p.frac || 0)
+    setLive({
+      status: p.status, message: p.message, nDone: p.n_done,
+      nTotal: p.n_total, pending: p.pending || [], elapsed: p.elapsed_sec,
+      current: p.current || '',
+      phase: p.phase || '',
+      estimates: p.estimates || {},
+      estimateNote: p.estimate_note || '',
+    })
+    return { p, nextGot, node: merged }
+  }
+
+  /** F5 之后：若后端还活着（会话还在），把界面接回去并继续轮询。 */
+  const restoreSession = useCallback(async (sid) => {
+    const st = await api.sessionState(sid)
+    setSess({
+      sid,
+      info: st.info,
+      load_notes: st.load_notes || [],
+      components: st.components || [],
+      chains: st.chains || [],
+    })
+    setComponents(((st.selection?.components) || st.components || [])
+      .map((c) => (typeof c === 'string' ? c : c.name)))
+    const f = st.frames || {}
+    setFrames((prev) => ({ ...prev,
+      start_ps: f.start_ps ?? prev.start_ps,
+      stop_ps: f.stop_ps ?? prev.stop_ps,
+      equil_ps: f.equil_ps ?? prev.equil_ps,
+      interval_ps: f.interval_ps ?? prev.interval_ps,
+      max_frames: prev.max_frames,
+    }))
+    const results = st.results || {}
+    setRun({
+      results,
+      timings: st.timings || {},
+      titles: st.titles || {},
+      frames: st.frames || null,
+      summary_rows: st.summary_rows || [],
+      elapsed_sec: st.elapsed_sec || 0,
+    })
+    const names = Object.keys(results)
+    if (names.length) {
+      setChart({ name: names[0], index: 0 })
+      setTab('charts')
+      pushLog(`已恢复上次的会话：${names.length} 项结果（${st.sid}）`)
+    } else {
+      pushLog(`已恢复上次打开的体系（还没有分析结果）`)
+    }
+    setOpen(SEC_INFO)
+
+    // 后端还在跑 → 接着轮询；只有「取消」才会让它停
+    const job = st.job || {}
+    if (job.status === 'running') {
+      pushLog('后端仍在计算中，已重新接上进度…')
+      setBusy(true)
+      let acc = {
+        results: { ...results }, timings: st.timings || {},
+        titles: st.titles || {}, frames: st.frames || null,
+        summary_rows: st.summary_rows || [],
+      }
+      let got = job.n_done || names.length
+      try {
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 500))
+          const { p, nextGot, node } = await pumpOnce(sid, acc, got)
+          acc = node
+          got = nextGot
+          if (p.status !== 'running') {
+            if (p.status === 'error') throw new Error(p.error || '分析失败')
+            break
+          }
+        }
+        pushLog('恢复后的计算已完成')
+      } catch (e) {
+        setError(e.message)
+        pushLog(`恢复进度失败: ${e.message}`)
+      } finally {
+        setBusy(false)
+      }
+    } else if (job.message) {
+      pushLog(`上次运行状态：${job.message}`)
+    }
+  }, [pushLog])
+
   useEffect(() => {
     api.health().then(setHealth).catch((e) => pushLog(`后端连接失败: ${e.message}`))
     api.analyses().then((a) => {
@@ -111,10 +228,22 @@ export default function App() {
       setWhich(a.order || [])
       setGroups(normalizeGroups(a.groups))
       pushLog(`已连接后端，可用分析 ${a.order?.length || 0} 项`)
+      // 上次的会话还在就接回去（F5 / 重新打开页面）
+      let sid = null
+      try { sid = window.localStorage.getItem(SID_KEY) } catch { sid = null }
+      if (sid) {
+        restoreSession(sid).catch(() => {
+          try { window.localStorage.removeItem(SID_KEY) } catch { /* 忽略 */ }
+          pushLog('上次的会话已失效（后端重启或超时），请重新读取文件')
+        })
+      }
+      // 读取文件途中刷新 = 这次读取作废（用户定的方案）：顺手清掉可能残留的旧记录
+      try { window.localStorage.removeItem('mdta.openPending') } catch { /* 忽略 */ }
     }).catch((e) => pushLog(`读取分析项目录失败: ${e.message}`))
   }, [pushLog])
 
   const onOpened = (data) => {
+    try { window.localStorage.setItem(SID_KEY, data.sid) } catch { /* 隐私模式忽略 */ }
     setSess(data)
     setRun(null)
     setLive(null)
@@ -150,7 +279,10 @@ export default function App() {
     setBusy(true); setError(''); setProgress(0); setLive(null)
     cancelledRef.current = false
     const t0 = performance.now()
-    pushLog(`开始分析 ${which.length} 项（实时刷新）…`)
+    const existingNames = Object.keys(run?.results || {})
+    pushLog(existingNames.length
+      ? `开始分析 ${which.length} 项（已有 ${existingNames.length} 项结果保留，只补算新增项）…`
+      : `开始分析 ${which.length} 项（实时刷新）…`)
 
     // 一点「开始分析」就让位给图表：立刻收起操作台、展开说明栏。
     // 进度改由顶栏的实时指示器显示，所以收起操作台后不会看不到进度。
@@ -178,8 +310,12 @@ export default function App() {
         ? nums : null
     })()
 
+    // 已有结果时**默认追加**：只补跑本次新勾的项，旧结果原样保留
+    // （用户："跑完几项之后想补加别的功能，在原有基础上做扩展"）
+    const existing = Object.keys(run?.results || {})
     const body = {
       which,
+      extend: existing.length > 0,
       // 先跑几帧预估各项用时，再按短→长排序开跑（可在「运行」里关掉）
       estimate: estimateOn,
       frames: {
@@ -228,9 +364,16 @@ export default function App() {
       selection: { primary, components },
     }
 
-    // 结果按完成顺序累积；后端只回传我们还没有的那几项
-    let acc = { results: {}, timings: {}, frames: null, titles: {}, summary_rows: [] }
-    let got = 0
+    // 结果按完成顺序累积；后端只回传我们还没有的那几项。
+    // 追加模式下先把已有结果带上，这样界面不会在开跑瞬间"清空"。
+    let acc = {
+      results: { ...(run?.results || {}) },
+      timings: { ...(run?.timings || {}) },
+      frames: run?.frames || null,
+      titles: run?.titles || {},
+      summary_rows: run?.summary_rows || [],
+    }
+    let got = existing.length
 
     const merge = (p) => {
       const fresh = Object.entries(p.results || {})
@@ -317,6 +460,21 @@ export default function App() {
       cancelledRef.current = false
       setBusy(false)
       setLive((l) => (l ? { ...l, status: 'idle', pending: [] } : l))
+    }
+  }
+
+  /** 清空已有结果（重置为"刚打开体系"的状态，便于整套重跑） */
+  const clearResults = async () => {
+    if (!sess) return
+    try {
+      await api.clearResults(sess.sid)
+      setRun(null)
+      setLive(null)
+      setProgress(0)
+      setError('')
+      pushLog('已清空所有分析结果')
+    } catch (e) {
+      pushLog(`清空失败: ${e.message}`)
     }
   }
 
@@ -478,6 +636,7 @@ export default function App() {
                                     estimateOn={estimateOn}
                                     setEstimateOn={setEstimateOn}
                                     lastLine={lastLine}
+                                    onClear={clearResults}
                                     onOpenLog={() => setTab('log')} />
                           {error && <div className="error">{error}</div>}
                         </>

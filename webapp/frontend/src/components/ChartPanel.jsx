@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import ChartView from './ChartView'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
+import { soloAxisInfo } from '../chartOption'
 
 export default function ChartPanel({ run, chart, setChart, live, titles = {},
                                     current = null, panelIndex = 0, groups,
@@ -18,6 +19,13 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
   const running = live?.status === 'running'
 
   const [openSet, setOpenSet] = useState(() => new Set(order))
+  // 图例里当前可见的曲线：只留 1 条时按它自适应坐标轴（见 chartOption）
+  const [visible, setVisible] = useState(null)
+  const solo = current ? soloAxisInfo(current, panelIndex, visible) : null
+  const handleVisible = (vis) => {
+    setVisible(vis)
+    onVisibleChange?.(vis)
+  }
   // 折叠起来的**模块**（默认全部展开）；记"关掉的"这样新模块默认是展开的
   const [closedModules, setClosedModules] = useState(() => new Set())
   // 全屏：优先用浏览器 Fullscreen API；被拒绝/不支持时退化成整页覆盖
@@ -164,11 +172,30 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
                 <div className="charttitle">{current.title}</div>
                 <div className="chartsub">
                   第 {panelIndex + 1} / {current.panels.length} 张
-                  {current.panels[panelIndex]?.xscale === 'log'
-                    || current.panels[panelIndex]?.yscale === 'log'
-                    ? ' · 对数轴' : ''}
-                  {current.curves.some((c) => c.panel === panelIndex && c.downsampled)
-                    ? ' · 已抽稀显示' : ''}
+                  {/* 坐标轴尺度：原来只写「对数轴」。现在只在单条曲线被单独选中时
+                      才由 chartOption 自适应（见下），所以这里把两种情形都写清楚。 */}
+                  {(() => {
+                    const pn = current.panels[panelIndex] || {}
+                    const lx = pn.xscale === 'log'
+                    const ly = pn.yscale === 'log'
+                    if (lx && ly) return ' · 对数轴'
+                    if (lx) return ' · 对数轴（仅横轴）'
+                    if (ly) return ' · 对数轴（仅纵轴）'
+                    return ''
+                  })()}
+                  {solo
+                    ? ` · 单曲线自适应（横轴${solo.xscale === 'log' ? '对数' : '线性'}、`
+                      + `纵轴${solo.yscale === 'log' ? '对数' : '线性'}）`
+                    : ''}
+
+                  {/* 点数与抽稀状态：让"图上有多少点"一眼可见（后端默认不抽稀） */}
+                  {(() => {
+                    const cs = current.curves.filter((c) => c.panel === panelIndex)
+                    if (!cs.length) return null
+                    const nmax = Math.max(...cs.map((c) => (c.x ? c.x.length : 0)))
+                    const ds = cs.some((c) => c.downsampled)
+                    return ` · ${nmax.toLocaleString()} 点${ds ? '（已抽稀）' : '（未抽稀）'}`
+                  })()}
                   {isFs ? ' · 全屏中（Esc 退出）' : ''}
                 </div>
               </div>
@@ -190,7 +217,8 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
             </div>
 
             <ChartView result={current} panelIndex={panelIndex}
-                       onVisibleChange={onVisibleChange} />
+                       visible={visible}
+                       onVisibleChange={handleVisible} />
           </>
         )}
       </section>

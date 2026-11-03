@@ -59,6 +59,7 @@ DEFAULT_PARAMS: dict = {
     #    结果默认阈值被吃掉，只有显式传参才生效）。
     "order": {"gauche_edge": 120.0},
     "msd": {"object": "molecule", "max_particles": None, "workers": 0},
+    # τ 轴默认**用满整条轨迹**；想收缩就传 {"tau_intervals": 5}（= 总时长/5）
     # 键取向序参数 / 晶体-非晶识别（1.0.2）：默认用 Lechner–Dellago 平均版 q̄6，
     # 邻域半径留空 = 自动按最近邻距离中位数推定
     "boo": {"cutoff": None, "averaged": True},

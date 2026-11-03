@@ -2,6 +2,7 @@
  * 3. 分析设置 —— 把「分析对象 + 参数设置 + 分析功能 + 运行」合成一块，
  *    放进同一个折叠面板里，所以三块都用紧凑排版、不带卡片外壳。
  */
+import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { normalizeGroups } from '../analysisGroups'
 import { fmtSec } from '../format'
@@ -151,6 +152,15 @@ const numInput = (ph, props) => (
 )
 
 /** 参数表格：th（标签）+ td（输入），td 的 colSpan = 跨度 − 1。 */
+/** 秒 → mm:ss（>1h 显示 h:mm:ss）。进度条旁边的"已用时间"与读取面板共用同样式。 */
+export function fmtElapsed(sec) {
+  const t = Math.max(0, Math.floor(Number(sec) || 0))
+  const h = Math.floor(t / 3600)
+  const m = Math.floor((t % 3600) / 60)
+  const ss = String(t % 60).padStart(2, '0')
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
+}
+
 function ParamTable({ fields }) {
   const rows = packRows(fields.filter(Boolean))
   if (!rows.length) return null
@@ -359,6 +369,8 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         ['molecule', '分子质心（默认，分子平动扩散）'],
         ['atom', '原子（含分子内部运动）'],
       ])),
+      F('tau_intervals', '时间区间数', 'input',
+        numInput('5', { step: 1, min: 1, ...p('tau_intervals') }), '留空不限'),
     ]],
   ]
 
@@ -446,8 +458,20 @@ export function FunctionBlock({ titles = {}, order = [], which = [], setWhich,
 
 export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
                           live, which = [], titles = {}, run,
-                          estimateOn = true, setEstimateOn = null }) {
-  const done = live?.nDone ?? (run ? Object.keys(run.results || {}).length : 0)
+                          estimateOn = true, setEstimateOn = null,
+                          onClear = null }) {
+  // 已用时间：本地每秒自增（后端 elapsed 只在轮询时刷新）
+  const [runElapsed, setRunElapsed] = useState(0)
+  useEffect(() => {
+    if (!busy) return undefined
+    const t0 = Date.now()
+    setRunElapsed(0)
+    const timer = setInterval(() => setRunElapsed((Date.now() - t0) / 1000), 500)
+    return () => clearInterval(timer)
+  }, [busy])
+
+  const nDoneNow = run ? Object.keys(run.results || {}).length : 0
+  const done = live?.nDone ?? nDoneNow
   const total = live?.nTotal || which.length || 0
   const pending = live?.pending || []
   const pct = Math.round((busy ? (live?.frac ?? progress) : progress) * 100)
@@ -507,8 +531,20 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
         {busy && <span className="badge-live">● 实时更新中</span>}
       </div>
       <button className="primary" onClick={onRun} disabled={busy}>
-        {busy ? `分析中… ${done}/${total}` : '开始分析'}
+        {busy ? `分析中… ${done}/${total}`
+          : (nDoneNow > 0 ? `开始分析（保留已有 ${nDoneNow} 项，只补算新增）` : '开始分析')}
       </button>
+      {/* 已有结果时说明"追加"语义，并提供清空入口 */}
+      {nDoneNow > 0 && (
+        <div className="hint dim" style={{ fontSize: 10.5 }}>
+          已有 <b>{nDoneNow}</b> 项结果：再点「开始分析」只会补算这次新勾的项，
+          前面的结果保留；想整套重跑请先
+          {onClear ? (
+            <button className="mini" style={{ marginLeft: 4 }}
+                    onClick={onClear} disabled={busy}>清空结果</button>
+          ) : '清空结果'}
+        </div>
+      )}
       {setEstimateOn && (
         <label className="check" style={{ marginTop: 4 }}
                title={'开跑前每项先跑几帧实测，外推出各自用时，再按用时短→长执行，'
@@ -521,12 +557,16 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
 
       {busy && (
         <>
+          {/* 进度条：**流光闪烁**（用户：别让人以为是卡死）；刚开始没比例时走"不确定"样式 */}
           <div className="progress">
-            <div className="bar" style={{ width: `${pct}%` }} />
+            <div className={`bar shimmer${pct < 3 ? ' indeterminate' : ''}`}
+                 style={{ width: `${Math.max(3, pct)}%` }} />
           </div>
-          <div className="hint" title={live?.message}>
-            {live?.message || '准备中…'}
-            {live?.elapsed ? `（已用 ${live.elapsed.toFixed(0)}s）` : ''}
+          <div className="hint progress-meta" title={live?.message}>
+            <span>{live?.message || '准备中…'}</span>
+            <span className="elapsed" title="本次分析已用时间">
+              已用 {fmtElapsed(runElapsed)}
+            </span>
           </div>
           {/* 预估用时：后端在正式跑之前，每项先跑几帧实测再外推
               （固定开销 + 每帧代价），这里按短→长列出来 —— 排序就是执行顺序。

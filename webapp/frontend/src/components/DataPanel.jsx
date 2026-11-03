@@ -132,7 +132,9 @@ export default function DataPanel({ run, groups }) {
               <tr>{columns.map((c, i) => <th key={i}>{c}</th>)}</tr>
             </thead>
             <tbody>
-              {rows.slice(0, 500).map((r, i) => (
+              {/* 用户要求数据表**不抽稀**：x/y 与导出的 CSV 一致，全部行都渲染出来。
+                  行数很大时（上万行）浏览器会慢一些，但数值一个不少；想快就少选帧。 */}
+              {rows.map((r, i) => (
                 <tr key={i}>
                   {r.map((v, j) => (
                     <td key={j}>{formatCell(v, 6)}</td>
@@ -142,8 +144,8 @@ export default function DataPanel({ run, groups }) {
             </tbody>
           </table>
         </div>
-        {rows.length > 500 && (
-          <div className="dim small">共 {rows.length} 行，表格只显示前 500 行；需要完整数据请「下载 CSV」。</div>
+        {rows.length > 20000 && (
+          <div className="dim small">共 {rows.length.toLocaleString()} 行，已全部渲染（不抽稀）；滚动或「下载 CSV」查看。</div>
         )}
       </section>
     </div>

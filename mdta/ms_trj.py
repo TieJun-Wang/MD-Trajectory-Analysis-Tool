@@ -6,11 +6,11 @@ MDAnalysis **不认识** ``.trj``（它是 MS 的私有二进制格式），所�
 
     .trj  ──(pymsdump 的 ms_trj 解析器 + xtcwriter)──▶  缓存 .xtc  ──▶  正常分析
 
-依赖的模块**不在本工具里**，而是用户自己的 pymsdump / md_convert 目录
-（纯 Python，无需编译）：
+需要的两个**纯 Python** 模块（无需编译）**都在本仓库的 `pymsdump/` 里**
+（1.0.4 起把 `.trj` 解析器也集成进来了，换机器不用再单独拷 md_convert）：
 
-    md_convert/ms_trj.py      Materials Studio .trj 解析器
-    pymsdump/xtcwriter.py     纯 Python XTC 写入器
+    pymsdump/ms_trj.py        Materials Studio .trj 解析器（MSTrajectory）
+    pymsdump/xtcwriter.py     纯 Python XTC 写入器（XTCWriter）
 
 查找顺序（第一个找到的目录生效）：
 
@@ -125,18 +125,35 @@ def available(hint: str | None = None) -> bool:
 
 
 def unavailable_message(hint: str | None = None) -> str:
+    """说清楚**到底缺哪个**模块、以及三种放法（用户换机器时最常卡在这）。"""
     m = module_dirs(hint)
-    miss = [n for n, k in (("ms_trj.py（.trj 解析器，通常在 md_convert/）", "trj"),
-                           ("xtcwriter.py（XTC 写入器，通常在 pymsdump/）", "xtc"))
-            if not m[k]]
-    return "\n".join([
-        "读取 Materials Studio 的 .trj 需要两个**纯 Python** 模块：",
-        "  · md_convert/ms_trj.py   （.trj 解析器）",
-        "  · pymsdump/xtcwriter.py  （XTC 写入器）",
-        f"没找到：{'；'.join(miss)}",
-        "把这两个目录放到 .trj 旁边（或工具目录下），或设环境变量指定：",
-        r"  set MDTA_MS_CONVERT=C:\path\to\md_convert;C:\path\to\pymsdump",
-    ])
+    lines = ["读取 Materials Studio 的 .trj 需要两个**纯 Python** 模块（都不需要编译）："]
+    if m["trj"]:
+        lines.append(f"  ✓ ms_trj.py      （.trj 解析器）  已找到：{m['trj']}")
+    else:
+        lines.append("  ✗ ms_trj.py      （.trj 解析器）  **缺失**"
+                     " —— 它应在本仓库的 pymsdump/ 里（1.0.4 起已集成），"
+                     "检查是否被删或被 .gitignore 排除")
+    if m["xtc"]:
+        lines.append(f"  ✓ xtcwriter.py   （XTC 写入器）  已找到：{m['xtc']}")
+    else:
+        lines.append("  ✗ xtcwriter.py   （XTC 写入器）  **缺失**"
+                     " —— 本仓库自带 pymsdump/xtcwriter.py，检查是否被删了")
+    if not m["trj"]:
+        lines += [
+            "",
+            "从仓库找回这个文件（`git checkout -- pymsdump/ms_trj.py`），或放到下面任一位置：",
+            "  ① 与 .trj 文件同一个文件夹里（或它的上一级）；",
+            "  ② <仓库>/pymsdump/ms_trj.py（默认位置）；",
+            "  ③ 任意位置，然后用环境变量点名：",
+            r"     set MDTA_MS_CONVERT=D:\你的路径\md_convert;C:\...\MDT\pymsdump",
+            "",
+            "  临时验证：python -c 'from mdta import ms_trj; "
+            "print(ms_trj.module_dirs())'",
+            "  另一条省事的路：在别的电脑上先把 .trj 转成 .xtc（产物在 _convert_cache/ 里），"
+            "再把那个 .xtc 拷过来直接分析。",
+        ]
+    return "\n".join(lines)
 
 
 def _cache_dir() -> Path:
@@ -291,3 +308,20 @@ def trj_header(trj: str) -> dict:
 
 __all__ = ["available", "cached_xtc", "convert_trj", "module_dirs", "trj_header",
            "trj_info", "unavailable_message"]
+
+
+def _selfcheck() -> int:
+    """``python -m mdta.ms_trj`` —— 打印两个模块找到没、从哪找到的。"""
+    m = module_dirs()
+    ok = bool(m["trj"] and m["xtc"])
+    print(f"{'可用' if ok else '不可用'}：Materials Studio .trj → XTC 转换")
+    print(f"  ms_trj.py    : {m['trj'] or '（缺失）'}")
+    print(f"  xtcwriter.py : {m['xtc'] or '（缺失）'}")
+    if not ok:
+        print()
+        print(unavailable_message())
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(_selfcheck())

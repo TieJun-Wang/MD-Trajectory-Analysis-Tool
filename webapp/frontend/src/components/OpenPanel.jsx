@@ -73,6 +73,15 @@ export default function OpenPanel({ onOpened, log }) {
   // 「文件读取」进度：打开大轨迹首次要扫全文件（46 体系 1.7 GB 实测 >135 s），
   // 这里一边等 POST 返回、一边并发轮询后端记录的阶段，给出进度条与"当前在做什么"。
   const [phase, setPhase] = useState(null)
+  // 读取已用时间：每秒自增，配合"动态闪烁"告诉用户还在动
+  const [openElapsed, setOpenElapsed] = useState(0)
+  useEffect(() => {
+    if (!busy) { setOpenElapsed(0); return undefined }
+    const t0 = Date.now()
+    setOpenElapsed(0)
+    const timer = setInterval(() => setOpenElapsed((Date.now() - t0) / 1000), 500)
+    return () => clearInterval(timer)
+  }, [busy])
 
   const open = async () => {
     if (!topology) { setError('请先选择拓扑文件（.tpr/.gro/.pdb）'); return }
@@ -80,6 +89,7 @@ export default function OpenPanel({ onOpened, log }) {
     const token = `open-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     setPhase({ stage: '准备中', stages: [], done: false })
     const t0 = Date.now()
+
     // **流式**接收读取进度（SSE）：阶段一变就推过来；断流自动退回轮询
     let stopStream = () => {}
     try {
@@ -108,6 +118,15 @@ export default function OpenPanel({ onOpened, log }) {
     }
   }
 
+/** 秒 → mm:ss（超过 1 小时显示 h:mm:ss），给进度条旁边的"已用时间"用。 */
+function fmtElapsed(sec) {
+  const t = Math.max(0, Math.floor(Number(sec) || 0))
+  const h = Math.floor(t / 3600)
+  const m = Math.floor((t % 3600) / 60)
+  const ss = String(t % 60).padStart(2, '0')
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`
+}
+
   const short = (p) => (p ? p.split(/[\\/]/).slice(-2).join('/') : '未选择')
 
   return (
@@ -117,13 +136,16 @@ export default function OpenPanel({ onOpened, log }) {
         // 以前这里还显示"已用 X s"、首次扫描提示、以及最近 4 个阶段各自的耗时
         // （`· 阶段名  0.4 s`）—— 用户要求删掉这些计时展示，只留进度与当前在做什么。
         <div className="openprog">
+          {/* 阶段数推出来的百分比；刚开始阶段还少时进度条走"不确定"样式（来回跑） */}
           <div className="progress">
-            <div className="bar" style={{ width: `${Math.min(
-              96, 12 + (phase?.n_stages || 0) * 17)}%`,
-            }} />
+            <div className={`bar shimmer${(phase?.n_stages || 0) < 2 ? ' indeterminate' : ''}`}
+                 style={{ width: `${Math.min(96, 12 + (phase?.n_stages || 0) * 17)}%` }} />
           </div>
-          <div className="openmeta dim small">
-            正在读取文件：{phase?.stage || '准备中'}
+          <div className="openmeta dim small progress-meta">
+            <span>正在读取文件：{phase?.stage || '准备中'}</span>
+            <span className="elapsed" title="本次读取已用时间">
+              已用 {fmtElapsed(openElapsed)}
+            </span>
           </div>
         </div>
       )}
