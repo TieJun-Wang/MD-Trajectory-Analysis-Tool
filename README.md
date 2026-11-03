@@ -122,23 +122,122 @@ $$|r_i-r_j| < f_{udge}\cdot(R_i+R_j),\qquad f_{udge}=1.2$$
 > `.gro` 的原子数在**第 2 行**（第 1 行是标题）。工具据此在拓扑与轨迹原子数不一致时，
 > 主动在同目录里扫描原子数匹配的候选拓扑文件并给出建议。
 
-### 依赖
+### 依赖与安装（换一台电脑怎么装）
 
-| 包 | 用途 | 验证版本 |
+所有 Python 依赖都在仓库根的 **`requirements.txt`**（单一来源，按模块分段）。
+下面按"从零到跑起来"的顺序列一遍。
+
+#### 第 0 步：装两个运行时
+
+| 软件 | 版本要求 | 说明 |
 |---|---|---|
-| MDAnalysis | 轨迹读取与几何计算 | 2.10.0 |
-| NumPy | 数值计算 | 2.4.6 |
-| Pandas | 数据表与 Excel 导出 | 3.0.3 |
-| Matplotlib | 可视化 | 3.10.9 |
-| openpyxl | `summary.xlsx` 导出 | 3.1.5 |
-| SciPy | 界面轮廓 erf 拟合（可选） | 任一 |
-| Tkinter | 桌面操作台（Python 自带） | 3.13 |
+| **Python** | **3.10 或更高**（开发/验证用 3.13.5） | 装 python.org 官方版时**保留 `tcl/tk` 选项**（桌面操作台 `mdta_gui.py` 要用 Tkinter）；Linux 需额外 `sudo apt install python3-tk` |
+| **Node.js** | **20.19+ 或 22.12+**（开发用 24.19 / npm 11.17） | Vite 8 的要求；只跑命令行/桌面版可以不装，但 **Web 页面**必须有它来构建前端 |
 
-安装：
+> 不想装 Node 也行：把 `webapp/frontend/dist/` 整个目录一起拷过去，后端会直接托管这份构建产物。
+
+#### 第 1 步：装 Python 依赖
 
 ```powershell
-pip install MDAnalysis numpy pandas matplotlib openpyxl scipy
+cd <仓库目录>
+python -m pip install -U pip
+python -m pip install -r requirements.txt
 ```
+
+`requirements.txt` 的四段分别是：
+
+| 段 | 包 | 用途 |
+|---|---|---|
+| 核心分析引擎 | `MDAnalysis` `numpy` `scipy` `pandas` `matplotlib` `openpyxl` | 读轨迹、算各项分析、导出 CSV/PNG/Excel |
+| Web 后端 | `fastapi` `uvicorn` `pydantic` `starlette` | `python -m webapp.backend.run` |
+| 测试自检 | `pytest` `httpx` `tidynamics` | `test/selftest.py`、`test/webapp/_api_check.py` |
+| 可选加速 | `freud-analysis`（默认注释掉） | BOO 的交叉校验通道，不装也能跑 |
+
+离线/SSL 不通时的备用安装（仓库里带了两个 wheel）：
+
+```powershell
+python -m pip install --no-deps --no-index --find-links webapp/_wheels fastapi tidynamics
+```
+
+#### 第 2 步：装前端依赖并构建（只做一次）
+
+```powershell
+cd webapp/frontend
+npm install            # 或 npm ci（有 package-lock.json）
+node _build.mjs        # 等价于 npm run build，产物在 dist/（后端从这里托管页面）
+cd ../..
+```
+
+> `_build.mjs` 用编程式 Vite 并 `configFile: false`，避免某些受限环境里
+> `vite` CLI 解析路径的 spawn 失败。若你的机器上 `npm run build` 正常，用哪个都行。
+
+#### 第 3 步：自检（确认这台机器的计算结果可信）
+
+```powershell
+python test/selftest.py            # 70 项数值自检（约 2–4 min）
+python test/webapp/_api_check.py   # 后端全流程（约 30 s，不用起服务）
+```
+
+`selftest` 默认用仓库根的 `adk_oplsaa.tpr` + `adk_oplsaa.xtc`（若没拷这两个数据文件，
+会用合成体系跑，部分用例跳过）。
+
+#### 第 4 步：启动
+
+```powershell
+# A. Web 版（推荐）
+python -m webapp.backend.run                 # http://127.0.0.1:8000
+python -m webapp.backend.run --port 8080     # 换端口
+python -m webapp.backend.run --host 0.0.0.0  # 局域网可访问（注意安全）
+
+# B. 桌面操作台（Tkinter）
+python mdta_gui.py adk_oplsaa.tpr adk_oplsaa.xtc
+
+# C. 命令行
+python mdta_cli.py run -t adk_oplsaa.tpr -x adk_oplsaa.xtc --interval 100 -o analysis_results
+```
+
+#### 第 5 步：几个环境细节
+
+| 事项 | 说明 |
+|---|---|
+| **中文字体** | 导出 PNG 需要 CJK 字体：Windows 有「微软雅黑」即可；Linux 装 `fonts-noto-cjk`（或文泉驿）。缺字时导出的 PNG 里汉字会变成方框（可用 `python -c "import matplotlib; ..."` 自查字体表） |
+| **写权限** | 工具会在仓库目录写 `_offsets_cache/`、`_convert_cache/`、`webapp/outputs/`；数据目录可以是只读的（偏移文件会重定向到 `_offsets_cache/`，可用 `MDTA_OFFSETS_INPLACE=1` 关掉） |
+| **端口** | 默认 8000；被占用就换 `--port`。前端构建产物由后端托管，**不需要**另起前端服务 |
+| **Materials Studio `.trj`** | 见下面「第 6 步：`.trj` 要额外准备什么」 |
+| **测试脚本** | `test/selftest.py`（数值）与 `test/webapp/_api_check.py`（后端），都**不用起服务**；目录不入库，说明见 `test/README.md` |
+
+#### 第 6 步：`.trj` 要额外准备什么（换机器最容易漏的一步）
+
+MDAnalysis **读不了** MS 的二进制 `.trj`，本工具先把它转成 XTC 再分析。
+转换要两个**纯 Python** 模块（都不用编译）：
+
+| 模块 | 位置 | 需要你做什么 |
+|---|---|---|
+| `pymsdump/ms_trj.py` | **本仓库自带**（`.trj` 解析器，1.0.4 起集成） | 什么都不用做 |
+| `pymsdump/xtcwriter.py` | **本仓库自带**（XTC 写入器） | 什么都不用做 |
+
+也就是说**开箱即用**：仓库带全了这两个文件。只有在你想用别的副本（比如另一份更新的解析器）时，
+才需要把它放到下面任一位置，工具会自动找到：
+
+1. 与 `.trj` 文件**同一个文件夹**（或它的上一级目录）；
+2. `<仓库>/pymsdump/`；
+3. 任意位置 + 环境变量点名：
+
+```powershell
+set MDTA_MS_CONVERT=D:\你的路径\md_convert;C:\...\MDT\pymsdump
+```
+
+一行自检（看缺不缺、各从哪找到的）：
+
+```powershell
+python -m mdta.ms_trj
+# 可用：Materials Studio .trj → XTC 转换
+#   ms_trj.py    : D:\...\md_convert
+#   xtcwriter.py : C:\temp\MDT\pymsdump
+```
+
+> **更省事的替代方案**：在**有 `ms_trj.py` 的那台电脑**上先把 `.trj` 转一次
+> （产物是 `_convert_cache/` 里的 `.xtc`），把那个 `.xtc` 拷到新机器直接分析即可。
 
 ### 30 秒上手
 
@@ -149,7 +248,7 @@ python mdta_gui.py adk_oplsaa.tpr adk_oplsaa.xtc
 # 命令行：一条命令跑完全部分析并导出
 python mdta_cli.py run -t adk_oplsaa.tpr -x adk_oplsaa.xtc --interval 100 -o analysis_results
 
-# 数值自检（69 项，确认计算结果可信）
+# 数值自检（70 项，确认计算结果可信）
 python test/selftest.py
 ```
 
@@ -182,13 +281,10 @@ MDT/
 │   ├── frontend/                  React + Vite + ECharts 源码与 dist/
 │   └── README.md                  Web 版说明与 API 文档
 ├── pymsdump/                      Materials Studio `.trj` → XTC 写入器（`.trj` 转换链路）
-├── test/                          测试与诊断脚本（**不入库**，见 test/README.md）
+├── test/                          测试脚本（**不入库**，见 test/README.md）
 │   ├── README.md                  测试说明（唯一入库的文件）
-│   ├── selftest.py                数值正确性自检（69 项）
-│   ├── webapp/                    后端 API / 构建产物 / 跨体系校验脚本
-│   ├── comparisons/               与另一套工具（mdtransport）的对照实验
-│   ├── fixtures_fmt/              跨格式一致性测试用的 .gro / .pdb 夹具
-│   └── _diag_*.py / _probe_*.py   历史诊断脚本及其报告
+│   ├── selftest.py                数值正确性自检（70 项）
+│   └── webapp/_api_check.py       后端 API 全流程自检
 ├── examples/
 │   ├── quickstart.py              最小示例
 │   └── run_full_pipeline.py       完整流程示例（10 项分析 + 导出）
@@ -274,7 +370,7 @@ FastAPI 后端 + React 前端，详见 [`webapp/README.md`](webapp/README.md)。
 > 像功能被删了。现在这几种情况都会把原因写出来（「只勾选了 1 项，无需预估排序，
 > 直接跑」/「已关闭「先预估用时」，按勾选顺序直接跑」/「只有 20 帧…直接开跑」），
 > 并且**跑完之后区块继续保留**（已完成的项显示绿色实测秒数、标明"上一次运行"），
-> 方便核对"关掉预估到底快没快"。用 `python _probe_estimate.py` 可复现这四条断言。
+> 方便核对"关掉预估到底快没快"。（原始探针脚本已归档，不在仓库内。）
 
 左侧操作栏可以**整体折叠**：最左侧常驻一条 26px 竖条，展开时显示
 「收起操作台」、收起时显示「展开操作台」，位置始终不变。宽度用 240ms 过渡
@@ -544,7 +640,7 @@ $$R_g=\sqrt{\frac{\sum_i m_i|\mathbf r_i-\mathbf r_{cm}|^2}{\sum_i m_i}}$$
   用户体系 122 个 C12 分子实测：**逐帧相关系数 +1.000000、均值 4.3929 vs 4.3929 Å
   （+0.0000%）、std 都是 0.1443、逐帧最大偏差 0.0002 Å**；反证：122 个单分子里最好的
   相关系数只有 0.8847，整组 Rg 均值 21.18 Å（与 Forcite 差 16.8 Å）。
-  对照脚本 `_diag_forcite_rg4.py`。
+  （对照脚本已归档，不在仓库内。）
 - **两条路径与速度（1.0.3 重写）**：多分子组分走向量化展开（`rg_fast`），单分子对象
   走 MDAnalysis 精确展开；两条路径**口径已对齐**（整组 Rg 差 ≤1.2e-07 Å、逐分子 Rg
   对键连通重建 `make_whole` 差 ≤5.3e-09 Å）。用户体系 4636 原子 / 122 分子：
@@ -764,7 +860,7 @@ $$\mathrm{MSD}(t)=\left\langle|\mathbf r(t)-\mathbf r(0)|^2\right\rangle$$
 
 - 跨周期性边界通过**最小镜像位移累加**追踪粒子（比 `NoJump` 更可控），
   并报告"最小镜像失效比例"作为可靠性诊断
-- 输出：MSD–τ 双对数曲线、线性区拟合、$D$（Å²/ps 与 m²/s）、$\mathrm{MSD}\propto t^\alpha$ 的 α、R²
+- 输出：MSD–τ 曲线（横轴 τ 对数、**纵轴 MSD 线性**）、线性区拟合、$D$（Å²/ps 与 m²/s）、$\mathrm{MSD}\propto t^\alpha$ 的 α、R²
 - **D 带标准误**（1.0.1）：优先用**分块平均**（把轨迹切成若干时间块、各自独立拟合，
   取各块 D 的散布）；块数不足 3 块时退回拟合协方差 × **实测**残差 AR(1) 修正。
   误差来源会写进结果与说明里。实测（合成布朗运动，真值 2.0e-10 m²/s）：
@@ -934,7 +1030,7 @@ python test/selftest.py                          # 用配套的 adk 轨迹
 python test/selftest.py sys.tpr sys.xtc          # 换自己的轨迹
 ```
 
-69 项自检（可用 pytest 直接收集；脚本全部在 `test/` 下，说明见 `test/README.md`），
+70 项自检（可用 pytest 直接收集；脚本在 `test/` 下，说明见 `test/README.md`），
 验证策略分两类：
 **A. 与 MDAnalysis 原生实现对照**
 

@@ -1,0 +1,50 @@
+# =====================================================================
+#  MD 轨迹分析工具 —— 全部模块的依赖（单一来源）
+#
+#  安装：  python -m pip install -r requirements.txt
+#  只跑分析引擎、不起 Web：可以只装「一、核心分析引擎」那一段。
+#  版本按开发机实测环境固定下限（MDAnalysis 2.10.0 / Python 3.13）；
+#  更高版本应当也能用，但升级后请先跑 `python test/selftest.py` 复核。
+# =====================================================================
+
+# ---------------------------------------------------------------- 一、核心分析引擎
+# MDAnalysis：拓扑/轨迹读取（.tpr/.gro/.pdb/.xtc/.trr/.dcd/.nc/.data/.lammpsdump …）
+MDAnalysis>=2.10.0
+# 数值计算（几乎所有分析项）
+numpy>=2.0
+# 积分/优化/特殊函数：界面宽度（erf 拟合）、密度剖面平滑、BOO 的球谐
+scipy>=1.11
+# 结果表：CSV / Excel 汇总、`Analyzer.info` 的表格化
+pandas>=2.0
+# 导出 PNG（命令行与桌面 GUI 的静态图；Web 版用 ECharts 画图，不需要它）
+matplotlib>=3.8
+# Excel 导出（`export_excel` 用 `pd.ExcelWriter(engine="openpyxl")`）
+openpyxl>=3.1
+
+# ---------------------------------------------------------------- 二、Web 后端（webapp/）
+fastapi>=0.115
+uvicorn>=0.30
+# FastAPI 的模型层（请求体校验）
+pydantic>=2.9
+# 显式列出：Web 后端直接用 starlette 的线程池 / JSONResponse
+starlette>=0.40
+
+# ---------------------------------------------------------------- 三、测试与自检（test/）
+# `test/selftest.py` 里的 `test_*` 函数可以用 pytest 收集；不用 pytest 也能直接跑
+pytest>=8.0
+# fastapi.testclient.TestClient 依赖 httpx
+httpx>=0.27
+# `test/selftest.py::msd fft matches ...` 用 tidynamics 做独立对照（缺了会自动跳过）
+tidynamics>=1.0
+
+# ---------------------------------------------------------------- 四、可选加速（不装也能跑）
+# BOO/晶体识别的交叉校验通道（`backend="freud"`）；自带实现是默认路径，结果已与文献一致
+# freud-analysis>=3.0
+# 本地 wheel 直装（离线环境，见 webapp/_wheels/）：
+#   python -m pip install --no-deps --no-index --find-links webapp/_wheels fastapi tidynamics
+
+# ---------------------------------------------------------------- 五、不是 pip 依赖
+# · 前端（webapp/frontend）：React 19 + Vite + ECharts，依赖在 package.json，
+#   在 webapp/frontend 目录执行 `npm install`（或 `node _build.mjs` 前先装好）。
+# · Materials Studio `.trj` 转换：`pymsdump/` 里已自带解析器 `ms_trj.py` 与写入器
+#   `xtcwriter.py`（都是纯 Python，开箱即用）；想用别的副本时用 MDTA_MS_CONVERT 指定。

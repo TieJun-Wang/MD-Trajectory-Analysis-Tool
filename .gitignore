@@ -180,3 +180,8 @@ validation_output/
 /mdt-call-chain.html
 *.pptx
 *.docx
+# 用户本机放的工具与数据（按用户要求排除）
+/Trj2Ascii.exe
+*.exe
+/PE50-g2020 Forcite Dynamics/
+/_test_archive/

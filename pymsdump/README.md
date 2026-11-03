@@ -9,6 +9,20 @@
 
 ---
 
+## 0. 目录内容（1.0.4 起 `.trj` 解析器也在这里）
+
+| 文件 | 作用 |
+|---|---|
+| `ms_trj.py` | **Materials Studio `.trj` 解析器**（纯 numpy）：`MSTrajectory(path)` → `.n_atoms` / `.n_frames` / `.iter_frames(step)`，每帧给出 `xyz` / `cell` / `step` / `time` |
+| `xtcwriter.py` | **XTC 写入器**（纯 Python）：`XTCWriter(path, precision=1000)` → `.write(xyz, cell, step, time)` |
+| `msdump.py` | 命令行封装：`.trj`/`.dcd`/`.xtc` → `xtc`/`xyz`/`gro`/`txt`/`xvg` |
+
+> **为什么两个文件要放同一目录**：主程序 `mdta/ms_trj.py` 会把
+> `pymsdump/` 加进 `sys.path` 再 `from ms_trj import MSTrajectory` /
+> `from xtcwriter import XTCWriter` —— 同目录最省事，换机器拷这一个文件夹就够。
+
+---
+
 ## 1. 用法
 
 ```powershell
