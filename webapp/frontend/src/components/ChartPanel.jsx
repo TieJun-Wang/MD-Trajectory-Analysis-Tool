@@ -196,6 +196,16 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
                     const ds = cs.some((c) => c.downsampled)
                     return ` · ${nmax.toLocaleString()} 点${ds ? '（已抽稀）' : '（未抽稀）'}`
                   })()}
+                  {/* 一张图里有多个对象（多个组分 / 集合）时，图表默认只显示
+                      第一个，其余在图例里点开 —— 这里把这件事说出来，
+                      否则用户会以为"第二个组分没算"。 */}
+                  {(() => {
+                    const cs = current.curves.filter((c) => c.panel === panelIndex)
+                    const gs = [...new Set(cs.map((c) => c.group).filter(Boolean))]
+                    return gs.length > 1
+                      ? ` · ${gs.length} 个对象（默认只画「${gs[0]}」，其余点图例打开）`
+                      : ''
+                  })()}
                   {isFs ? ' · 全屏中（Esc 退出）' : ''}
                 </div>
               </div>

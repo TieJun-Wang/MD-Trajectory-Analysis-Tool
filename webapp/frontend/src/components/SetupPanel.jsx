@@ -8,7 +8,8 @@ import { normalizeGroups } from '../analysisGroups'
 import { fmtSec } from '../format'
 
 //: 运行日志留一小条在设置板块底部，完整日志在右侧「运行日志」标签页
-export function SelectionBlock({ sess, primary, setPrimary, components, setComponents }) {
+export function SelectionBlock({ sess, primary, setPrimary, components, setComponents,
+                                      sets = [], setsInfo = [], onSetsChange = null }) {
   if (!sess) return null
   const chains = sess.chains || []
   const comps = sess.components || []
@@ -19,12 +20,129 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
       : [...components, name])
   }
 
+  // ---- 分析集合（Set）：本地只存"定义"，原子数/追踪方式来自后端预览（setsInfo）
+  const els = sess.elements || []
+  const presets = sess.set_presets || []
+  const [draft, setDraft] = useState({
+    name: '', elements: [], shape: 'all', min_atoms: '', max_atoms: '', pure: false,
+  })
+  const emit = (next) => { onSetsChange?.(next) }
+  const addSet = (spec) => {
+    const name = String(spec.name || '').trim()
+    if (!name) return
+    if (sets.some((x) => x.name === name)) {
+      // 同名覆盖
+      emit([...sets.filter((x) => x.name !== name), { ...spec, name }])
+      return
+    }
+    emit([...sets, { ...spec, name }])
+  }
+  const removeSet = (name) => emit(sets.filter((x) => x.name !== name))
+  const toggleSetOn = (name) => emit(sets.map((x) => (x.name === name
+    ? { ...x, on: x.on === false ? true : false } : x)))
+  const toggleEl = (e) => setDraft((d) => ({ ...d,
+    elements: d.elements.includes(e)
+      ? d.elements.filter((x) => x !== e)
+      : [...d.elements, e] }))
+  const submitDraft = () => {
+    const spec = {
+      name: draft.name.trim() || (draft.elements.join('') || '自定义'),
+      elements: draft.elements,
+      shape: draft.shape,
+      min_atoms: draft.min_atoms === '' ? 0 : Number(draft.min_atoms),
+      max_atoms: draft.max_atoms === '' ? 0 : Number(draft.max_atoms),
+      pure: !!draft.pure,
+    }
+    addSet(spec)
+    setDraft({ name: '', elements: [], shape: 'all', min_atoms: '', max_atoms: '', pure: false })
+  }
+  const infoOf = (name) => (setsInfo || []).find((x) => x.name === `set:${name}`)
+
   return (
     <>
+      <div className="sect-title" style={{ marginTop: 0 }}>
+        分析集合（Set）
+        <span className="dim" style={{ fontWeight: 400 }}>（可选：只算某一类原子或分子）</span>
+      </div>
+      {/* ---------------------------------------------- 分析集合（Set） */}
+      <div className="field">
+        {presets.length > 0 && (
+          <div className="chips-pick mt4"
+               title="点一下就建好这类集合；也可以自己选元素 / 形态">
+            {presets.map((p) => (
+              <button key={p.name} className="chip-pick"
+                      title={p.hint + '\n预览：' + p.preview}
+                      onClick={() => addSet({ ...p.spec, name: p.name })}>
+                ＋{p.name}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {els.length > 0 && (
+          <div className="chips-pick mt4" title="选元素（不选 = 不按元素筛）">
+            {els.slice(0, 12).map((e) => (
+              <button key={e}
+                      className={`chip-pick ${draft.elements.includes(e) ? 'on' : ''}`}
+                      onClick={() => toggleEl(e)}>{e}</button>
+            ))}
+            <select value={draft.shape}
+                    onChange={(e) => setDraft({ ...draft, shape: e.target.value })}
+                    title="链状 = 分子没有环；含环 = 分子里有环">
+              <option value="all">形态不限</option>
+              <option value="chain">链状（无环）</option>
+              <option value="ring">含环</option>
+            </select>
+            <input type="number" min="0" placeholder="分子最少原子"
+                   value={draft.min_atoms} style={{ width: 92 }}
+                   onChange={(e) => setDraft({ ...draft, min_atoms: e.target.value })} />
+            <input type="number" min="0" placeholder="最多原子"
+                   value={draft.max_atoms} style={{ width: 78 }}
+                   onChange={(e) => setDraft({ ...draft, max_atoms: e.target.value })} />
+            <label className="check" style={{ fontSize: 10.5 }}
+                   title="只要整分子都由所选元素组成的（例如纯碳分子）">
+              <input type="checkbox" checked={draft.pure}
+                     onChange={(e) => setDraft({ ...draft, pure: e.target.checked })} />
+              整分子只含所选元素
+            </label>
+            <input placeholder="集合名（留空自动）" value={draft.name}
+                   style={{ width: 120 }}
+                   onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
+            <button className="mini" onClick={submitDraft}>＋ 添加集合</button>
+          </div>
+        )}
+
+        {(sets || []).length > 0 && (
+          <div className="sets-list mt4">
+            {sets.map((x) => {
+              const info = infoOf(x.name)
+              const on = x.on !== false
+              return (
+                <div key={x.name} className={`set-row${on ? '' : ' off'}`}>
+                  <label className="check" style={{ fontSize: 10.5 }}
+                         title={on ? '点此取消参与' : '点此参与分析'}>
+                    <input type="checkbox" checked={on} onChange={() => toggleSetOn(x.name)} />
+                    <b>set:{x.name}</b>
+                  </label>
+                  <span className="set-desc">
+                    {info ? `${info.label}` : '（自动预览）'}
+                  </span>
+                  <button className="mini" onClick={() => removeSet(x.name)}>删除</button>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
       <div className="sect-title">分析对象</div>
 
       <label className="field">
-        <span>主链（构象 / 结晶分析对象）</span>
+        <span>主链</span>
+        <span className="hint dim" style={{ fontSize: 10.5 }}
+              title="回转半径 / 端到端距离 / 二面角 / 取向 / 结晶都按这个对象算">
+          {sets.length > 0 ? '勾了集合就用集合' : 'Rg / 二面角 / 取向按它算'}
+        </span>
         <select
           value={primary.mode === 'custom' ? 'custom' : JSON.stringify(primary)}
           onChange={(e) => {
@@ -34,7 +152,7 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
               : JSON.parse(v))
           }}>
           <option value={JSON.stringify({ mode: 'auto' })}>
-            自动（最大链：{sess.primary_label}，{sess.primary_atoms} 原子 / 1 分子）
+            自动 · {sess.primary_label || '最大链'}
           </option>
           {comps.map((c) => (
             <option key={c.name} value={JSON.stringify({ mode: 'component', name: c.name })}>
@@ -79,7 +197,13 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
       )}
 
       <div className="field">
-        <span>参与界面 / RDF / MSD 分析的组分（点选切换）</span>
+        <span>
+          参与分析的对象
+          <span className="dim" style={{ fontWeight: 400 }}>
+            {` · 已勾 ${comps.filter((c) => components.includes(c.name)).length}`
+              + ` / ${comps.length}，点胶囊切换`}
+          </span>
+        </span>
         <div className="chips-pick">
           {comps.map((c) => (
             <button key={c.name}
@@ -88,12 +212,13 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
                     title={`${c.n_atoms.toLocaleString()} 原子 / ${c.n_residues} 残基`
                       + (c.n_molecules != null
                         ? ` / ${c.n_molecules} 个分子${c.n_molecules === 1
-                          ? '（单分子，逐分子统计无意义）' : ''}` : '')}>
+                          ? '（单分子）' : ''}` : '')}>
               {c.name}
             </button>
           ))}
         </div>
       </div>
+
     </>
   )
 }
@@ -269,16 +394,14 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         numInput('留空=盒顶', { step: 1, ...p('slab_hi') }), '留空=盒顶'),
       F('comdist_pbc', '质心距 PBC', 'check',
         chk('comdist_pbc', '用最小镜像',
-          '关（默认）：包裹坐标直接相减，与文献 COM.py 一致；'
-          + '开：对质心差取最小镜像，适合质心跨盒边界的体系'), '用最小镜像', 6),
+          '默认按包裹坐标相减；质心可能跨盒边界时勾上'), '用最小镜像', 6),
     ]],
     ['键取向序 BOO / 晶体识别', ['boo', 'crystal'], [
       F('boo_cutoff', '邻域半径 (Å)', 'input',
         numInput('自动', { step: 0.1, min: 0, ...p('boo_cutoff') }), '自动'),
       F('boo_averaged', '用平均版 q̄_l', 'check',
         chk('boo_averaged', '是（推荐）',
-          '开：Lechner–Dellago 平均版 q̄_l（先用邻居的 q_lm 平均再求模，识别固-液更稳）；'
-          + '关：单原子 q_l（液相里涨落大，判据会偏松）'), '是（推荐）'),
+          '推荐勾上：先用邻居平均再求模，区分固相/液相更稳'), '是（推荐）'),
       F('q6_solid', '固相判据 q̄6 >', 'input',
         numInput('0.5', { step: 0.05, min: 0, max: 1, ...p('q6_solid') }),
         '0.5'),
@@ -291,42 +414,38 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       F('rg_object', '分析对象', 'radio',
         radio('rg_object', [['system', '整体体系'], ['molecule', '分子 / 链']],
           singleMol
-            ? '该组分只有 1 个分子：两档给出同一个数（整组 Rg 就是该分子的 Rg）'
-            : '二选一，程序只算选中的那种：'
-              + '整体体系 = 把所选对象当成一个整体算 Rg（多分子时是「整团物质」的'
-              + '尺寸，接近盒子尺度）；'
-              + '分子 / 链 = 每个分子各算 Rg、再对分子取平均'
-              + '（= Materials Studio Forcite 的 "Radius of gyration" 口径）'),
+            ? '这个对象只有 1 个分子，两档给出同一个数'
+            : '整体体系：把所选对象当一个整体算（多分子时接近盒子尺寸）；'
+              + '分子 / 链：每个分子各算再平均（与 Forcite 一致）'),
         '整体体系 分子 / 链', 6),
       F('mass_weighted', '质量加权 Rg', 'check',
-        chk('mass_weighted', '用质量加权', '开：质量加权回转半径（默认）；'
-          + '关：等权（几何）口径，每个原子权重相同'), '用质量加权'),
+        chk('mass_weighted', '用质量加权',
+          '默认按原子质量加权；关掉则每个原子权重相同'), '用质量加权'),
       // 下面这个开关**只影响 R_ee**：Rg 的「整组 / 逐分子」由上面的「分析对象」决定。
       F('per_molecule', 'R_ee 逐分子', 'check',
         chk('per_molecule', '按分子分别算',
           singleMol
-            ? '该组分只有 1 个分子'
-            : '只影响 R_ee：开（默认）＝每个分子各算自己的端到端距离；'
-              + '关＝只给整组的。Rg 的「整组 / 逐分子」请用上面的「分析对象」。',
+            ? '这个对象只有 1 个分子'
+            : '只管 R_ee：每个分子各算自己的端到端距离',
           { disabled: singleMol }), '按分子分别算'),
       F('ree_ends', 'R_ee 链端来源', 'select', sel('ree_ends', [
-        ['bond_graph', 'bond_graph（键连图端基，默认）'],
-        ['selection', 'selection（所选原子组首尾原子）'],
+        ['bond_graph', '键连图端基（默认）'],
+        ['selection', '所选原子组首尾'],
       ])),
       F('ree_atoms', 'R_ee 指定原子', 'text',
         <input type="text" placeholder="如 0,3034（留空自动）"
                style={{ minWidth: inputMinWidth('如 0,3034（留空自动）') }}
                value={params.ree_atoms ?? ''}
-               title="手工指定两个成键原子作为链端，逗号或空格分隔；填了就优先用它"
+               title="手工指定两个原子当链端，逗号或空格分隔；留空则按上面的来源自动判断"
                onChange={(e) => setParams({ ...params, ree_atoms: e.target.value })} />,
         '如 0,3034（留空自动）'),
     ]],
     ['接触分析', ['contact'], [
       F('cutoff', 'cutoff (Å)', 'input', numInput('', { step: 0.5, ...p('cutoff') })),
       F('contact_mode', '接触配对模式', 'select', sel('contact_mode', [
-        ['inter', '分子间（默认，剔除同分子配对）'],
-        ['intra', '分子内（只算同一分子内部）'],
-        ['total', '总体（含分子内，1.0.0 旧口径）'],
+        ['inter', '分子间（默认）'],
+        ['intra', '分子内'],
+        ['total', '总体（含分子内）'],
       ])),
     ]],
     ['密度分布 / 界面宽度', ['density', 'interface'], [
@@ -336,26 +455,26 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     ['径向分布函数 RDF', ['rdf'], [
       F('rmax', 'RDF 最大 r (Å)', 'input', numInput('', { step: 1, ...p('rmax') })),
       F('rdf_mode', 'RDF 配对模式', 'select', sel('rdf_mode', [
-        ['inter', '分子间（默认，g(r) 标准口径）'],
-        ['intra', '分子内（同一分子内构象）'],
-        ['total', '总体（含分子内，1.0.0 旧口径）'],
+        ['inter', '分子间（默认）'],
+        ['intra', '分子内'],
+        ['total', '总体（含分子内）'],
       ])),
     ]],
     ['二面角分析', ['dihedral'], [
       F('dihedral_mode', '二面角模式', 'select', sel('dihedral_mode', [
-        ['auto', 'auto（自动）'],
-        ['phi_psi', 'phi_psi（蛋白质主链 φ/ψ）'],
-        ['chain', 'chain（几何连续原子模式：键图最长路径）'],
-        ['topology', 'topology（拓扑定义）'],
+        ['auto', '自动（推荐）'],
+        ['phi_psi', '蛋白质主链 φ/ψ'],
+        ['chain', '沿最长链'],
+        ['topology', '按拓扑定义'],
       ])),
       F('gauche_edge', 'trans/gauche 阈值 (°)', 'input',
         numInput('', { step: 5, min: 60, max: 180, ...p('gauche_edge') })),
     ]],
     ['链段取向分析', ['orientation'], [
       F('orient_mode', '取向链段定义', 'select', sel('orient_mode', [
-        ['repeat', 'repeat（化学重复单元，默认）'],
-        ['backbone', 'backbone（几何骨架：键图最长路径）'],
-        ['bonds', 'bonds（所有重原子键）'],
+        ['repeat', '化学重复单元（默认）'],
+        ['backbone', '几何骨架'],
+        ['bonds', '所有重原子键'],
       ])),
       F('orient_stride', '几何骨架 stride', 'input',
         numInput('', { step: 1, min: 1, ...p('orient_stride') })),
@@ -366,10 +485,10 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     ]],
     ['均方位移 MSD', ['msd'], [
       F('msd_object', 'MSD 追踪对象', 'select', sel('msd_object', [
-        ['molecule', '分子质心（默认，分子平动扩散）'],
-        ['atom', '原子（含分子内部运动）'],
+        ['molecule', '分子质心（默认）'],
+        ['atom', '原子'],
       ])),
-      F('tau_intervals', '时间区间数', 'input',
+      F('tau_intervals', 'τ 分段数', 'input',
         numInput('5', { step: 1, min: 1, ...p('tau_intervals') }), '留空不限'),
     ]],
   ]
@@ -391,7 +510,7 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
           <ParamTable fields={fields} />
         </div>
       )) : (
-        <div className="pempty">尚未勾选任何分析项（在上方「分析功能」里勾选后，这里会出现对应参数）</div>
+        <div className="pempty">勾选上方「分析功能」后，这里出现对应参数</div>
       )}
     </>
   )
@@ -445,8 +564,8 @@ export function FunctionBlock({ titles = {}, order = [], which = [], setWhich,
         {GROUPS.map(([group, names, short]) => (
           <button key={group}
                   className={`mini ${isPreset(names) ? 'active' : ''}`}
-                  title={`只勾选「${group}」这一类（${names.map(
-                    (n) => titles[n] || n).join('、')}）；要全部取消就逐个点掉勾选框`}
+                  title={`只勾「${group}」这一类（${names.map(
+                    (n) => titles[n] || n).join('、')}）`}
                   onClick={() => setWhich([...names])}>
             仅{short}
           </button>
@@ -532,13 +651,13 @@ export function RunBlock({ busy, progress, onRun, onCancel, lastLine, onOpenLog,
       </div>
       <button className="primary" onClick={onRun} disabled={busy}>
         {busy ? `分析中… ${done}/${total}`
-          : (nDoneNow > 0 ? `开始分析（保留已有 ${nDoneNow} 项，只补算新增）` : '开始分析')}
+          : (nDoneNow > 0 ? `开始分析（保留 ${nDoneNow} 项已有结果）` : '开始分析')}
       </button>
       {/* 已有结果时说明"追加"语义，并提供清空入口 */}
       {nDoneNow > 0 && (
         <div className="hint dim" style={{ fontSize: 10.5 }}>
-          已有 <b>{nDoneNow}</b> 项结果：再点「开始分析」只会补算这次新勾的项，
-          前面的结果保留；想整套重跑请先
+          已有 <b>{nDoneNow}</b> 项结果：再跑只补算新勾的项，组分 / 帧 / 参数改过的
+          会自动重算。整套重跑请先
           {onClear ? (
             <button className="mini" style={{ marginLeft: 4 }}
                     onClick={onClear} disabled={busy}>清空结果</button>

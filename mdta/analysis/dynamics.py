@@ -892,6 +892,7 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 stream: bool | None = None, dtype=None, workers: int = 0,
                 tau_intervals: int | None = None,
                 max_lag: int | None = None,
+                object_by_group: Mapping[str, str] | None = None,
                 max_lag_frames: int | None = None,
                 block_frames: int | None = None,
                 verbose: bool = False) -> AnalysisResult:
@@ -916,6 +917,10 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         **它的作用是省内存/支持流式**（常数内存，长轨迹也能跑），不是加速 ——
         实测 1001 帧时反而略慢（47.9 s → 57.4 s）。要省时间请减少帧数。
         代价是 τ 越接近块长样本越少，拟合窗口应落在 τ ≤ max_lag_frames 之内。
+    object_by_group
+        ``{组分名: "molecule"|"atom"}`` —— **逐组**覆盖 ``object``。
+        「分析集合（Set）」用得到：`set:C`（只取碳原子）必须按**原子**追踪，
+        而 `set:链状分子`（整分子选中）应该按**分子质心**追踪。
     tau_intervals
         **可选的 τ 上限**：把总时长均分成 ``tau_intervals`` 个区间，MSD 只画/只拟合到
         **一个区间的长度**（例如 5 → τ_max = 总时长 / 5）。
@@ -966,15 +971,16 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
               "object": str(object), "remove_drift": bool(remove_drift),
               "tau_intervals": n_int, "tau_max_frames": tau_cap},
     )
-    # 坐标轴**保持原来的双对数**（用户要求：改回原来的样子）。
-    # "想看全部数据点"这种情况由前端处理：在图例里**只留下一条曲线**时，
-    # `chartOption.js` 会按那条曲线自己的数据自适应横/纵轴（含 τ=0 这种
-    # 对数轴画不出来的点会改走线性），并把范围收到数据本身。
-    # 横轴保留对数，**纵轴改线性** —— 用户明确要求：
-    # 「msd 图表纵坐标为什么还是对数，你改为线性的给我看看」。
+    # 坐标轴：**全部线性**（用户要求）。
+    # 演进过程：①原来是双对数；②用户要求纵轴改线性 → 横轴仍是对数（界面上写着
+    # "对数轴（仅横轴）"）；③用户实测后仍认为"MSD 随时间变化这张图没用线性图表"
+    # —— 因为横轴还是 10⁰/10¹/10² 的对数刻度，整张图看起来依旧是双对数图。
+    # 现在把第一张图（含 τ=0 那个 MSD=0 的点）彻底改成线性-线性：τ=0 的点在对数轴上
+    # 画不出来，改线性后"全部时间点"都在图上。
+    # 想看双对数（判断幂律指数 α）请用「各轴分解」面板的数据自行换轴，或告诉我加回。
     res.panels = [
         Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)", title="MSD 随时间间隔变化",
-              xscale="log", yscale="linear"),
+              xscale="linear", yscale="linear"),
         Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)", title="MSD 线性区拟合",
               xscale="linear", yscale="linear"),
         Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)",
@@ -983,10 +989,12 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
     ]
 
     fail_by_group: dict[str, float] = {}
+    per_group_obj = dict(object_by_group or {})
     for name, ag in groups.items():
         if ag is None or ag.n_atoms == 0:
             continue
-        lag_t, msd, diag = compute_msd_axes(mdt, ag, selection, object=object,
+        g_object = str(per_group_obj.get(name) or object)
+        lag_t, msd, diag = compute_msd_axes(mdt, ag, selection, object=g_object,
                                             remove_drift=remove_drift,
                                             max_particles=max_particles,
                                             n_error_blocks=n_error_blocks,
@@ -1015,7 +1023,7 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
 
         obj_label = "分子质心" if diag.get("对象") == "molecule" else "原子"
         res.add_curve(f"{name} ({obj_label}, {diag.get('粒子数', 0):,} 个)",
-                      lag_t, msd["total"], panel=0)
+                      lag_t, msd["total"], panel=0, group=name)
 
         # 线性区的拟合直线（沿用旧口径，画在同一张图上便于目视检查）
         t = np.asarray(lag_t, dtype=float)
@@ -1029,14 +1037,14 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 m = np.ones_like(t_ok, dtype=bool)
             slope = np.polyfit(t_ok[m], y_ok[m], 1)
             res.add_curve(f"{name} 线性拟合", t_ok[m], np.polyval(slope, t_ok[m]),
-                          panel=1)
-        res.add_curve(f"{name}", lag_t, y_tot, panel=1)
+                          panel=1, group=name)
+        res.add_curve(f"{name}", lag_t, y_tot, panel=1, group=name)
 
         # 各轴分解：各向异性是界面/受限体系最直接的可观测量
         for key, clabel in (("x", f"{name} MSD_x"), ("y", f"{name} MSD_y"),
                             ("z", f"{name} MSD_z"), ("para", f"{name} MSD∥ (x+y)"),
                             ("perp", f"{name} MSD⊥ (z)")):
-            res.add_curve(clabel, lag_t, msd[key], panel=2)
+            res.add_curve(clabel, lag_t, msd[key], panel=2, group=name)
 
         for k, v in fit.items():
             res.summary[f"{name} {k}"] = v

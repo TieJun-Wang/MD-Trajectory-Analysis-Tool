@@ -40,6 +40,10 @@ class Curve:
     y: np.ndarray
     kind: str = "line"  # line | step | bar | scatter
     panel: int = 0
+    #: 这条曲线属于哪个**分析对象**（组分 / 集合 / 配对）。
+    #: 空串 = 该面板只有一个系列；非空且同面板出现多个 group 时，前端默认只显示
+    #: 第一个对象，其余靠图例勾选（用户要求：别把两个对象全堆在一张图上）。
+    group: str = ""
 
     def __post_init__(self) -> None:
         self.x = np.asarray(self.x, dtype=float)
@@ -84,9 +88,10 @@ class AnalysisResult:
         y: Sequence[float] | np.ndarray,
         kind: str = "line",
         panel: int = 0,
+        group: str | None = None,
     ) -> Curve:
         curve = Curve(label=label, x=np.asarray(x, float), y=np.asarray(y, float),
-                      kind=kind, panel=panel)
+                      kind=kind, panel=panel, group=str(group or ""))
         self.curves.append(curve)
         return curve
 

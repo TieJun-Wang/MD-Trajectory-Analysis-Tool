@@ -1216,3 +1216,21 @@ table.filetable td { text-align: center; vertical-align: middle; }
 }
 .progress-meta { display: flex; gap: 8px; align-items: baseline; }
 .progress-meta .elapsed { margin-left: auto; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+/* ---------------------------------------------------------------- 分析集合（Set）
+   一行一个集合：勾选框 + 名字 + 预览（原子数/分子数/追踪方式）+ 删除 */
+.sets-list { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
+.set-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 2px 6px; border-radius: 6px; background: #f8fafc;
+  border: 1px solid #e5e7eb; font-size: 11px;
+}
+.set-row.off { opacity: 0.55; }
+.set-row .check { flex: none; }
+.set-row .set-desc {
+  flex: 1 1 auto; min-width: 0; color: var(--dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sets-list .mt4, .field .mt4 { margin-top: 4px; }
+.field .chips-pick select,
+.field .chips-pick input { font-size: 11.5px; }

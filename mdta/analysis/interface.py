@@ -293,12 +293,14 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
     ]
 
     for name, y in prof.items():
-        res.add_curve(name, centers, y, panel=0)
+        # `group=name`：一张图里有多个组分时，前端默认只显示**第一个组分**
+        # （其余在图例里点开）—— 见 chartOption.buildOption 的 legend.selected。
+        res.add_curve(name, centers, y, panel=0, group=name)
         bulk = _bulk_value(y)
         res.summary[f"{name} 体相密度"] = float(bulk)
         res.summary[f"{name} 平均密度"] = float(np.nanmean(y))
         res.add_curve(f"{name} (归一化)", centers, y / bulk if bulk > 0 else y * np.nan,
-                      panel=1)
+                      panel=1, group=name)
 
     res.summary["沿轴平均盒长 (Å)"] = dmeta["mean_box_length"]
     res.summary["平均盒体积 (Å³)"] = dmeta["mean_box_volume"]
@@ -784,7 +786,7 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         g = np.divide(hist, ideal, out=np.zeros_like(hist), where=ideal > 0)
 
         label = f"{a}-{b}"
-        res.add_curve(label, centers, g, panel=0)
+        res.add_curve(label, centers, g, panel=0, group=label)
         # QC：把"这个数是谁的数"写清楚——模式、分母、以及分子内配对的实际占比
         res.summary[f"{label} 配对模式"] = eff_mode
         res.summary[f"{label} 归一化分母 (有序原子对)"] = neff
@@ -845,7 +847,7 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             siv = float(qc_h.get("体积倒数和", 0.0) or 0.0)
             ideal_h = (neff * shell * siv) if siv > 0 else (nu * neff * shell / vbox_fallback)
             gh = np.divide(h, ideal_h, out=np.zeros_like(h), where=ideal_h > 0)
-            res.add_curve(f"{label} ({hname})", centers, gh, panel=1)
+            res.add_curve(f"{label} ({hname})", centers, gh, panel=1, group=label)
             pkh = _first_peak(centers, gh)
             if pkh:
                 res.summary[f"{label} {hname}第一峰高度 g_max"] = pkh["height"]
@@ -1167,7 +1169,7 @@ def analyze_rdf_inplane(mdt, groups: Mapping[str, object], selection: FrameSelec
             "固定阈值会把叶层圈错、归一化失真。")
     for name, gs in gsum.items():
         g = gs / max(n_acc, 1)
-        res.add_curve(f"{name}-{name}", centers, g, kind="line", panel=0)
+        res.add_curve(f"{name}-{name}", centers, g, kind="line", panel=0, group=name)
         # ⚠️ 不能对整条曲线取 argmax：rmax 默认 70 Å，珠子少的脂质曲线远端噪声
         # 尖峰（g≈1.1）会盖过真正的第一壳层峰；也不能用 3D 那套"先上升后下降"
         # 判据（2D 曲线在小 r 有排斥洞，会在 3–4 Å 报假峰）。判据见
@@ -1635,10 +1637,10 @@ def analyze_interface_width(mdt, groups: Mapping[str, object], selection: FrameS
         Panel(xlabel=f"位置沿 {axis_name} 方向 (Å)", ylabel="归一化密度 ρ/ρ_bulk",
               title="归一化密度与界面宽度定义"),
     ]
-    res.add_curve(a_name, centers, rho_a, panel=0)
-    res.add_curve(b_name, centers, rho_b, panel=0)
-    res.add_curve(f"{a_name} (归一化)", centers, fa, panel=1)
-    res.add_curve(f"{b_name} (归一化)", centers, fb, panel=1)
+    res.add_curve(a_name, centers, rho_a, panel=0, group=a_name)
+    res.add_curve(b_name, centers, rho_b, panel=0, group=b_name)
+    res.add_curve(f"{a_name} (归一化)", centers, fa, panel=1, group=a_name)
+    res.add_curve(f"{b_name} (归一化)", centers, fb, panel=1, group=b_name)
 
     # ---------------- 1D 台阶模型的适用性判据（阶段 5）
     # 为什么必须判：均匀混合体系里 fa、fb 都只在 1 附近涨落，两条涨落曲线互相

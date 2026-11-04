@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -157,6 +158,26 @@ def file_note(path: str) -> str | None:
     return None
 
 
+def _available_elements(universe) -> list[str]:
+    """体系里出现过的元素（给"分析集合"的多选项）。"""
+    try:
+        from mdta.sets import available_elements
+
+        return available_elements(universe)
+    except Exception:                                    # noqa: BLE001
+        return []
+
+
+def _set_presets(universe, components) -> list[dict]:
+    """一键预设（碳原子 / 链状分子 / 含环 / 大分子 / 重原子…），只列能选中的。"""
+    try:
+        from mdta.sets import suggest_presets
+
+        return suggest_presets(universe, components)
+    except Exception:                                    # noqa: BLE001
+        return []
+
+
 def supported_formats() -> dict:
     """给界面的格式说明（唯一来源 `mdta.formats`，前端 tooltip 与错误信息共用）。"""
     return {"topology": _topology_help(), "trajectory": _trajectory_help(),
@@ -217,6 +238,16 @@ class Session:
     _job: "RunJob | None" = field(default=None, repr=False)
     #: 最近一次导出的信息（目录 / 时间 / 计数），前端只显示这一条
     last_export: "dict | None" = field(default=None, repr=False)
+    #: 用户定义的「分析集合（Set）」定义与生成结果（见 mdta.sets）
+    sets_spec: list = field(default_factory=list, repr=False)
+    sets_info: list = field(default_factory=list, repr=False)
+    #: 最近一次「主链」（分析对象）请求，前端 F5 后据此把下拉框接回来
+    primary_req: dict = field(default_factory=dict, repr=False)
+    #: ``{分析名: 输入指纹}``：这次结果是用哪套"选择 + 帧 + 参数"算出来的。
+    #: 扩展分析（extend）时用它判断哪些结果还能留、哪些必须重算 —— 用户实测：
+    #: 第一轮只勾了几个组分跑 MSD，第二轮加了组分再跑，后端把 MSD 当成"已有结果"
+    #: 直接跳过，于是"加了组分却不跑"（结果还是按旧组分算的）。
+    sigs: dict = field(default_factory=dict, repr=False)
 
     # ------------------------------------------------------------- 基本信息
     @property
@@ -311,28 +342,67 @@ class Session:
             })
         return out
 
-    def components(self) -> list[dict]:
-        """组分清单。``n_molecules`` 是给界面用的：**逐分子统计只在多分子组分上有意义**
-        （单分子组分里"整组 Rg"和"该分子 Rg"是同一个数），界面据此把开关置灰。
-        代价极小（``molnums`` 直接读属性，AdK water 44336 原子实测 0.000 s）。
-        """
+    def _component_item(self, name, ag, *, active: bool) -> dict:
+        """一个组分在界面上的那条记录（原子数 / 分子数 / 集合的追踪方式）。"""
         from mdta.analysis.interface import _atom_molnums
 
-        out = []
-        for name, ag in self.az.components.items():
+        n_mol = 1
+        try:
+            m = _atom_molnums(ag)
+            if m is not None:
+                n_mol = int(np.unique(m).size) if m.size else 1
+        except Exception:  # noqa: BLE001
             n_mol = 1
-            try:
-                m = _atom_molnums(ag)
-                if m is not None:
-                    n_mol = int(np.unique(m).size) if m.size else 1
-            except Exception:  # noqa: BLE001
-                n_mol = 1
-            out.append({
-                "name": name,
-                "n_atoms": int(ag.n_atoms),
-                "n_residues": int(ag.residues.n_residues),
-                "n_molecules": n_mol,
-            })
+        item = {
+            "name": name,
+            "n_atoms": int(ag.n_atoms),
+            "n_residues": int(ag.residues.n_residues),
+            "n_molecules": n_mol,
+            # 这一条现在是否参与分析（取消勾选后仍在候选清单里，active=False）
+            "active": bool(active),
+        }
+        if str(name).startswith("set:"):
+            item["kind"] = "set"
+            item["trace"] = self.az.msd_group_objects.get(name)
+        return item
+
+    def components(self) -> list[dict]:
+        """**当前参与分析**的组分清单。``n_molecules`` 是给界面用的：**逐分子统计只在
+        多分子组分上有意义**（单分子组分里"整组 Rg"和"该分子 Rg"是同一个数），
+        界面据此把开关置灰。
+        代价极小（``molnums`` 直接读属性，AdK water 44336 原子实测 0.000 s）。
+        """
+        out = []
+        for name, ag in list(self.az.components.items()) + list(
+                self.az.extra_components.items()):
+            out.append(self._component_item(name, ag, active=True))
+        return out
+
+    def catalog(self) -> list[dict]:
+        """**候选成分清单**：自动识别出的全部组分 + 已定义的集合（不管勾没勾）。
+
+        为什么必须和 :meth:`components` 分开：界面上的组分胶囊与「主链」下拉框读的是
+        这一份。以前两者共用 `components`，于是"把自动识别的组分全部取消勾选"之后，
+        列表里就一条都不剩了 —— 用户实测：第一轮只跑 MSD（没勾任何自动组分），
+        第二轮想补算别的分析时发现无组分可选，刷新后也一样。
+        """
+        active = {str(k) for k in self.az.components}
+        out = []
+        seen: set[str] = set()
+        for name, ag in list(self.az.catalog.items()) + list(
+                self.az.extra_components.items()):
+            key = str(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(self._component_item(name, ag, active=key in active))
+        # 兜底：勾选了但不在候选清单里的（用户自定义选择语句）也要能勾掉
+        for name, ag in self.az.components.items():
+            key = str(name)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(self._component_item(name, ag, active=True))
         return out
 
     def primary_molecules(self) -> int:
@@ -350,15 +420,67 @@ class Session:
 
     # ----------------------------------------------------------------- 选择
     def apply_selection(self, req: Mapping[str, Any] | None) -> dict:
-        """按前端请求设置主链与组分。"""
+        """按前端请求设置主链与组分（含「分析集合（Set）」）。
+
+        顺序很关键：**先组分 → 再集合 → 最后主链**。集合是作为 `set:<名字>` 写进
+        `components` 的一等公民，所以主链解析必须排在集合之后 —— 否则界面上把主链
+        选成 `set:C` 会报「不存在组分 'set:C'」（用户实测：集合对回转半径不起作用，
+        一半原因在这里；另一半是主链还停在自动识别的最大链上）。
+        """
         # 分析进行中时不许改选择：会动到同一个 Universe
         self.assert_idle()
         req = dict(req or {})
         az = self.az
         az.auto_setup()
 
+        wanted = req.get("components")
+        if wanted is not None:
+            # ⚠️ 必须严格按用户勾选来（哪怕一个都没勾）：以前写成 `if wanted: ... if chosen:`，
+            # 结果"只勾了分析集合"时 `chosen` 为空 → 根本没有覆盖 auto_setup 自动识别出的
+            # protein / water / ion，用户看到的是"我没选它，却在分析它"。
+            chosen = OrderedDict()
+            for n in wanted:
+                if str(n).startswith("set:"):
+                    # 「分析集合（Set）」是下面单独处理的"一等公民"，不能当选择语句解析
+                    continue
+                if n in az.components:
+                    chosen[n] = az.components[n]
+                else:
+                    ag = select(az.universe, query=str(n))
+                    if ag.n_atoms == 0:
+                        raise SessionError(f"组分选择语句没有选中任何原子: {n!r}")
+                    chosen[str(n)] = ag
+            az.set_components(chosen)      # 允许为空 = 本次只用集合
+
+        # ---- 分析集合（Set）：可选的"只看某类原子/分子"
+        if "sets" in req and req.get("sets") is not None:
+            self.sets_spec = [dict(x) for x in (req.get("sets") or [])
+                              if isinstance(x, Mapping)]
+        if self.sets_spec:
+            from mdta.sets import SetError as _SetError
+
+            try:
+                self.sets_info = az.add_sets(self.sets_spec, components=az.components)
+            except _SetError as exc:
+                raise SessionError(f"分析集合定义有误：{exc}") from exc
+            # 参与与否**严格看 `components` 里的 `set:` 名字**：
+            # 界面勾上哪个集合就只保留哪个；一个都没勾 → 本次不参与分析。
+            if wanted is not None:
+                chosen_sets = {str(n) for n in wanted if str(n).startswith("set:")}
+                for key in list(az.components):
+                    if str(key).startswith("set:") and key not in chosen_sets:
+                        az.components.pop(key, None)
+                        az.msd_group_objects.pop(key, None)
+        else:
+            self.sets_info = []
+
+        # ---- 主链 / 构象分析对象（Rg / R_ee / 二面角 / 取向 / 结晶都用它）
+        # 放在集合之后：`set:` 名字这时才在 components 里，能直接当主链。
         primary = req.get("primary") or {"mode": "auto"}
+        self.primary_req = dict(primary)
         mode = primary.get("mode", "auto")
+        checked_sets = [str(n) for n in (wanted or [])
+                        if str(n).startswith("set:") and str(n) in az.components]
         if mode == "custom" and primary.get("query"):
             q = str(primary["query"])
             ag = select(az.universe, query=q)
@@ -368,7 +490,16 @@ class Session:
         elif mode == "component" and primary.get("name"):
             name = str(primary["name"])
             if name not in az.components:
-                raise SessionError(f"不存在组分 {name!r}")
+                if name.startswith("set:") and name in getattr(az, "set_groups", {}):
+                    # 主链选成这个集合、但它没勾选「参与分析」：直接把它启用。
+                    # 用户既然把它当分析对象，它就必须在这一次分析里参与 —— 报错
+                    # "请先勾上它"只会多一次来回。
+                    az.components[name] = az.set_groups[name]
+                elif name.startswith("set:"):
+                    raise SessionError(
+                        f"集合 {name} 不存在或没有定义（先在上面添加集合）")
+                else:
+                    raise SessionError(f"不存在组分 {name!r}")
             az.set_primary(az.components[name], f"组分 {name}")
         elif mode == "chain" and primary.get("segid"):
             got = _chains(az.universe, segid=str(primary["segid"]),
@@ -390,26 +521,37 @@ class Session:
             else:
                 az.set_primary(got[0], tag + (f" 第 1 条（共 {len(got)} 条）"
                                               if len(got) > 1 else ""))
-
-        wanted = req.get("components")
-        if wanted:
-            chosen = OrderedDict()
-            for n in wanted:
-                if n in az.components:
-                    chosen[n] = az.components[n]
-                else:
-                    ag = select(az.universe, query=str(n))
-                    if ag.n_atoms == 0:
-                        raise SessionError(f"组分选择语句没有选中任何原子: {n!r}")
-                    chosen[str(n)] = ag
-            if chosen:
-                az.set_components(chosen)
+        elif mode == "auto" and checked_sets:
+            # 「自动」+ 勾了集合 → 主链就是勾选的集合（多个取并集）。
+            # 为什么：Rg / R_ee / 二面角 / 取向 / 结晶的**分析对象就是主链**，
+            # 集合若只进 components，这些分析根本看不见它（用户实测：设了 set:C，
+            # 回转半径还是按"最大链"算的 —— 那显然不是他要的碳骨架）。
+            parts = [az.components[n] for n in checked_sets]
+            if len(parts) == 1:
+                ag = parts[0]
+            else:
+                idx = np.unique(np.concatenate(
+                    [np.asarray(g.indices, dtype=np.int64) for g in parts]))
+                ag = az.universe.atoms[idx]
+            label = ("集合 " + " + ".join(checked_sets) if len(checked_sets) > 1
+                     else f"集合 {checked_sets[0]}")
+            az.set_primary(ag, f"{label}（{ag.n_atoms:,} 原子）")
 
         return {
             "primary_label": az.primary_label,
+            "primary": dict(primary),
             "primary_atoms": int(az.primary.n_atoms) if az.primary is not None else 0,
             "primary_molecules": self.primary_molecules(),
+            # 当前参与分析的组分（只有勾选的）
             "components": self.components(),
+            # 勾选名字清单：界面据此恢复"哪些胶囊是亮的"
+            "active": [str(n) for n in az.components],
+            # 候选清单（全部自动组分 + 已定义集合，带 active 标记）
+            "catalog": self.catalog(),
+            "sets": list(self.sets_info),
+            # 可选元素与预设（界面做多选项与一键按钮）
+            "elements": _available_elements(az.universe),
+            "set_presets": _set_presets(az.universe, az.components),
         }
 
     # ----------------------------------------------------------------- 运行
@@ -447,8 +589,38 @@ class Session:
                   if isinstance(v, Mapping)}
         return {"sel_info": sel_info, "selection": selection,
                 "which": which, "params": params,
+                # 每项的"输入指纹"：选择（主链 + 参与的组分 + 集合定义）+ 帧 + 该项参数。
+                # 扩展分析时拿它和上次算这份结果时的指纹比，不一致就**重算**。
+                "sig": {n: self._input_sig(n, sel_info, frames, params) for n in which},
                 # 先跑几帧预估用时（默认开）；传 false 可跳过
                 "estimate": bool(req.get("estimate", True))}
+
+    _SIG_KEYS = ("start_ps", "stop_ps", "equil_ps", "interval_ps", "max_frames")
+
+    def _selection_sig(self, sel_info: Mapping[str, Any], frames: Mapping[str, Any]) -> str:
+        """「选择 + 帧」的指纹（与具体分析项无关的那一半）。"""
+        fr = {k: frames.get(k) for k in self._SIG_KEYS}
+        sel = {
+            "primary": sel_info.get("primary") or {"mode": "auto"},
+            # 参与分析的组分：排序后比较，勾选顺序不同不算变
+            "components": sorted(str(n) for n in (sel_info.get("active") or [])),
+            "sets": sorted(
+                ({"name": str(s.get("name") or ""), "elements": sorted(
+                    str(e) for e in (s.get("elements") or [])),
+                  "shape": str(s.get("shape") or "all"),
+                  "min_atoms": int(s.get("min_atoms") or 0),
+                  "max_atoms": int(s.get("max_atoms") or 0),
+                  "pure": bool(s.get("pure"))}
+                 for s in (self.sets_spec or [])),
+                key=lambda d: d["name"]),
+        }
+        return json.dumps({"sel": sel, "frames": fr}, sort_keys=True, default=str)
+
+    def _input_sig(self, name: str, sel_info: Mapping[str, Any],
+                   frames: Mapping[str, Any], params: Mapping[str, Any]) -> str:
+        """某一项分析的完整输入指纹（选择 + 帧 + 该项自己的参数）。"""
+        return (self._selection_sig(sel_info, frames)
+                + "|" + json.dumps(params.get(name) or {}, sort_keys=True, default=str))
 
     def _payload(self, prep: Mapping[str, Any], *, extra: Mapping | None = None) -> dict:
         """组装返回给前端的运行结果（调用方须持有锁）。"""
@@ -480,6 +652,7 @@ class Session:
                                   verbose=False, raise_errors=False)
             self.results_json = OrderedDict(
                 (name, serialize.result_to_json(res)) for name, res in raw.items())
+            self.sigs = dict(prep["sig"])
             return self._payload(prep)
 
     # ------------------------------------------------------------- 状态恢复
@@ -495,10 +668,26 @@ class Session:
             az = self.az
             sel_info = {
                 "primary_label": az.primary_label,
+                # 主链的**请求**（auto / component set:C / chain / custom）：
+                # 刷新后前端要把下拉框恢复成同一档，否则下一次运行会悄悄退回
+                # "自动"，分析对象就变了。
+                "primary": dict(self.primary_req or {"mode": "auto"}),
                 "primary_atoms": int(az.primary.n_atoms) if az.primary is not None else 0,
                 "primary_molecules": self.primary_molecules(),
                 "components": self.components(),
+                # 勾选名字清单（前端恢复"哪些胶囊是亮的"；`components` 只有勾选的）
+                "active": [str(n) for n in az.components],
             }
+            # 「分析集合（Set）」：定义 + 预览（原子数 / 追踪方式）+ 是否勾选参与。
+            # 勾选状态以 `components` 里有没有 `set:<名字>` 为准（唯一的真相来源）。
+            live = {str(n) for n in az.components}
+            sets_echo = []
+            for spec in self.sets_spec:
+                spec = dict(spec or {})
+                nm = str(spec.get("name") or "")
+                sets_echo.append({**spec, "name": nm,
+                                  "on": f"set:{nm}" in live})
+            sets_info = [dict(x) for x in (self.sets_info or [])]
             frames = None
             try:
                 fs = self.az.frames
@@ -523,8 +712,18 @@ class Session:
                 "info": self.info(),
                 "load_notes": self.load_notes(),
                 "chains": self.chains(),
+                # 候选成分清单：**全部**自动识别的组分 + 已定义集合（带 active 标记）。
+                # 前端恢复后组分胶囊 / 主链下拉框都读这一份 —— 只回 `components`
+                # 会导致"取消勾选后列表空了、刷新后也没得选"（用户实测）。
+                "catalog": self.catalog(),
                 "components": self.components(),
                 "selection": sel_info,
+                # 刷新恢复（用户要求：Set 模块不能一刷新就消失）
+                "sets": sets_echo,
+                "sets_info": sets_info,
+                # 集合编辑器要用的元素多选项 / 一键预设（刷新后同样要能继续编辑）
+                "elements": _available_elements(az.universe),
+                "set_presets": _set_presets(az.universe, az.components),
                 "frames": frames,
                 "results": self.results_json,
                 "summary_rows": serialize.summary_rows(self.results_json),
@@ -541,6 +740,7 @@ class Session:
             self.results_json = OrderedDict()
             self.az.results = OrderedDict()
             self.az.timings = {}
+            self.sigs = {}
             self._job = None
         return {"ok": True, "results": 0}
 
@@ -558,8 +758,14 @@ class Session:
     def start_run(self, req: Mapping[str, Any]) -> dict:
         """**立即返回**并在线程里跑分析；前端轮询 :meth:`run_progress` 拿增量结果。
 
-        ``extend=True``（用户要求）：**保留已有结果**，只算本次请求的分析项，
-        算完把新结果并进去 —— 这样"先跑几项、再补几项"不用重算前面的。
+        ``extend=True``（用户要求）：**保留还能用的已有结果**，只算本次新勾的项 ——
+        这样"先跑几项、再补几项"不用重算前面的。
+
+        ⚠️ 但"已有结果"必须**输入没变**才算能用：早先只要名字在结果集里就跳过，
+        于是用户第一轮只勾了一两个组分跑 MSD、第二轮加了组分再跑时，MSD 被当成
+        "已有结果"直接跳过 —— 界面上看起来就是"加了组分却不跑"（而且真的没跑，
+        图还是旧组分算的）。现在每份结果记一个输入指纹（选择 + 帧 + 该项参数），
+        指纹对不上就**作废重算**，指纹对得上才保留。
         默认 ``extend=False`` = 清空重跑（老行为）。
         """
         req = dict(req or {})
@@ -567,23 +773,40 @@ class Session:
         with self._lock:
             self.assert_idle()
             prep = self._prepare_run(req)
+            prep["extend"] = extend
             job = RunJob(order=list(prep["which"]))
             if extend:
-                # 已有结果全部预填进 completion，这样 after 仍表示
-                # "客户端手上已有几条结果"（前端带着旧结果，索引必须对得上）。
-                have = list(self.results_json)
-                job.preexisting = len(have)
-                job.completion = list(have)
-                skip = [n for n in prep["which"] if n in self.results_json]
+                keep, stale = [], []
+                for nm in prep["which"]:
+                    if nm not in self.results_json:
+                        continue
+                    if self.sigs.get(nm) == prep["sig"][nm]:
+                        keep.append(nm)
+                    else:
+                        stale.append(nm)
+                # 输入变了的旧结果必须扔掉：留着会让"结果与当前选择不一致"，
+                # 而界面上又看不出来是哪一轮算的。
+                for nm in stale:
+                    self.results_json.pop(nm, None)
+                    self.az.results.pop(nm, None)
+                    self.az.timings.pop(nm, None)
+                    self.sigs.pop(nm, None)
+                # 没被本次勾选的其它结果（用户这次没勾它们）保持原样，不进 completion
+                job.preexisting = len(keep)
+                job.completion = list(keep)
+                new = [n for n in prep["which"] if n not in keep]
                 job.message = (
-                    f"扩展分析：保留已有的 {len(have)} 项结果"
-                    + (f"，本次选中的 {len(skip)} 项已有结果、直接跳过" if skip else "")
-                    + f"，新算 {len(prep["which"]) - len(skip)} 项")
+                    f"扩展分析：保留 {len(keep)} 项结果"
+                    + (f"，重算 {len(stale)} 项（组分 / 帧 / 参数变了）" if stale else "")
+                    + (f"，新算 {len(new) - len(stale)} 项" if new else "")
+                    + ("，没有需要新算的项" if not new and not stale else "")
+                )
             else:
                 # 新一轮开始：清空上一轮，避免旧结果与新选择混在一起
                 self.results_json = OrderedDict()
                 self.az.results = OrderedDict()
                 self.az.timings = {}
+                self.sigs = {}
             self._job = job
         th = threading.Thread(target=self._run_worker, args=(prep,),
                               name=f"mdta-run-{self.sid}", daemon=True)
@@ -627,6 +850,8 @@ class Session:
                 with self._lock:
                     self.results_json[name] = payload
                     job.timings[name] = round(float(elapsed), 2)
+                    # 记下这份结果是用哪套输入算的（扩展分析时据此判断能不能留）
+                    self.sigs[name] = prep["sig"].get(name, "")
                     job.completion.append(name)
                     job.frac = max(job.frac, done / max(total, 1))
                     job.message = f"已完成 {done}/{total}：{ANALYSIS_TITLES.get(name, name)}"
@@ -679,13 +904,15 @@ class Session:
                         if not prep.get("estimate", True)
                         else "只勾选了 1 项，无需预估排序，直接跑")
 
-            # 扩展模式：已经在结果里的项不再重算（省掉重复计算）
+            # 扩展模式：已经有结果、且**输入没变**的项不重算（省掉重复计算）。
+            # 输入变了的项已在 start_run 里作废，所以这里自然会重算它们。
             to_run = [n for n in prep["which"] if n not in self.results_json]
             if not to_run:
                 with self._lock:
                     job.status = "done"
                     job.frac = 1.0
-                    job.message = "这些分析项都已经有结果，无需重算"
+                    job.message = ("勾选的这些分析项都已有结果，且组分 / 帧 / 参数没变，"
+                                   "无需重算（改了其中任何一项都会自动重算）")
                     job.finished = time.time()
                 return
             self.az.run_all(to_run, params=prep["params"], outdir=None,
@@ -693,6 +920,7 @@ class Session:
                             progress=_progress, on_result=_on_result,
                             order="shortest" if estimates else "given",
                             estimates=estimates,
+                            keep_existing=bool(prep.get("extend")),
                             cancel=job.cancel)
         except Exception as exc:  # noqa: BLE001
             with self._lock:
@@ -711,7 +939,12 @@ class Session:
             else:
                 job.status = "done"
                 job.frac = 1.0
-                job.message = f"完成：{len(job.completion)} 项分析"
+                # 只报"这次新算了多少"，保留的那几项单独说 —— 否则扩展跑 1 项时
+                # 消息却写"完成 5 项分析"，用户会以为又全算了一遍。
+                new_n = max(0, len(job.completion) - job.preexisting)
+                job.message = (f"完成：新算 {new_n} 项分析"
+                               + (f"（另有 {job.preexisting} 项沿用之前的结果）"
+                                  if job.preexisting else ""))
             job.finished = time.time()
 
     def run_progress(self, after: int = 0) -> dict:

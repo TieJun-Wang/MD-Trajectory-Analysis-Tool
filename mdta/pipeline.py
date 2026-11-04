@@ -150,6 +150,15 @@ class Analyzer:
         self.primary_label: str = "链"
         self.components: "OrderedDict[str, object]" = OrderedDict()
         self.extra_components: "OrderedDict[str, object]" = OrderedDict()
+        #: **候选组分清单**（自动识别出的全部组分 + 已定义的集合），与"当前勾选
+        #: 参与分析的 `components`"分开存。界面的组分胶囊 / 主链下拉框都读这一份，
+        #: 所以取消勾选不会让它们从列表里消失（详见 `auto_setup` 的说明）。
+        self.catalog: "OrderedDict[str, object]" = OrderedDict()
+        #: 已定义的集合名 → 原子组（不参与分析时也能被"改选为主链"重新启用）
+        self.set_groups: dict[str, object] = {}
+        #: `extra_components` / 组分 → MSD 的追踪语义（molecule / atom）。
+        #: 由「分析集合（Set）」决定：整分子选中→质心，被切碎→按原子。
+        self.msd_group_objects: dict[str, str] = {}
         self.results: "OrderedDict[str, AnalysisResult]" = OrderedDict()
         self._info: SystemInfo | None = None
         #: **正在计算的**分析名（``run_all`` 逐项设置）。界面靠它显示
@@ -248,11 +257,19 @@ class Analyzer:
                     "water": 4, "ion": 5, "other": 6}
         items = sorted(comps.items(),
                        key=lambda kv: (priority.get(kv[0].split("[")[0], 9), -kv[1].n_atoms))
+        #: **候选清单**（全部自动识别出的组分，不截断）。`components` 只是"当前勾选
+        #: 参与分析的那几个"。两者必须分开：界面上把组分全部取消勾选之后，候选清单
+        #: 仍要在（否则第二轮补充分析时就没得选了 —— 用户实测：第一轮只跑 MSD、
+        #: 没勾任何自动组分，刷新一次整张组分表就空了）。
+        self.catalog = OrderedDict(items)
         self.components = OrderedDict(items[:max_components])
         self.extra_components = OrderedDict()
         if not self.components:
             self.components = OrderedDict([("all", u.atoms)])
-        return {"primary": self.primary_label, "components": list(self.components)}
+        if not self.catalog:
+            self.catalog = OrderedDict([("all", u.atoms)])
+        return {"primary": self.primary_label, "components": list(self.components),
+                "catalog": list(self.catalog)}
 
     def set_primary(self, ag, label: str = "链") -> None:
         self.primary = ag
@@ -260,6 +277,41 @@ class Analyzer:
 
     def set_components(self, components: Mapping[str, object]) -> None:
         self.components = OrderedDict(components)
+
+    def add_sets(self, specs, components: Mapping[str, object] | None = None) -> list:
+        """按「分析集合（Set）」定义生成原子组，注册为 `set:<名字>` 成分。
+
+        返回每个集合的 info（含 `kind`：`molecule` = 整分子选中、可按质心追踪；
+        `atom` = 被元素筛选切碎、只能按原子追踪）。
+        """
+        from .sets import build_set
+
+        # 先清掉上一次定义的集合（重新定义时不能残留旧集合）
+        for key in [k for k in self.components if str(k).startswith("set:")]:
+            self.components.pop(key, None)
+        for key in [k for k in self.catalog if str(k).startswith("set:")]:
+            self.catalog.pop(key, None)
+        for key in [k for k in self.msd_group_objects if str(k).startswith("set:")]:
+            self.msd_group_objects.pop(key, None)
+        self.set_groups = {k: v for k, v in self.set_groups.items()
+                           if not str(k).startswith("set:")}
+        base = dict(components or self.components)
+        infos = []
+        for spec in specs or []:
+            spec = dict(spec or {})
+            name = str(spec.get("name") or "").strip()
+            if not name:
+                continue
+            ag, info = build_set(self.universe, spec, base)
+            key = f"set:{name}"
+            # 作为**一等公民组分**放进 components：RDF / 接触 / 界面 / 密度 也能选它
+            self.components[key] = ag
+            # 同时进候选清单：取消勾选后它仍在下拉框里，随时能再勾回来
+            self.catalog[key] = ag
+            self.set_groups[key] = ag
+            self.msd_group_objects[key] = info["kind"]
+            infos.append({**info, "name": key})
+        return infos
 
     def add_interface_component(self, name_a: str, name_b: str, cutoff: float = 5.0,
                                 label: str | None = None):
@@ -445,6 +497,10 @@ class Analyzer:
             groups = self._msd_groups()
             if not groups:
                 return None
+            # 逐组追踪语义：`set:C`（只取碳原子）按原子，`set:链状分子` 按分子质心
+            p = dict(p)
+            if self.msd_group_objects and "object_by_group" not in p:
+                p["object_by_group"] = dict(self.msd_group_objects)
             return dyn.analyze_msd(self.trajectory, groups, sel, verbose=verbose, **p)
         raise KeyError(f"未知分析项: {name!r}")
 
@@ -591,6 +647,7 @@ class Analyzer:
                 on_result: Callable | None = None,
                 order: str = "given",
                 estimates: Mapping[str, float | None] | None = None,
+                keep_existing: bool = False,
                 cancel: "threading.Event | None" = None) -> "OrderedDict[str, AnalysisResult]":
         """依次运行多项分析，可选直接导出。
 
@@ -608,15 +665,21 @@ class Analyzer:
 
         ``cancel`` 传入一个 :class:`threading.Event` 时，会在**每项分析开始前**
         检查它；已置位则停止并把已完成的项作为结果返回。
+        ``keep_existing=True``（Web 端"扩展分析"用）：**不清空** ``self.results`` /
+        ``self.timings``，本次只算 ``which`` 里还没结果的项，旧结果原样保留 ——
+        否则扩展跑完以后，之前那几项在 ``self.results`` 里就没了，导出会漏掉它们。
         ``panel_pngs=True`` 时额外为每个面板单独导出一张 PNG。
         """
         names = list(which) if which else list(DEFAULT_ORDER)
         params = dict(params or {})
         if order == "shortest" and estimates:
             names = sort_by_estimate(names, estimates)
-        self.results = OrderedDict()
+        if keep_existing:
+            self.results = getattr(self, "results", None) or OrderedDict()
+        else:
+            self.results = OrderedDict()
         #: ``{分析名: 耗时秒数}``，供界面显示"哪一项最慢"
-        self.timings: dict[str, float] = {}
+        self.timings = dict(getattr(self, "timings", {}) or {}) if keep_existing else {}
         self.run_order: list[str] = list(names)
         # 预热放在计时之前：一次性初始化（分子编号展开/键图/解包裹）不该算进
         # 队首那一项的耗时里（否则改个开关就能让同一项"看起来变慢"）
@@ -690,7 +753,8 @@ class Analyzer:
         u = self.universe
         for name, ag in self.components.items():
             category = name.split("[")[0]
-            if category == "water":
+            # 「分析集合（Set）」不参与"水→只看 O"的特判：集合已经是用户挑好的原子
+            if category == "water" and not name.startswith("set:"):
                 try:
                     ow = ag.select_atoms("name OW O")
                     if ow.n_atoms > 0:

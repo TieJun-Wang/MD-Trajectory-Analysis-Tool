@@ -58,6 +58,8 @@ from mdta.plotting import set_agg_backend                        # noqa: E402
 from .session import (                                           # noqa: E402
     SessionError,
     SessionRegistry,
+    _available_elements,
+    _set_presets,
     list_dir,
     supported_formats,
 )
@@ -179,12 +181,18 @@ def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
         "sid": sess.sid,
         "info": sess.info(),
         "chains": sess.chains(),
+        # 候选成分清单（全部自动组分 + 已定义集合，带 active 标记）——
+        # 界面上的组分胶囊与「主链」下拉框读它，取消勾选不会让条目消失
+        "catalog": sess.catalog(),
         "components": sess.components(),
         "primary_label": sess.az.primary_label,
         "primary_atoms": int(sess.az.primary.n_atoms) if sess.az.primary else 0,
         "outdir": sess.outdir,
         # 加载诊断（猜键 / 分子划分 / 偏移缓存重建），前端写进「运行日志」
         "load_notes": sess.load_notes(),
+        # 「分析集合（Set）」用：可选元素 + 一键预设（只列能选中的）
+        "elements": _available_elements(sess.az.universe),
+        "set_presets": _set_presets(sess.az.universe, sess.az.components),
     }
 
 
@@ -253,7 +261,8 @@ def session_chains(sid: str) -> dict:
 
 @app.get("/api/session/{sid}/components")
 def session_components(sid: str) -> dict:
-    return {"components": _sess(sid).components()}
+    sess = _sess(sid)
+    return {"components": sess.components(), "catalog": sess.catalog()}
 
 
 @app.post("/api/session/{sid}/select")

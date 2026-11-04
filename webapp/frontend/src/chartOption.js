@@ -132,6 +132,20 @@ export function buildOption(result, panelIndex, visible = null) {
   const yBounds = axisBounds(
     rangeOf(logY ? ysAll.filter((v) => v > 0) : ysAll), yscale)
 
+  // ---- 默认只显示"第一个分析对象"（同面板多个 group 时）
+  // group 由后端给（MSD/RDF 已带；其它分析通常是单系列，group 为空 → 全显示）
+  const groupsInOrder = []
+  for (const c of curves) {
+    const g = String(c.group || '')
+    if (g && !groupsInOrder.includes(g)) groupsInOrder.push(g)
+  }
+  const firstGroup = groupsInOrder.length > 1 ? groupsInOrder[0] : null
+  const defaultSelected = {}
+  for (const c of curves) {
+    const g = String(c.group || '')
+    defaultSelected[c.label] = firstGroup ? g === firstGroup : true
+  }
+
   const legend = []
   const series = curves.map((c, ci) => {
     legend.push(c.label)
@@ -187,6 +201,8 @@ export function buildOption(result, panelIndex, visible = null) {
           top: 34,
           type: 'scroll',
           data: legend,
+          // 多个对象时默认只勾第一个（其它曲线在图例里可点开）
+          ...(firstGroup ? { selected: defaultSelected } : null),
           itemWidth: 16,
           itemHeight: 9,
           textStyle: { fontSize: 11 },

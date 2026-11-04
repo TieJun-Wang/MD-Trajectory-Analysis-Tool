@@ -77,6 +77,9 @@ export default function App() {
   })
   const [primary, setPrimary] = useState({ mode: 'auto' })
   const [components, setComponents] = useState([])
+  // 分析集合（Set）：定义 + 后端预览（原子数 / 分子数 / 追踪方式）
+  const [sets, setSets] = useState([])
+  const [setsInfo, setSetsInfo] = useState([])
 
   const [titles, setTitles] = useState({})
   const [order, setOrder] = useState([])
@@ -110,6 +113,50 @@ export default function App() {
   const abortRef = useRef(null)
   const liveRunRef = useRef(null)
   const cancelledRef = useRef(false)
+
+  /**
+   * 分析集合变更：立刻让后端算一次预览（原子数/分子数/追踪方式），
+   * 同时刷新组分清单（集合是"一等公民组分"，RDF/接触/界面/MSD 都能选到）。
+   * 注意：这里故意用普通函数而不是 useCallback —— 它依赖 pushLog，
+   * 而 pushLog 定义在后面，useCallback 的依赖数组会在渲染期访问未初始化的
+   * const（之前踩过 `Cannot access before initialization`）。
+   */
+  const applySets = async (next) => {
+    setSets(next)
+    if (!sess?.sid) return
+    const on = next.filter((x) => x.on !== false).map((x) => `set:${x.name}`)
+    try {
+      const r = await api.select(sess.sid, {
+        primary,
+        components: [...components, ...on],
+        sets: next.map((x) => ({
+          name: x.name, elements: x.elements || [], shape: x.shape || 'all',
+          min_atoms: x.min_atoms || 0, max_atoms: x.max_atoms || 0,
+          pure: !!x.pure,
+        })),
+      })
+      setSetsInfo(r?.sets || [])
+      if (r?.catalog || r?.components) {
+        setSess((cur) => (cur ? {
+          ...cur,
+          // 组件胶囊 / 主链下拉框读**候选清单**（catalog）：没勾的条目也要在，
+          // 否则取消勾选后整张表就空了（用户实测）。
+          components: r.catalog || cur.components,
+          // 「自动」主链会跟着勾选的集合走（后端 apply_selection 的约定），
+          // 这里把新的标签带回来，界面上"自动（集合 set:C …）"才是真的
+          primary_label: r.primary_label ?? cur.primary_label,
+          primary_atoms: r.primary_atoms ?? cur.primary_atoms,
+        } : cur))
+        // 新集合默认参与分析：补进 components（chips 里会显示成选中态）
+        const setNames = (r.components || []).map((c) => c.name)
+          .filter((n) => n.startsWith('set:'))
+        setComponents((prev) => [...prev,
+          ...setNames.filter((n) => !prev.includes(n))])
+      }
+    } catch (e) {
+      setError(`集合预览失败: ${e.message}`)
+    }
+  }
 
   const pushLog = useCallback((line) => {
     const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false })
@@ -154,11 +201,34 @@ export default function App() {
       sid,
       info: st.info,
       load_notes: st.load_notes || [],
-      components: st.components || [],
+      // ⚠️ 这里必须是**候选清单**（catalog），不是"当前勾选的组分"：
+      // 用户实测 —— 第一轮没勾任何自动识别的组分（只跑了 MSD），刷新后
+      // 组分胶囊全空、第二轮没得选。catalog 才是不随勾选变化的完整清单。
+      components: st.catalog || st.components || [],
       chains: st.chains || [],
+      // 下面这些是「分析对象 / 分析集合」界面要用的（刷新后也得在）
+      primary_label: st.selection?.primary_label || '',
+      primary_atoms: st.selection?.primary_atoms || 0,
+      elements: st.elements || [],
+      set_presets: st.set_presets || [],
     })
-    setComponents(((st.selection?.components) || st.components || [])
+    // 勾选状态：优先用 active（纯名字清单），老后端退回 selection.components
+    setComponents(((st.selection?.active)
+      || st.selection?.components || st.components || [])
       .map((c) => (typeof c === 'string' ? c : c.name)))
+    // 分析集合（Set）：定义、预览、勾选状态都要接回来 —— 否则刷新一次
+    // 用户刚建好的集合就"消失"了（用户实测反馈）。
+    setSets((st.sets || []).map((x) => ({
+      name: x.name,
+      elements: x.elements || [],
+      shape: x.shape || 'all',
+      min_atoms: x.min_atoms ?? 0,
+      max_atoms: x.max_atoms ?? 0,
+      pure: !!x.pure,
+      on: x.on !== false,
+    })))
+    setSetsInfo(st.sets_info || [])
+    if (st.selection?.primary) setPrimary(st.selection.primary)
     const f = st.frames || {}
     setFrames((prev) => ({ ...prev,
       start_ps: f.start_ps ?? prev.start_ps,
@@ -196,7 +266,8 @@ export default function App() {
         titles: st.titles || {}, frames: st.frames || null,
         summary_rows: st.summary_rows || [],
       }
-      let got = job.n_done || names.length
+      // 索引以服务端的 completion 长度为准（= 后端认为"已经交付过"的项数）
+      let got = (job.completion || []).length || names.length
       try {
         for (;;) {
           await new Promise((r) => setTimeout(r, 500))
@@ -244,7 +315,11 @@ export default function App() {
 
   const onOpened = (data) => {
     try { window.localStorage.setItem(SID_KEY, data.sid) } catch { /* 隐私模式忽略 */ }
-    setSess(data)
+    setSets([])          // 新体系：清掉上一次定义的集合
+    setSetsInfo([])
+    // `components` 用**候选清单**（catalog）：它是界面上可勾选的全部条目，
+    // 与"现在勾了哪几个"（下面的 setComponents）是两回事。
+    setSess({ ...data, components: data.catalog || data.components || [] })
     setRun(null)
     setLive(null)
     setComponents((data.components || []).map((c) => c.name))
@@ -281,7 +356,8 @@ export default function App() {
     const t0 = performance.now()
     const existingNames = Object.keys(run?.results || {})
     pushLog(existingNames.length
-      ? `开始分析 ${which.length} 项（已有 ${existingNames.length} 项结果保留，只补算新增项）…`
+      ? `开始分析 ${which.length} 项（已有 ${existingNames.length} 项结果，`
+        + '组分 / 帧 / 参数没变的保留，变了的自动重算）…'
       : `开始分析 ${which.length} 项（实时刷新）…`)
 
     // 一点「开始分析」就让位给图表：立刻收起操作台、展开说明栏。
@@ -361,7 +437,17 @@ export default function App() {
         comdist: { axis: Number(params.axis) ?? 2,
                    pbc: params.comdist_pbc === true },
       },
-      selection: { primary, components },
+      selection: {
+        primary,
+        // 集合参与与否用 `set:<名字>` 表达（后端严格按此过滤）
+        components: [...components,
+          ...sets.filter((x) => x.on !== false).map((x) => `set:${x.name}`)],
+        sets: sets.map((x) => ({
+          name: x.name, elements: x.elements || [], shape: x.shape || 'all',
+          min_atoms: x.min_atoms || 0, max_atoms: x.max_atoms || 0,
+          pure: !!x.pure,
+        })),
+      },
     }
 
     // 结果按完成顺序累积；后端只回传我们还没有的那几项。
@@ -375,20 +461,22 @@ export default function App() {
     }
     let got = existing.length
 
-    const merge = (p) => {
+    const merge = (p, quiet = false) => {
       const fresh = Object.entries(p.results || {})
       if (fresh.length) {
         for (const [name, res] of fresh) acc.results[name] = res
         got += fresh.length
         // 第一项算完就切到图表页，让用户马上看到东西
-        if (got === fresh.length) {
+        if (!quiet && got === fresh.length) {
           setChart({ name: fresh[0][0], index: 0 })
           setVisibleCurves(null)
           setTab('charts')
         }
-        for (const [name] of fresh) {
-          const panels = acc.results[name]?.panels?.length || 1
-          pushLog(`  ✓ ${titles[name] || name} 完成（${panels} 张图）`)
+        if (!quiet) {
+          for (const [name] of fresh) {
+            const panels = acc.results[name]?.panels?.length || 1
+            pushLog(`  ✓ ${titles[name] || name} 完成（${panels} 张图）`)
+          }
         }
       }
       acc = {
@@ -413,7 +501,23 @@ export default function App() {
     }
 
     try {
-      merge(await api.runStart(sess.sid, body))
+      // 先拿 start 的返回：后端会告诉我们**保留了哪几项**（completion），
+      // 以及本次要跑哪几项（order − completion）。输入变了的旧结果必须从本地
+      // 丢掉，否则界面上留着的是按旧组分算的图（用户实测：加了组分却不跑）。
+      const p0 = await api.runStart(sess.sid, body)
+      {
+        const keep = p0.completion || []
+        const pend = new Set((p0.order || []).filter((n) => !keep.includes(n)))
+        const dropped = Object.keys(acc.results).filter((n) => pend.has(n))
+        for (const n of dropped) delete acc.results[n]
+        if (dropped.length) {
+          pushLog(`  这些项的设置变了，重算：${
+            dropped.map((n) => titles[n] || n).join('、')}`)
+        }
+        // 索引以服务端的"已有结果数"为准（本地条数可能多出被作废的那几项）
+        merge(p0, true)
+        got = keep.length
+      }
 
       // 轮询：后端每算完一项，这里就能拿到一项，页面边算边更新。
       // 取消后也继续轮询到后端把状态置为 cancelled —— 这样"当前这项"
@@ -621,7 +725,9 @@ export default function App() {
                           <SelectionBlock sess={sess} primary={primary}
                                           setPrimary={setPrimary}
                                           components={components}
-                                          setComponents={setComponents} />
+                                          setComponents={setComponents}
+                                          sets={sets} setsInfo={setsInfo}
+                                          onSetsChange={applySets} />
                           <FrameBlock frames={frames} setFrames={setFrames} />
                           <FunctionBlock titles={titles} order={order}
                                          which={which} setWhich={setWhich}

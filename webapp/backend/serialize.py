@@ -86,6 +86,8 @@ def curve_to_json(curve, max_points: int | None = MAX_POINTS) -> dict:
         "y": [_num(v) for v in y.tolist()],
         "n": int(curve.n),
         "downsampled": bool(ds),
+        # 所属分析对象（空 = 单系列）：前端据此"默认只显示第一个对象"
+        "group": str(getattr(curve, "group", "") or ""),
     }
 
 
