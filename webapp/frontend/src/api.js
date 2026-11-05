@@ -82,15 +82,18 @@ export const api = {
   files: (dir) => request(`/files${dir ? `?dir=${encodeURIComponent(dir)}` : ''}`),
 
   /** 打开体系（读取拓扑/轨迹），返回 sid 与体系信息（含 load_notes 加载诊断） */
-  open: (topology, trajectory, progressToken, guessBonds = false) =>
+  open: (topology, trajectory, progressToken, guessBonds = false,
+         velocities = false) =>
     request('/session', {
       method: 'POST',
       // progress_token 走**请求体**（后端从 payload 取）；前端在 POST 进行中
       // 并发轮询 /session/open/progress?token= 显示文件读取进度
       // guess_bonds=true：忽略拓扑里已有键、按坐标重猜（CONECT 不完整的 PDB）
+      // velocities=true：MS 的 .trj 转 TRR 时把速度一起存下来（XTC 装不下速度）
       body: JSON.stringify({ topology, trajectory: trajectory || null,
         progress_token: progressToken || null,
-        guess_bonds: guessBonds === true }),
+        guess_bonds: guessBonds === true,
+        velocities: velocities === true }),
     }),
 
   info: (sid) => request(`/session/${sid}/info`),

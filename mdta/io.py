@@ -267,6 +267,10 @@ class MDTrajectory:
     trajectory: str | None = None
     _universe: object | None = None
     guess_bonds: bool | None = None
+    #: 读 ``.trj`` 时是否**连带保存速度/力**：``True`` 就转成 TRR（坐标+速度，
+    #: 文件约为 XTC 的 5~6 倍），``False``/``None`` 只转坐标（XTC，最小）。
+    #: 速度是 MS ``.trj`` 里本来就有的（第 4-6 条 double 数组），XTC 装不下。
+    velocities: bool | None = None
     #: 猜键结果统计（未猜时为 ``None``）
     bond_guess_info: dict | None = None
     #: 对象层属性补齐诊断（elements / masses / molnums）
@@ -562,27 +566,44 @@ class MDTrajectory:
         return u
 
     def _convert_trajectory(self) -> str:
-        """把需要转换的轨迹（Materials Studio ``.trj``）转成 XTC，返回新路径。
+        """把需要转换的轨迹（Materials Studio ``.trj``）转成 XTC / TRR，返回新路径。
 
-        转换器来自用户自己的 pymsdump / md_convert（纯 Python，无需编译），
-        见 :mod:`mdta.ms_trj`；结果按「路径+大小+修改时间」缓存，重复打开秒开。
+        转换器来自本仓库的 ``pymsdump``（纯 Python，无需编译），见 :mod:`mdta.ms_trj`；
+        结果按「路径+大小+修改时间+格式+精度」缓存，重复打开秒开。
+
+        ``self.velocities=True`` 时转成 **TRR**（坐标 + 速度），否则只转坐标（XTC）。
+        精度：XTC 默认 1e4（0.001 Å 量化步长，单点误差 ≤5e-4 Å），可用环境变量
+        ``MDTA_XTC_PRECISION`` 调整。
         """
         from . import ms_trj as _ms
 
         if not _ms.available(self.trajectory):
             raise TrajectoryError(_ms.unavailable_message(self.trajectory))
+        fmt = "trr" if self.velocities else "xtc"
+        what = "TRR（坐标 + 速度）" if fmt == "trr" else "XTC"
         info = _ms.trj_info(self.trajectory)
-        _progress("转换 Materials Studio .trj → XTC",
+        _progress(f"转换 Materials Studio .trj → {what}",
                   frames=info.get("n_frames"), atoms=info.get("n_atoms"))
         out = _ms.convert_trj(
-            self.trajectory,
-            progress=lambda msg: _progress("转换 Materials Studio .trj → XTC",
+            self.trajectory, fmt=fmt,
+            progress=lambda msg: _progress(f"转换 Materials Studio .trj → {what}",
                                            note=msg))
         self.converted_xtc = str(out)
-        self.converted_note = (
-            f"轨迹 {os.path.basename(self.trajectory)} 是 Materials Studio 的 .trj，"
-            f"MDAnalysis 读不了；已用 pymsdump/ms_trj 转成 XTC 后读取"
-            f"（缓存：{out.name}）。")
+        prec = _ms.xc_precision()
+        if fmt == "trr":
+            self.load_notes.append(
+                f"轨迹 {os.path.basename(self.trajectory)} 是 Materials Studio 的 .trj，"
+                f"已转换成 **TRR**（坐标 + 速度）后读取：坐标 float32（误差 ~1e-6 Å）、"
+                f"速度单位 Å/ps，可在分析里直接用（缓存：{out.name}，"
+                f"{out.stat().st_size / 1e6:.1f} MB）。")
+        else:
+            self.load_notes.append(
+                f"轨迹 {os.path.basename(self.trajectory)} 是 Materials Studio 的 .trj，"
+                f"MDAnalysis 读不了；已用 pymsdump/ms_trj 转成 XTC 后读取"
+                f"（缓存：{out.name}；坐标量化步长 1e-3 Å，单点误差 ≤5e-4 Å —— "
+                f"官方 Trj2Ascii 导出的是完整 double，这点差别就是量化本身）。"
+                f"需要速度数据请用 TRR 模式。")
+        self.converted_note = self.load_notes[-1]
         return str(out)
 
     def _read_error_message(self, exc: BaseException, *,
@@ -960,6 +981,18 @@ class MDTrajectory:
         return int(self.universe.atoms.n_atoms)
 
     @property
+    def has_velocities(self) -> bool:
+        """轨迹里是否带速度（MDAnalysis 的 ``ts.velocities`` 可用）。
+
+        Materials Studio ``.trj`` 本身有速度（第 4-6 条 double 数组），但 XTC 装不下；
+        只有按 ``velocities=True`` 转成 **TRR** 时才能在这里读到 ``True``。
+        """
+        try:
+            return bool(getattr(self.universe.trajectory.ts, "has_velocities", False))
+        except Exception:                                    # noqa: BLE001
+            return False
+
+    @property
     def n_frames(self) -> int:
         return int(len(self.universe.trajectory))
 
@@ -1148,6 +1181,7 @@ def load_trajectory(
     *,
     autodetect: bool = True,
     guess_bonds: bool | None = None,
+    velocities: bool | None = None,
 ) -> MDTrajectory:
     """读取 MD 轨迹。
 
@@ -1161,6 +1195,10 @@ def load_trajectory(
     此时需要显式提供拓扑文件。
 
     ``guess_bonds`` 控制"没有键表时是否按坐标猜键"（见 :class:`MDTrajectory`）。
+
+    ``velocities``（只对 Materials Studio ``.trj`` 有效）：``True`` 时转成 **TRR**，
+    把 ``.trj`` 里本来就有的速度一并保存（坐标 + 速度；文件约为 XTC 的 5~6 倍）；
+    默认 ``None/False`` 只转坐标（XTC，最小、分析最快）。
     """
     if topology is None and trajectory is None:
         raise TrajectoryError("必须提供至少一个文件路径。")
@@ -1187,12 +1225,14 @@ def load_trajectory(
         if autodetect:
             found = _autodetect_trajectory(topology)
             if found:
-                return MDTrajectory(topology, found, guess_bonds=guess_bonds)
+                return MDTrajectory(topology, found, guess_bonds=guess_bonds,
+                                    velocities=velocities)
 
     if topology is None and trajectory is not None:
         raise TrajectoryError("缺少拓扑文件。")
 
-    return MDTrajectory(topology, trajectory, guess_bonds=guess_bonds)
+    return MDTrajectory(topology, trajectory, guess_bonds=guess_bonds,
+                        velocities=velocities)
 
 
 def scan_input_files(paths: Iterable[str]) -> tuple[list[str], list[str]]:

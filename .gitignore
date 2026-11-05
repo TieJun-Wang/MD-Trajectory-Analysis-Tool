@@ -143,6 +143,12 @@ pymsdump/test_*.py
 *.fig
 *.h5
 *.png
+# Materials Studio `Trj2Ascii.exe` 导出的坐标/速度文本（5596 原子 × 6001 帧 ≈ 90 MB，
+# 绝不能入库）。根目录的 .txt 一律当数据；唯一要留的是 requirements.txt
+#（深层的 `test/README.md` 这类是 .md，不受影响）
+/*.txt
+!/requirements.txt
+MS_trj_ascii_*.txt
 *.jpg
 *.jpeg
 *.svg

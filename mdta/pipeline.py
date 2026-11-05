@@ -139,12 +139,14 @@ class Analyzer:
     """一次完整的分析会话。"""
 
     def __init__(self, topology: str, trajectory: str | None = None, *,
-                 guess_bonds: bool | None = None):
+                 guess_bonds: bool | None = None,
+                 velocities: bool | None = None):
         # `guess_bonds=True`：忽略拓扑里已有的键、按坐标重新猜（CONECT 不完整的
         # PDB 用）。**必须能一路传到 Analyzer** —— 否则 Web 端把参数传给了
         # `load_trajectory` 做校验、Analyzer 又重新加载一次、参数就丢了。
+        # `velocities=True`：MS 的 .trj 转成 TRR（坐标 + 速度）后再读，同理必须透传。
         self.trajectory: MDTrajectory = load_trajectory(
-            topology, trajectory, guess_bonds=guess_bonds)
+            topology, trajectory, guess_bonds=guess_bonds, velocities=velocities)
         self.frames: FrameSelection | None = None
         self.primary = None            # 主链（构象/结晶分析对象）
         self.primary_label: str = "链"

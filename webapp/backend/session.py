@@ -490,16 +490,24 @@ class Session:
         elif mode == "component" and primary.get("name"):
             name = str(primary["name"])
             if name not in az.components:
-                if name.startswith("set:") and name in getattr(az, "set_groups", {}):
-                    # 主链选成这个集合、但它没勾选「参与分析」：直接把它启用。
-                    # 用户既然把它当分析对象，它就必须在这一次分析里参与 —— 报错
-                    # "请先勾上它"只会多一次来回。
+                catalog = getattr(az, "catalog", {}) or {}
+                if name in catalog:
+                    # 主链选的是**候选清单里有、但这次没勾选**的组分（界面上
+                    # 「分析对象」下拉框列的是候选清单，勾选框列的是本次参与项，
+                    # 两者本来就可以不一致）。用户既然把它选成分析对象，
+                    # 就必须让它在这一次分析里参与 —— 以前这里直接报
+                    # "不存在组分 'water'"（用户实测：选了 water 跑 Rg 就报错）。
+                    az.components[name] = catalog[name]
+                elif name.startswith("set:") and name in getattr(az, "set_groups", {}):
+                    # 同上，只是集合的原子组单独存在 set_groups 里
                     az.components[name] = az.set_groups[name]
                 elif name.startswith("set:"):
                     raise SessionError(
                         f"集合 {name} 不存在或没有定义（先在上面添加集合）")
                 else:
-                    raise SessionError(f"不存在组分 {name!r}")
+                    raise SessionError(
+                        f"不存在组分 {name!r}；当前体系可选的组分："
+                        f"{list(catalog) or list(az.components)}")
             az.set_primary(az.components[name], f"组分 {name}")
         elif mode == "chain" and primary.get("segid"):
             got = _chains(az.universe, segid=str(primary["segid"]),
@@ -1168,12 +1176,14 @@ class SessionRegistry:
     # ------------------------------------------------------------------ 建立
     def open(self, topology: str, trajectory: str | None = None,
              progress_token: str | None = None,
-             guess_bonds: bool | None = None) -> Session:
+             guess_bonds: bool | None = None,
+             velocities: bool | None = None) -> Session:
         """打开一个体系。``progress_token`` 非空时记录加载进度供前端轮询。
 
         ``guess_bonds=True``：忽略拓扑里已有的键、按坐标重新猜。用于
         ``CONECT`` 不完整的 PDB（Material Studio 导出常见；实测某体系只有
         4393 个键、键图碎片 1203 个，重新猜键后 5953 键 / 124 个分子）。
+        ``velocities=True``：读 MS 的 ``.trj`` 时把**速度**一并保留（转成 TRR）。
         """
         prog: OpenProgress | None = None
         if progress_token:
@@ -1188,7 +1198,8 @@ class SessionRegistry:
             set_progress_sink(prog)
         try:
             return self._open_inner(topology, trajectory, prog,
-                                    guess_bonds=guess_bonds)
+                                    guess_bonds=guess_bonds,
+                                    velocities=velocities)
         except Exception as exc:  # noqa: BLE001 - 记录失败原因后原样抛出
             if prog is not None:
                 prog.error = str(exc)
@@ -1198,7 +1209,8 @@ class SessionRegistry:
 
     def _open_inner(self, topology: str, trajectory: str | None,
                     prog: "OpenProgress | None",
-                    guess_bonds: bool | None = None) -> Session:
+                    guess_bonds: bool | None = None,
+                    velocities: bool | None = None) -> Session:
         if not topology:
             raise SessionError("必须提供拓扑文件；可用格式：" + _topology_help())
         if not os.path.isfile(topology):
@@ -1225,7 +1237,8 @@ class SessionRegistry:
                 f"（后缀 {_suffix_of(trajectory)}）。\n"
                 f"可用轨迹格式：{_trajectory_help()}")
         try:
-            mdt = load_trajectory(topology, trajectory, guess_bonds=guess_bonds)
+            mdt = load_trajectory(topology, trajectory, guess_bonds=guess_bonds,
+                                  velocities=velocities)
         except TrajectoryError as exc:
             raise SessionError(str(exc)) from exc
 
@@ -1241,7 +1254,8 @@ class SessionRegistry:
         _progress("打开体系")
         # `guess_bonds` 必须传给 Analyzer（它会**重新加载**拓扑）：否则校验用的
         # load_trajectory 带了参数、真正分析的这一份却没带，等于开关失效。
-        az = Analyzer(topology, trajectory, guess_bonds=guess_bonds)
+        az = Analyzer(topology, trajectory, guess_bonds=guess_bonds,
+                      velocities=velocities)
         az.auto_setup()
         _progress("识别组分与主链")
         # 体系信息在这里就算好（并缓存）：它的耗时全部来自"重复扫盘"，

@@ -172,9 +172,13 @@ def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
     # 例如 Material Studio 导出的文件）
     gb = payload.get("guess_bonds")
     guess_bonds = bool(gb) if gb is not None else None
+    # `velocities=True`：读 Materials Studio 的 .trj 时**连带保留速度**
+    # （转成 TRR；XTC 格式装不下速度，文件约为 XTC 的 5~6 倍）
+    vel = payload.get("velocities")
+    velocities = bool(vel) if vel is not None else None
     try:
         sess = registry.open(top, traj, progress_token=token,
-                             guess_bonds=guess_bonds)
+                             guess_bonds=guess_bonds, velocities=velocities)
     except SessionError as exc:
         raise _fail(exc) from exc
     return {
@@ -188,6 +192,8 @@ def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
         "primary_label": sess.az.primary_label,
         "primary_atoms": int(sess.az.primary.n_atoms) if sess.az.primary else 0,
         "outdir": sess.outdir,
+        # 轨迹里有没有速度（MS .trj 用 TRR 模式转换后为 True）
+        "has_velocities": bool(getattr(sess.az.trajectory, "has_velocities", False)),
         # 加载诊断（猜键 / 分子划分 / 偏移缓存重建），前端写进「运行日志」
         "load_notes": sess.load_notes(),
         # 「分析集合（Set）」用：可选元素 + 一键预设（只列能选中的）
