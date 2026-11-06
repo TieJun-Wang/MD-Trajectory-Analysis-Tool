@@ -100,6 +100,51 @@ export const api = {
   chains: (sid) => request(`/session/${sid}/chains`),
   components: (sid) => request(`/session/${sid}/components`),
 
+  // ---------------------------------------------- 三维结构 / 交互式选择
+  /**
+   * 一帧的坐标 + 元素 + 可选键表 + 层级信息（三维视图画球用）。
+   * `maxAtoms` 只控制**显示抽稀**（按整残基取，保住分子内化学键）；
+   * 返回的 `index` 始终是原始原子编号 —— 提交选择时用它。
+   */
+  structure: (sid, frame = 0, maxAtoms = 20000) =>
+    request(`/session/${sid}/structure?frame=${frame}&max_atoms=${maxAtoms}`),
+
+  /** 结构层级树：体系 → 组分 → 链（segid+resname）→ 残基（分页） */
+  hierarchy: (sid, { segid = '', resname = '', offset = 0, limit = 400 } = {}) =>
+    request(`/session/${sid}/hierarchy?segid=${encodeURIComponent(segid)}`
+      + `&resname=${encodeURIComponent(resname)}&offset=${offset}&limit=${limit}`),
+
+  /**
+   * 把一次点击（或一个结构名）**展开成完整原子索引**。
+   * 三维视图可能只画了部分原子（按整残基截断），而"选中整个残基/链/分子"
+   * 必须完整 —— 所以这一步交后端用 Universe 算，与显示无关。
+   */
+  expand: (sid, { level = 'atom', index = null, segid = '', resname = '',
+                  component = '' } = {}) => {
+    const qs = [`level=${encodeURIComponent(level)}`]
+    if (index !== null && index !== undefined) qs.push(`index=${index}`)
+    if (segid) qs.push(`segid=${encodeURIComponent(segid)}`)
+    if (resname) qs.push(`resname=${encodeURIComponent(resname)}`)
+    if (component) qs.push(`component=${encodeURIComponent(component)}`)
+    return request(`/session/${sid}/expand?${qs.join('&')}`)
+  },
+
+  /** 把三维视图里选中的**原子索引**变成一条集合（可直接参与分析） */
+  createSelection: (sid, name, indices) =>
+    request(`/session/${sid}/selection`, {
+      method: 'POST', body: JSON.stringify({ name, indices }),
+    }),
+
+  /** 按残基名+编号（ETH32）/ 原子名 / 原子索引检索结构（命中即可高亮） */
+  search: (sid, q, limit = 20) =>
+    request(`/session/${sid}/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+
+  /** 已保存的可视化选择 */
+  selections: (sid) => request(`/session/${sid}/selections`),
+  deleteSelection: (sid, name) =>
+    request(`/session/${sid}/selections/${encodeURIComponent(name)}`,
+      { method: 'DELETE' }),
+
   select: (sid, payload) =>
     request(`/session/${sid}/select`, { method: 'POST', body: JSON.stringify(payload) }),
 

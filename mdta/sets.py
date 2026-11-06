@@ -139,10 +139,18 @@ def build_set(universe, spec: dict, components: dict | None = None) -> tuple:
 
     ``info`` 里带 ``kind``（``"molecule"`` / ``"atom"``）、``n_atoms``、
     ``n_molecules``、``label``、以及实际生效的筛选条件，方便界面回显。
+
+    ``spec["indices"]``：**直接给原子索引**（三维可视化里框选/点选出来的原子）。
+    这条路径不做任何"筛选"，索引即结果 —— 界面上的"创建集合"就是这样来的。
+    ``kind`` 仍按"这些索引是否覆盖了完整分子"自动判定（MSD 追踪对象据此决定）。
     """
     u = universe
     spec = dict(spec or {})
     name = str(spec.get("name") or "set").strip() or "set"
+
+    raw_idx = spec.get("indices")
+    if raw_idx is not None:
+        return _build_set_from_indices(u, name, raw_idx)
 
     scope = spec.get("scope")
     elements = [str(e).strip().upper() for e in (spec.get("elements") or []) if str(e).strip()]
@@ -238,6 +246,58 @@ def build_set(universe, spec: dict, components: dict | None = None) -> tuple:
     return ag, info
 
 
+def _build_set_from_indices(universe, name: str, raw_idx) -> tuple:
+    """由**原子索引**直接构造集合（三维可视化里选出来的那批原子）。
+
+    索引一律按**原始 Universe 的原子编号**解释（0 基），与前端发来的完全一致：
+    可视化时的抽稀/隐藏只影响显示，绝不改编号。
+    """
+    u = universe
+    n = int(u.atoms.n_atoms)
+    try:
+        arr = np.asarray([int(x) for x in raw_idx], dtype=np.int64)
+    except (TypeError, ValueError) as exc:
+        raise SetError(f"原子索引不是整数列表：{exc}") from exc
+    if arr.size == 0:
+        raise SetError("没有选中任何原子（先在三维视图里点选或框选）")
+    bad = arr[(arr < 0) | (arr >= n)]
+    if bad.size:
+        raise SetError(
+            f"有 {bad.size} 个原子索引超出范围（应在 0..{n - 1} 之间，例如 {bad[:3].tolist()}）；"
+            f"索引必须来自当前体系，换个体系后请重新选择")
+    arr = np.unique(arr)
+
+    elem = _elements_of(u)
+    prof = molecule_profile(u)
+    mol = prof["mol"]
+    picked_mol = np.unique(mol[arr])
+    atoms_per_mol = prof["n_atoms"][picked_mol]
+    kept_per_mol = np.bincount(mol[arr], minlength=prof["n_mol"])[picked_mol]
+    intact = bool(np.all(kept_per_mol >= atoms_per_mol))
+
+    els = [str(e) for e in np.unique(elem[arr]) if str(e).strip()]
+    shown = "+".join(els[:4]) + ("…" if len(els) > 4 else "")
+    kind = "molecule" if intact else "atom"
+    label = (f"{name}（可视化选择：{shown or '原子'}｜{arr.size:,} 原子"
+             + (f" / {picked_mol.size:,} 分子）" if kind == "molecule" else "）"))
+    ag = u.atoms[arr]
+    info = {
+        "name": name,
+        "label": label,
+        "kind": kind,
+        "n_atoms": int(arr.size),
+        "n_molecules": int(picked_mol.size),
+        "elements": els,
+        "shape": "all",
+        "scope": "indices",
+        "min_atoms": 0,
+        "max_atoms": 0,
+        "pure": False,
+        "indices": arr.tolist(),
+    }
+    return ag, info
+
+
 def suggest_presets(universe, components: dict | None = None) -> list[dict]:
     """给界面的一键预设（都是"常见于 MSD/RDF 的切分方式"）。
 
@@ -257,9 +317,8 @@ def suggest_presets(universe, components: dict | None = None) -> list[dict]:
         out.append({"name": name, "spec": spec, "hint": hint,
                     "preview": info["label"]})
 
-    heavy = [e for e in els if e != "H"]
-    for e in [x for x in ("C", "N", "O") if x in heavy] or heavy[:2]:
-        _try(e, {"elements": [e]}, f"只统计元素 {e} 的原子（按原子追踪）")
+    # 注：元素预设（C / N / O）已按用户要求删除 —— 界面上的元素 chip 点一下
+    #     就能直接建集合并高亮，预设按钮重复了。
 
     _try("链状分子", {"shape": "chain"},
          "键图无环的分子（烷烃类、线型聚合物），按分子质心追踪")
@@ -267,9 +326,7 @@ def suggest_presets(universe, components: dict | None = None) -> list[dict]:
          "带环的分子（芳环/糖环等），按分子质心追踪")
     _try("大分子", {"min_atoms": 20},
          "每个分子 ≥20 原子（把单体/溶剂排除），按分子质心追踪")
-    if els:
-        _try("重原子", {"elements": [e for e in els if e != "H"]},
-             "排除氢，只看重原子（按原子追踪）")
+    # 注：「重原子」预设已按用户要求删除（元素多选里直接选需要的元素即可）
     return out
 
 

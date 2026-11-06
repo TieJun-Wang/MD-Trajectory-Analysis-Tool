@@ -114,10 +114,29 @@ export function buildOption(result, panelIndex, visible = null) {
   const logX = xscale === 'log'
   const logY = yscale === 'log'
 
-  // ---- 轴范围 = 当前可见曲线的数据范围（小余量，见 axisBounds）
-  const shown = (Array.isArray(visible) && visible.length)
-    ? curves.filter((c) => visible.includes(c.label))
-    : curves
+  // ---- 默认只显示"第一个分析对象"（同面板多个 group 时）
+  // group 由后端给（MSD/RDF/密度 等已带；其它分析通常是单系列，group 为空 → 全显示）
+  const groupsInOrder = []
+  for (const c of curves) {
+    const g = String(c.group || '')
+    if (g && !groupsInOrder.includes(g)) groupsInOrder.push(g)
+  }
+  const firstGroup = groupsInOrder.length > 1 ? groupsInOrder[0] : null
+  const defaultSelected = {}
+  for (const c of curves) {
+    const g = String(c.group || '')
+    defaultSelected[c.label] = firstGroup ? g === firstGroup : true
+  }
+
+  // ⚠️ 轴范围必须跟**实际画出来的曲线**一致：
+  //    显式传了 visible（用户点图例）就用它；否则等于"默认选中的那些"
+  //    （多对象时只有第一个对象）。以前这里 `visible` 为空就退回**全部曲线**，
+  //    于是默认只显示第一组、坐标轴却按所有组取范围 → 第一组被压成一条平线，
+  //    要等图例动一次（或刷新）才恢复（用户实测）。
+  const visibleLabels = (Array.isArray(visible) && visible.length)
+    ? visible
+    : curves.filter((c) => defaultSelected[c.label]).map((c) => c.label)
+  const shown = curves.filter((c) => visibleLabels.includes(c.label))
   const pool = shown.length ? shown : curves
   const xsAll = []
   const ysAll = []
@@ -131,20 +150,6 @@ export function buildOption(result, panelIndex, visible = null) {
     rangeOf(logX ? xsAll.filter((v) => v > 0) : xsAll), xscale)
   const yBounds = axisBounds(
     rangeOf(logY ? ysAll.filter((v) => v > 0) : ysAll), yscale)
-
-  // ---- 默认只显示"第一个分析对象"（同面板多个 group 时）
-  // group 由后端给（MSD/RDF 已带；其它分析通常是单系列，group 为空 → 全显示）
-  const groupsInOrder = []
-  for (const c of curves) {
-    const g = String(c.group || '')
-    if (g && !groupsInOrder.includes(g)) groupsInOrder.push(g)
-  }
-  const firstGroup = groupsInOrder.length > 1 ? groupsInOrder[0] : null
-  const defaultSelected = {}
-  for (const c of curves) {
-    const g = String(c.group || '')
-    defaultSelected[c.label] = firstGroup ? g === firstGroup : true
-  }
 
   const legend = []
   const series = curves.map((c, ci) => {

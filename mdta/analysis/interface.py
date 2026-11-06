@@ -39,13 +39,33 @@ __all__ = [
 
 
 # ------------------------------------------------------------------ 工具
+class BoxMissing(ValueError):
+    """当前体系没有晶胞（盒）信息。
+
+    单独成类是为了让上层**把它当成"这项做不了"而不是"程序出错"**：
+    `pipeline` 会把它记成"跳过 + 原因"，而不是在界面上抛一句 ValueError。
+    典型来源：非周期体系（MS 里没给晶胞）、只给了坐标没有盒的轨迹（.xyz 等）。
+    """
+
+
 def box_matrix(universe) -> np.ndarray:
     """返回模拟盒矩阵，行向量为 a、b、c 三个盒矢量（Å）。"""
     from MDAnalysis.lib.mdamath import triclinic_vectors
 
     dims = universe.dimensions
     if dims is None:
-        raise ValueError("当前帧没有模拟盒信息，无法做空间分布分析。")
+        # 有的轨迹格式把盒放在别处（例如拓扑里给了晶胞）：允许调用方在
+        # Universe 上挂一个兜底盒（``u._mdta_fallback_box = dims6``）。
+        dims = getattr(universe, "_mdta_fallback_box", None)
+    if dims is None:
+        raise BoxMissing(
+            "当前体系没有**晶胞（盒）信息**，做不了需要周期性的空间分布分析"
+            "（密度沿某方向的分布 / 界面宽度 / 面内 RDF 等）。\n"
+            "  常见原因：非周期体系（Materials Studio 里没有晶胞），"
+            "或只有坐标没有盒的轨迹（.xyz 等）。\n"
+            "  做法：换用带盒的轨迹（.trj / .tpr + .xtc / .gro 等），"
+            "或在 MS 里给结构加上周期晶胞后重新导出。\n"
+            "  （不依赖盒的 RDF / Rg / MSD 等照常可用。）")
     return np.asarray(triclinic_vectors(np.asarray(dims, dtype=float)), dtype=float)
 
 
@@ -554,6 +574,8 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
     n_intra = 0
     for idx in frame_indices:
         u.trajectory[int(idx)]
+        pa = np.asarray(ref.positions, dtype=float)
+        pb = None if same else np.asarray(conf.positions, dtype=float)
         box = u.dimensions
         if box is not None:
             try:
@@ -565,13 +587,26 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
                                        box_min_length_from_dims(box))
             except Exception:  # noqa: BLE001
                 pass
-        pa = np.asarray(ref.positions, dtype=float)
+        else:
+            # ---- 没有盒信息（非周期体系 / 只带坐标的轨迹）----
+            # 距离按**无周期性**算（capped_distance(box=None)），密度归一化用的
+            # 体积取这一帧坐标的**包围盒体积**。这是对"有限体系"最自然的近似：
+            # g(r) 的峰位/峰形仍然有效，长程与绝对值只作定性参考。
+            pts = pa if pb is None else np.vstack([pa, pb])
+            if pts.size:
+                ext = np.ptp(pts, axis=0)
+                ext = np.maximum(ext, 1e-6)
+                vol = float(np.prod(ext))
+                if vol > 0:
+                    qc["体积倒数和"] += 1.0 / vol
+                    qc["n_体积"] += 1
+                    qc["最小盒边长"] = min(float(qc["最小盒边长"]), float(ext.min()))
+            qc["无盒帧"] = int(qc.get("无盒帧", 0)) + 1
         if same:
             pairs, dist = self_capped_distance(pa, max_cutoff=rmax, box=box,
                                                return_distances=True)
             mc = ma
         else:
-            pb = np.asarray(conf.positions, dtype=float)
             pairs, dist = capped_distance(pa, pb, max_cutoff=rmax, box=box,
                                           return_distances=True)
             mc = mb
@@ -700,8 +735,15 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         pairs = [(a, b) for i, a in enumerate(names) for b in names[i:]]
     edges = np.linspace(0.0, float(rmax), int(nbins) + 1)
     centers = bin_edges_to_centers(edges)
-    # 兜底体积：仅当所选帧完全没有盒信息时才用（正常情况下逐帧累加 1/V）
-    vbox_fallback = float(abs(np.linalg.det(box_matrix(u))))
+    # 兜底体积：所选帧完全没有盒信息时才用（非周期体系）。
+    # 以前这里直接 `box_matrix(u)`，没有盒就抛 ValueError —— 一条没有晶胞的轨迹
+    # 连 RDF 都跑不了（用户实测：自定义集合跑 RDF 报"当前帧没有模拟盒信息"）。
+    # 现在：没有盒就按**逐帧坐标包围盒**当体积、距离按**无周期性**算（见
+    # `_rdf_accumulate`），并在结果说明里写清楚这是近似。
+    try:
+        vbox_fallback = float(abs(np.linalg.det(box_matrix(u))))
+    except BoxMissing:
+        vbox_fallback = 0.0
     shell = (4.0 / 3.0) * np.pi * (edges[1:] ** 3 - edges[:-1] ** 3)
 
     # 大组分抽稀（g(r) 是密度归一化的量，等间隔取子集不改变其数值，只降噪 + 大幅提速）
@@ -737,6 +779,7 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
     halves = {}
     degraded_modes: set[str] = set()
     auto_intra: set[str] = set()
+    n_boxless = 0                    # 有多少帧没有盒信息（见下方说明）
     if compare_halves and idx.size >= 2:
         half = idx.size // 2
         halves = {"前半段": idx[:half], "后半段": idx[half:]}
@@ -763,6 +806,7 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                                            mode=eff_mode, verbose=verbose)
         if n_used == 0:
             continue
+        n_boxless = max(n_boxless, int(qc.get("无盒帧", 0)))
         if qc.get("模式退化"):
             degraded_modes.add(str(qc["模式退化"]))
         if counts is None:
@@ -856,6 +900,14 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         res.add_notes(
             f"注意：rmax={rmax:g} Å 超过所选帧中最小盒边长的一半 "
             f"({0.5 * min_blen_seen:.2f} Å)，最小镜像近似可能失效，建议减小 rmax。")
+    # 没有盒信息的体系：说清楚做了什么近似（否则用户会拿 g(r) 的绝对值去比文献）
+    if n_boxless > 0:
+        res.add_notes(
+            f"⚠️ 这条轨迹**没有晶胞（盒）信息**（{n_boxless} 个所选帧）：距离按"
+            f"**无周期性**计算（不做最小镜像），密度归一化用**逐帧坐标包围盒体积**。"
+            f"峰位/峰形仍然有效，但 g(r) 的绝对值与长程部分只作定性参考，"
+            f"配位数同理。要对文献做定量比较，请换带盒的轨迹"
+            f"（.trj 转换后自带盒；或 .tpr + .xtc / .gro）。")
     res.summary["帧平均盒体积 (Å³)"] = vbox_last
     for nm, (n0, n1, how) in subsampled.items():
         res.add_notes(

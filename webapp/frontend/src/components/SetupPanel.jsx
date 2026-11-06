@@ -8,34 +8,38 @@ import { normalizeGroups } from '../analysisGroups'
 import { fmtSec } from '../format'
 
 //: 运行日志留一小条在设置板块底部，完整日志在右侧「运行日志」标签页
-export function SelectionBlock({ sess, primary, setPrimary, components, setComponents,
-                                      sets = [], setsInfo = [], onSetsChange = null }) {
+/**
+ * 「分析集合（Set）」板块 —— 1.0.4 起**迁到「结构选择」**（三维视图旁边），
+ * 因为集合既可以手写筛选条件，也可以由三维视图里框选出来的原子直接生成。
+ *
+ * 只依赖 `sess`（元素/预设）、`sets`（本地定义）、`setsInfo`（后端预览）与
+ * `onSetsChange`（变更回调），和原来的 SelectionBlock 用法一致。
+ */
+export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
+                          selectedCount = 0, onCreateFromIndices = null,
+                          onHighlight = null, activeSet = '' }) {
   if (!sess) return null
-  const chains = sess.chains || []
-  const comps = sess.components || []
-
-  const toggleComponent = (name) => {
-    setComponents(components.includes(name)
-      ? components.filter((c) => c !== name)
-      : [...components, name])
-  }
-
+  //: 三维视图里已经选中了原子 → 默认用"这批原子"建集合（用户要求：只有一套命名流程）
+  // 默认按筛选条件建（勾上才用三维视图里的选中原子）——默认勾上会让"选 H 再添加"
+  // 看起来像 H 没生效（用户实测）。
+  const [useSel, setUseSel] = useState(false)
   // ---- 分析集合（Set）：本地只存"定义"，原子数/追踪方式来自后端预览（setsInfo）
   const els = sess.elements || []
   const presets = sess.set_presets || []
   const [draft, setDraft] = useState({
     name: '', elements: [], shape: 'all', min_atoms: '', max_atoms: '', pure: false,
   })
-  const emit = (next) => { onSetsChange?.(next) }
+  //: 变更集合；`highlight` = 这次新建/更新的集合名（父组件会在三维视图里高亮它）
+  const emit = (next, highlight = '') => { onSetsChange?.(next, highlight) }
   const addSet = (spec) => {
     const name = String(spec.name || '').trim()
     if (!name) return
     if (sets.some((x) => x.name === name)) {
       // 同名覆盖
-      emit([...sets.filter((x) => x.name !== name), { ...spec, name }])
+      emit([...sets.filter((x) => x.name !== name), { ...spec, name }], name)
       return
     }
-    emit([...sets, { ...spec, name }])
+    emit([...sets, { ...spec, name }], name)
   }
   const removeSet = (name) => emit(sets.filter((x) => x.name !== name))
   const toggleSetOn = (name) => emit(sets.map((x) => (x.name === name
@@ -45,8 +49,16 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
       ? d.elements.filter((x) => x !== e)
       : [...d.elements, e] }))
   const submitDraft = () => {
+    const nm = draft.name.trim() || (draft.elements.join('') || '自定义')
+    // ① 三维视图里选中了原子、且用户没改成"按筛选条件" → 用这批原子建集合
+    if (useSel && selectedCount > 0 && onCreateFromIndices) {
+      onCreateFromIndices(nm)
+      setDraft({ name: '', elements: [], shape: 'all', min_atoms: '', max_atoms: '', pure: false })
+      return
+    }
+    // ② 否则按筛选条件建
     const spec = {
-      name: draft.name.trim() || (draft.elements.join('') || '自定义'),
+      name: nm,
       elements: draft.elements,
       shape: draft.shape,
       min_atoms: draft.min_atoms === '' ? 0 : Number(draft.min_atoms),
@@ -64,7 +76,6 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
         分析集合（Set）
         <span className="dim" style={{ fontWeight: 400 }}>（可选：只算某一类原子或分子）</span>
       </div>
-      {/* ---------------------------------------------- 分析集合（Set） */}
       <div className="field">
         {presets.length > 0 && (
           <div className="chips-pick mt4"
@@ -82,10 +93,37 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
         {els.length > 0 && (
           <div className="chips-pick mt4" title="选元素（不选 = 不按元素筛）">
             {els.slice(0, 12).map((e) => (
+              // 点元素 = **一键建集合并高亮**（与左边的 ＋C 预设同一行为）；
+              // 想组合多个元素时用下面的「其他原子」下拉累积到草稿再添加。
               <button key={e}
                       className={`chip-pick ${draft.elements.includes(e) ? 'on' : ''}`}
-                      onClick={() => toggleEl(e)}>{e}</button>
+                      title={`只看元素 ${e}（点一下直接生成集合并高亮）`}
+                      onClick={() => addSet({ name: e, elements: [e] })}>{e}</button>
             ))}
+            {/* 元素多于 12 个时，其余元素用下拉框补选（选项来自体系实际出现的元素） */}
+            {els.length > 12 && (
+              <select value="" onChange={(e) => {
+                if (e.target.value) toggleEl(e.target.value)
+                e.target.value = ''
+              }} title="其他原子（体系里出现的元素）">
+                <option value="">其他原子…</option>
+                {els.slice(12).map((e) => (
+                  <option key={e} value={e}>{e}</option>
+                ))}
+              </select>
+            )}
+            {/* 始终提供一个"其他原子"下拉：列出全部元素，方便按名字挑 */}
+            {els.length > 0 && (
+              <select value="" onChange={(e) => {
+                if (e.target.value) toggleEl(e.target.value)
+                e.target.value = ''
+              }} title="从体系里出现过的元素中选择">
+                <option value="">其他原子…</option>
+                {els.map((e) => (
+                  <option key={`all-${e}`} value={e}>{e}</option>
+                ))}
+              </select>
+            )}
             <select value={draft.shape}
                     onChange={(e) => setDraft({ ...draft, shape: e.target.value })}
                     title="链状 = 分子没有环；含环 = 分子里有环">
@@ -105,6 +143,15 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
                      onChange={(e) => setDraft({ ...draft, pure: e.target.checked })} />
               整分子只含所选元素
             </label>
+            {selectedCount > 0 && (
+              <label className="check" style={{ fontSize: 10.5 }}
+                     title={'勾上：用三维视图里当前高亮的 ' + selectedCount
+                       + ' 个原子建集合；不勾：按上面的筛选条件建'}>
+                <input type="checkbox" checked={useSel}
+                       onChange={(e) => setUseSel(e.target.checked)} />
+                用选中的 {selectedCount.toLocaleString()} 个原子
+              </label>
+            )}
             <input placeholder="集合名（留空自动）" value={draft.name}
                    style={{ width: 120 }}
                    onChange={(e) => setDraft({ ...draft, name: e.target.value })} />
@@ -118,16 +165,22 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
               const info = infoOf(x.name)
               const on = x.on !== false
               return (
-                <div key={x.name} className={`set-row${on ? '' : ' off'}`}>
+                <div key={x.name}
+                     className={`set-row${on ? '' : ' off'}${activeSet === x.name ? ' active' : ''}`}
+                     onClick={() => onHighlight?.(x.name)}
+                     title="点击在三维视图里高亮这个集合的原子">
                   <label className="check" style={{ fontSize: 10.5 }}
-                         title={on ? '点此取消参与' : '点此参与分析'}>
+                         title={on ? '点此取消参与分析' : '点此参与分析'}
+                         onClick={(e) => e.stopPropagation()}>
                     <input type="checkbox" checked={on} onChange={() => toggleSetOn(x.name)} />
                     <b>set:{x.name}</b>
                   </label>
                   <span className="set-desc">
                     {info ? `${info.label}` : '（自动预览）'}
                   </span>
-                  <button className="mini" onClick={() => removeSet(x.name)}>删除</button>
+                  <button className="mini" onClick={(e) => { e.stopPropagation(); removeSet(x.name) }}>
+                    删除
+                  </button>
                 </div>
               )
             })}
@@ -135,6 +188,25 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
         )}
       </div>
 
+    </>
+  )
+}
+
+
+export function SelectionBlock({ sess, primary, setPrimary, components, setComponents,
+                                      sets = [], setsInfo = [], onSetsChange = null }) {
+  if (!sess) return null
+  const chains = sess.chains || []
+  const comps = sess.components || []
+
+  const toggleComponent = (name) => {
+    setComponents(components.includes(name)
+      ? components.filter((c) => c !== name)
+      : [...components, name])
+  }
+
+  return (
+    <>
       <div className="sect-title">分析对象</div>
 
       <label className="field">

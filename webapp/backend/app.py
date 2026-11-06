@@ -189,6 +189,8 @@ def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
         # 界面上的组分胶囊与「主链」下拉框读它，取消勾选不会让条目消失
         "catalog": sess.catalog(),
         "components": sess.components(),
+        # 已保存的可视化选择（三维视图里存下来的）
+        "selections": sess.selection_list(),
         "primary_label": sess.az.primary_label,
         "primary_atoms": int(sess.az.primary.n_atoms) if sess.az.primary else 0,
         "outdir": sess.outdir,
@@ -277,6 +279,102 @@ def session_select(sid: str, payload: Mapping[str, Any] = Body(default={})) -> d
     try:
         with sess.lock:
             return sess.apply_selection(payload)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+# ------------------------------------------------ 三维结构（可视化选择用）
+@app.get("/api/session/{sid}/structure")
+def session_structure(sid: str, frame: int = 0, max_atoms: int = 20000) -> dict:
+    """一帧的原子坐标 / 元素 / 可选键表 / 层级信息（三维视图画球用）。
+
+    ``max_atoms`` 只控制**显示抽稀**：返回的 ``index`` 始终是原始原子编号，
+    前端提交选择时用它 —— 抽稀与隐藏都不改变编号。
+    """
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.structure(frame=frame, max_atoms=max_atoms)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+    except Exception as exc:                                     # noqa: BLE001
+        raise _fail(SessionError(f"取三维结构失败：{type(exc).__name__}: {exc}")) from exc
+
+
+@app.get("/api/session/{sid}/hierarchy")
+def session_hierarchy(sid: str, segid: str = "", resname: str = "",
+                      offset: int = 0, limit: int = 400) -> dict:
+    """结构层级树：体系 → 组分 → 链（segid+resname）→ 残基（分页）。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.hierarchy(segid=segid or None, resname=resname or None,
+                                  offset=offset, limit=limit)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.get("/api/session/{sid}/search")
+def session_search(sid: str, q: str = "", limit: int = 20) -> dict:
+    """按残基名+编号（``ETH32``）、原子名或原子索引检索，命中即可在三维视图高亮。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.search(q, limit=limit)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.get("/api/session/{sid}/expand")
+def session_expand(sid: str, level: str = "atom", index: int | None = None,
+                   segid: str = "", resname: str = "",
+                   component: str = "") -> dict:
+    """把一次点击（或一个结构名）**展开成完整原子索引**（按原始编号）。
+
+    三维视图为性能可能只画了部分原子（按整残基截断），但"选中整个残基/链/分子"
+    必须完整 —— 所以展开由后端用 Universe 直接算，与显示无关。
+    """
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.expand(level, index=index, segid=segid or None,
+                               resname=resname or None,
+                               component=component or None)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.post("/api/session/{sid}/selection")
+def session_selection(sid: str, payload: Mapping[str, Any] = Body(default={})) -> dict:
+    """把三维视图里选中的**原子索引**变成一条集合（可直接参与后续分析）。
+
+    请求：``{"name": "我选的碳链", "indices": [0, 5, 7, ...]}``
+    （给了 ``name`` 但没给 ``indices`` ＝ 加载同名的已保存选择）
+    """
+    sess = _sess(sid)
+    name = str(payload.get("name") or "").strip()
+    raw = payload.get("indices")
+    try:
+        if raw is None:
+            return sess.load_selection(name)
+        if not isinstance(raw, (list, tuple)):
+            raise SessionError("indices 必须是原子索引数组")
+        return sess.add_visual_selection(name, raw)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.get("/api/session/{sid}/selections")
+def session_selections(sid: str) -> dict:
+    """已保存的可视化选择（名字 / 原子数 / 类型）。"""
+    return {"selections": _sess(sid).selection_list()}
+
+
+@app.delete("/api/session/{sid}/selections/{name}")
+def session_selection_delete(sid: str, name: str) -> dict:
+    sess = _sess(sid)
+    try:
+        return sess.delete_selection(name)
     except SessionError as exc:
         raise _fail(exc) from exc
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import sys
@@ -248,6 +249,8 @@ class Session:
     #: 第一轮只勾了几个组分跑 MSD，第二轮加了组分再跑，后端把 MSD 当成"已有结果"
     #: 直接跳过，于是"加了组分却不跑"（结果还是按旧组分算的）。
     sigs: dict = field(default_factory=dict, repr=False)
+    #: 三维视图里保存下来的选择：``{名字: {name, indices, n_atoms, kind, label}}``
+    selections: dict = field(default_factory=dict, repr=False)
 
     # ------------------------------------------------------------- 基本信息
     @property
@@ -282,9 +285,31 @@ class Session:
             "n_dihedrals": info.n_dihedrals,
             "categories": dict(info.categories),
             # 结构化表格：Web 界面直接用表格渲染，不再显示定宽文本报告
-            "sections": info_tables(info, max_chain_types=25),
+            "sections": self._info_sections(info),
             "text": self.az.info_text(max_chain_types=25),
         }
+
+    def _info_sections(self, info) -> list[dict]:
+        """体系信息表格 + 追加「组分与残基构成」（按残基细分，不止 protein/water/ion）。"""
+        from mdta.systeminfo import info_tables
+
+        sections = info_tables(info, max_chain_types=25)
+        try:
+            rows = []
+            for c in self.catalog():
+                mix = c.get("residue_mix") or []
+                brief = "、".join(f"{m['resname']}×{m['n']}" for m in mix[:5])
+                if c.get("n_residue_kinds", 0) > len(mix[:5]):
+                    brief += f" …（共 {c['n_residue_kinds']} 种）"
+                rows.append([str(c["name"]), f"{c['n_atoms']:,}",
+                             f"{c.get('n_residue_kinds', 0)}", brief or "—"])
+            if rows:
+                sections.append({"title": "组分与残基构成",
+                                 "columns": ["组分", "原子数", "残基种类", "主要残基"],
+                                 "rows": rows})
+        except Exception:                                    # noqa: BLE001
+            pass
+        return sections
 
     def load_notes(self) -> list[str]:
         """加载阶段的诊断说明（猜键 / 分子划分 / 偏移缓存重建）。
@@ -342,8 +367,31 @@ class Session:
             })
         return out
 
+    def _residue_mix(self, ag, top: int = 6) -> tuple[list, int]:
+        """该组分的**残基构成**：主要残基名 + 各自残基数 + 原子数；返回 (mix, 种类数)。
+
+        为什么需要：界面上只写「protein / water / ion」太笼统（用户实测）。
+        有了残基构成，用户能一眼看出"这个 protein 里到底有哪些残基"。
+        """
+        try:
+            r = ag.residues
+            names = [str(x) for x in r.resnames]
+            if not names:
+                return [], 0
+            from collections import Counter
+
+            kinds = Counter(names)
+            atom_of = Counter()
+            for res in r:
+                atom_of[str(res.resname)] += int(res.atoms.n_atoms)
+            mix = [{"resname": k, "n": int(v), "atoms": int(atom_of.get(k, 0))}
+                   for k, v in kinds.most_common(top)]
+            return mix, len(kinds)
+        except Exception:                                    # noqa: BLE001
+            return [], 0
+
     def _component_item(self, name, ag, *, active: bool) -> dict:
-        """一个组分在界面上的那条记录（原子数 / 分子数 / 集合的追踪方式）。"""
+        """一个组分在界面上的那条记录（原子数 / 分子数 / 残基构成 / 追踪方式）。"""
         from mdta.analysis.interface import _atom_molnums
 
         n_mol = 1
@@ -353,6 +401,7 @@ class Session:
                 n_mol = int(np.unique(m).size) if m.size else 1
         except Exception:  # noqa: BLE001
             n_mol = 1
+        mix, n_kinds = self._residue_mix(ag)
         item = {
             "name": name,
             "n_atoms": int(ag.n_atoms),
@@ -360,6 +409,9 @@ class Session:
             "n_molecules": n_mol,
             # 这一条现在是否参与分析（取消勾选后仍在候选清单里，active=False）
             "active": bool(active),
+            # 残基构成（protein/water/ion 太笼统，界面按这个进一步区分）
+            "residue_mix": mix,
+            "n_residue_kinds": int(n_kinds),
         }
         if str(name).startswith("set:"):
             item["kind"] = "set"
@@ -456,6 +508,14 @@ class Session:
         if "sets" in req and req.get("sets") is not None:
             self.sets_spec = [dict(x) for x in (req.get("sets") or [])
                               if isinstance(x, Mapping)]
+        # 「可视化选择」存下来的集合：前端只回传名字（上万个索引不必来回传），
+        # 索引由后端从 `self.selections` 补回 —— 否则重建时会退化成"没有筛选条件"
+        # 的集合（那会选中**整个体系**，比丢还好一点的是错得更离谱）。
+        for spec in self.sets_spec:
+            if "indices" not in spec:
+                rec = (self.selections or {}).get(str(spec.get("name") or ""))
+                if rec and rec.get("indices"):
+                    spec["indices"] = list(rec["indices"])
         if self.sets_spec:
             from mdta.sets import SetError as _SetError
 
@@ -562,6 +622,507 @@ class Session:
             "set_presets": _set_presets(az.universe, az.components),
         }
 
+    # ------------------------------------------------- 三维结构与交互式选择
+    def _chain_chem(self, segid: str, resname: str) -> dict:
+        """一条链类型（segid+resname）的化学身份：分子式 / 名称 / 类别 / 聚合度。
+
+        做法：取该类型**第一个残基**所属的**完整分子**（键连通分量），统计元素组成
+        与独立环数，交给 :func:`mdta.chem.summarize`。拿不到就返回空 dict。
+        """
+        try:
+            from mdta.chem import summarize
+            from mdta.sets import molecule_profile, _elements_of
+
+            u = self.az.universe
+            res = u.residues
+            mask = np.ones(int(res.n_residues), dtype=bool)
+            try:
+                mask &= np.asarray(res.segids, dtype=str) == str(segid)
+            except Exception:                                # noqa: BLE001
+                pass
+            mask &= np.asarray(res.resnames, dtype=str) == str(resname)
+            hits = np.nonzero(mask)[0]
+            if not hits.size:
+                return {}
+            ridx = int(hits[0])
+            atom_res = np.asarray(u.atoms.resindices, dtype=int)
+            seed = np.nonzero(atom_res == ridx)[0]
+            if not seed.size:
+                return {}
+            prof = molecule_profile(u)
+            mol = prof["mol"]
+            mid = int(mol[seed[0]])
+            sel = np.nonzero(mol == mid)[0]
+            elem = _elements_of(u)[sel]
+            counts: dict[str, int] = {}
+            for e in elem:
+                k = str(e).strip().upper() or "X"
+                counts[k] = counts.get(k, 0) + 1
+            n_rings = 1 if bool(prof["has_ring"][mid]) else 0
+            info = summarize(counts, resname=resname, n_rings=n_rings,
+                             is_chain=bool(prof["is_chain"][mid]),
+                             n_atoms=int(sel.size))
+            info["n_atoms_in_molecule"] = int(sel.size)
+            info["n_molecules"] = int(len(hits))
+            return info
+        except Exception:                                    # noqa: BLE001
+            return {}
+
+    def search(self, q: str, limit: int = 20) -> dict:
+        """按**残基名 + 编号**（如 ``ETH32``）、原子名或原子索引检索结构。
+
+        用户要求（1.0.4）：搜索要具体到某个残基/原子（例如 ``ETH32`` ``ETH34``），
+        命中后在三维视图里高亮。匹配顺序：
+
+        1. ``残基名+残基号`` 精确匹配（``ETH32`` / ``eth 32`` / ``ETH-32``）→ 残基；
+        2. 纯数字 → 当作**原子索引**（``123`` / ``#123``）；
+        3. 原子名精确匹配（``C1`` ``H12``）→ 若干原子；
+        4. 以上都不中 → 残基名**前缀**匹配（``ETH`` → 该类型的前若干个残基）。
+        """
+        u = self.az.universe
+        n = int(u.atoms.n_atoms)
+        raw = str(q or "").strip()
+        out: list[dict] = []
+        if not raw:
+            return {"query": "", "matches": [], "total": 0}
+
+        resnames = np.array([str(x) for x in u.residues.resnames], dtype=object)
+        resids = np.asarray(u.residues.resids, dtype=np.int64)
+        segids = np.array([str(x) for x in u.residues.segids], dtype=object)
+        atom_res = np.asarray(u.atoms.resindices, dtype=np.int64)
+
+        def _add_residue(i: int) -> None:
+            idx = np.nonzero(atom_res == i)[0]
+            out.append({
+                "label": f"{resnames[i]}{resids[i]}",
+                "level": "residue",
+                "segid": str(segids[i]),
+                "resname": str(resnames[i]),
+                "resid": int(resids[i]),
+                "n_atoms": int(idx.size),
+                "indices": [int(x) for x in idx[:5000]],
+            })
+
+        # ---- ① 残基名 + 编号（ETH32、eth 32、ETH-32）
+        m = re.match(r"^\s*([A-Za-z+0-9_.\-]+?)\s*[-_ ]?\s*(\d+)\s*$", raw)
+        if m:
+            want_name, want_id = m.group(1).upper(), int(m.group(2))
+            hits = np.nonzero((np.char.upper(resnames.astype(str)) == want_name)
+                              & (resids == want_id))[0]
+            for i in hits[:limit]:
+                _add_residue(int(i))
+            if out:
+                return {"query": raw, "matches": out, "total": int(hits.size)}
+
+        # ---- ② 纯数字 → 原子索引
+        if re.fullmatch(r"#?\d+", raw):
+            i = int(raw.lstrip("#"))
+            if 0 <= i < n:
+                out.append({"label": f"原子 #{i}", "level": "atom",
+                            "n_atoms": 1, "indices": [i]})
+                return {"query": raw, "matches": out, "total": 1}
+
+        # ---- ③ 原子名匹配（**大小写不敏感**；先精确、再前缀）
+        names = np.array([str(x) for x in u.atoms.names], dtype=object)
+        up = np.char.upper(names.astype(str))
+        hit = np.nonzero(up == raw.upper())[0]
+        if not hit.size:
+            hit = np.nonzero(np.char.startswith(up, raw.upper()))[0]
+        if hit.size:
+            for i in hit[:limit]:
+                r = int(atom_res[i])
+                out.append({"label": f"原子 {names[i]}（{resnames[r]}{resids[r]}）",
+                            "level": "atom", "n_atoms": 1, "indices": [int(i)]})
+            return {"query": raw, "matches": out, "total": int(hit.size)}
+
+        # ---- ③' 元素 + 序号（C1 = 第 1 个碳原子，C2 = 第 2 个…）
+        # 为什么需要：有的拓扑里所有碳都叫 "C"，只写 "C1" 既不是残基也不是原子名，
+        # 但用户显然想指"第一个碳"（实测反馈 C1/C2 搜不到）。
+        m2 = re.fullmatch(r"([A-Za-z]{1,2})\s*\[?\s*(\d+)\s*\]?", raw)
+        if m2:
+            el = m2.group(1).upper()
+            k = int(m2.group(2))
+            same = np.nonzero(np.char.upper(np.array(
+                [str(x) for x in u.atoms.elements], dtype=object).astype(str)) == el)[0]
+            if not same.size:
+                same = np.nonzero(np.char.startswith(
+                    np.char.upper(names.astype(str)), el))[0]
+            if same.size and 1 <= k <= same.size:
+                i = int(same[k - 1])
+                r = int(atom_res[i])
+                out.append({"label": f"{el} 的第 {k} 个原子 → #{i}"
+                                     f"（{resnames[r]}{resids[r]}）",
+                            "level": "atom", "n_atoms": 1, "indices": [i]})
+                return {"query": raw, "matches": out, "total": int(same.size)}
+
+        # ---- ④ 残基名前缀（ETH → 前若干个 ETH 残基）
+        pre = raw.lstrip("#").upper()
+        hits = np.nonzero(np.char.startswith(
+            np.char.upper(resnames.astype(str)), pre))[0]
+        for i in hits[:limit]:
+            _add_residue(int(i))
+        return {"query": raw, "matches": out, "total": int(hits.size)}
+
+    def expand(self, level: str, *, index: int | None = None,
+               segid: str | None = None, resname: str | None = None,
+               component: str | None = None) -> dict:
+        """把一次点击/一个名字**展开成完整原子索引列表**（按原始编号）。
+
+        为什么单独做：三维视图为性能可能只画了一部分原子（按整残基截断），
+        而"选中整个残基 / 链 / 分子"必须是**完整**的 —— 所以展开交给后端用
+        Universe 直接算，和显示无关。
+        """
+        from mdta.topology import molecule_ids
+
+        az = self.az
+        u = az.universe
+        n = int(u.atoms.n_atoms)
+        lvl = str(level or "atom").lower()
+
+        if component is not None:
+            ag = (az.components.get(str(component))
+                  or az.catalog.get(str(component))
+                  or az.set_groups.get(str(component)))
+            if ag is None:
+                raise SessionError(f"不存在组分/集合 {component!r}")
+            idx = np.asarray(ag.indices, dtype=np.int64)
+            label = f"组分 {component}"
+        elif level is not None and index is not None:
+            i = int(index)
+            if not 0 <= i < n:
+                raise SessionError(f"原子索引越界：{i}（应在 0..{n - 1}）")
+            if lvl in ("atom", "atoms"):
+                idx = np.array([i], dtype=np.int64)
+                label = f"原子 #{i}"
+            elif lvl in ("residue", "residues"):
+                rid = np.asarray(u.atoms.resindices, dtype=int)
+                idx = np.nonzero(rid == rid[i])[0]
+                r = u.residues[int(rid[i])]
+                label = f"残基 {r.resname}{r.resid}"
+            elif lvl in ("chain", "chains"):
+                try:
+                    seg = str(u.atoms.segids[i])
+                    idx = np.nonzero(np.asarray(u.atoms.segids, dtype=str) == seg)[0]
+                    label = f"链 {seg}"
+                except Exception as exc:                  # noqa: BLE001
+                    raise SessionError(f"体系没有 segid 信息，无法按链选择：{exc}") from exc
+            elif lvl in ("molecule", "mol"):
+                mol = molecule_ids(u.atoms)
+                if mol is None:
+                    raise SessionError(
+                        "体系缺少分子/键连接信息，无法按分子选择（可改用残基或链）")
+                mol = np.asarray(mol, dtype=int)
+                idx = np.nonzero(mol == mol[i])[0]
+                label = f"分子 #{int(mol[i])}"
+            else:
+                raise SessionError(f"不认识的层级 {level!r}（atom / residue / chain / molecule）")
+        elif segid or resname:
+            res = u.residues
+            mask = np.ones(int(res.n_residues), dtype=bool)
+            if segid:
+                mask &= np.asarray(res.segids, dtype=str) == str(segid)
+            if resname:
+                mask &= np.asarray(res.resnames, dtype=str) == str(resname)
+            keep = np.zeros(int(u.atoms.n_atoms), dtype=bool)
+            keep[np.asarray(u.atoms.resindices, dtype=int)[np.isin(
+                np.asarray(u.atoms.resindices, dtype=int),
+                np.nonzero(mask)[0])]] = True
+            idx = np.nonzero(keep)[0]
+            label = f"{segid or ''}:{resname or ''}"
+        else:
+            idx = np.arange(n, dtype=np.int64)
+            label = "全部原子"
+
+        return {"level": lvl, "label": label, "n_atoms": int(idx.size),
+                "indices": [int(x) for x in idx]}
+
+    def structure(self, frame: int = 0, max_atoms: int = 20000,
+                  max_bonds: int = 0) -> dict:
+        """给三维视图**拓扑（首帧）坐标** + 元素 + 层级信息。
+
+        1.0.4 精简（用户要求）：**只显示拓扑的坐标**，不逐帧读取 —— 逐帧要重新
+        读偏移/解压整帧，纯属浪费；这里最多 seek 到第 0 帧一次。`frame` 参数保留
+        但不再用于"看第几帧"（界面上的帧选择已删除）。
+
+        为什么一次把该给的都给了：前端要画球（坐标 / 元素 / 半径）、可选的键
+        （只在**拓扑自带可靠键表**时才给，绝不拿距离推断冒充），以及每个原子的
+        层级信息（残基 / 链 / 分子）用来做"点一个原子选中整个残基/分子"。
+
+        ``max_atoms`` 只影响**显示用的抽稀**：抽稀时返回的 ``index`` 仍是
+        **原始 Universe 的原子编号**（0 基），前端提交选择时用的就是它 ——
+        编号绝不因抽稀或隐藏而改变。
+        """
+        from mdta.topology import molecule_ids
+
+        az = self.az
+        u = az.universe
+        n = int(u.atoms.n_atoms)
+        # 只用**拓扑/首帧**坐标：已经在第 0 帧就不动，否则 seek 一次（不做逐帧读取）
+        k = 0
+        try:
+            if len(u.trajectory) and int(u.trajectory.ts.frame) != 0:
+                u.trajectory[0]
+        except Exception:                                        # noqa: BLE001
+            pass
+        pos = np.asarray(u.atoms.positions, dtype=float)
+
+        # ---- 元素（缺了就用原子名/类型推；再缺就标 X）
+        try:
+            el = [str(x).strip().upper() or "X" for x in u.atoms.elements]
+        except Exception:                                        # noqa: BLE001
+            el = ["X"] * n
+        names = []
+        try:
+            names = [str(x) for x in u.atoms.names]
+        except Exception:                                        # noqa: BLE001
+            names = [""] * n
+        resid = np.asarray(u.atoms.resindices, dtype=int) if n else np.zeros(0, int)
+        try:
+            resids = np.asarray(u.residues.resids, dtype=int)
+            resnames = [str(x) for x in u.residues.resnames]
+        except Exception:                                        # noqa: BLE001
+            resids, resnames = np.arange(int(u.residues.n_residues)), ["RES"] * int(
+                u.residues.n_residues)
+        try:
+            segids = [str(x) for x in u.atoms.segids]
+        except Exception:                                        # noqa: BLE001
+            segids = [""] * n
+        mol = molecule_ids(u.atoms)
+        mol = np.zeros(n, dtype=int) if mol is None else np.asarray(mol, dtype=int)
+
+        # ---- 抽稀（只影响显示，index 保持原始编号）
+        # ⚠️ 按**整残基**取，而不是等间隔抽原子：等间隔会把分子切成碎片，键表就画不
+        #    出来了（分子内键的两端很少同时落在同一个抽稀子集里）。按整残基取既能
+        #    保住化学键，又保证"抽稀只是少画几个残基"。
+        n_res = int(u.residues.n_residues)
+        truncated = False
+        if max_atoms and n > max_atoms:
+            counts = np.bincount(np.asarray(u.atoms.resindices, dtype=int),
+                                 minlength=n_res)
+            cum = np.cumsum(counts)
+            n_keep_res = int(np.searchsorted(cum, int(max_atoms), side="right"))
+            n_keep_res = max(1, min(n_keep_res, n_res))
+            keep_res = np.zeros(n_res, dtype=bool)
+            keep_res[:n_keep_res] = True
+            idx = np.nonzero(keep_res[np.asarray(u.atoms.resindices, dtype=int)])[0]
+            truncated = True
+        else:
+            idx = np.arange(n)
+        step = 1 if idx.size == n else 0
+
+        # ---- 键表：1.0.4 起**不再返回**（界面上的“显示键”已按用户要求去掉）。
+        #      若要恢复键显示，把这里换成真正的拓扑键（绝不能用距离推断冒充）。
+        bonds: list[list[int]] = []
+        bond_kind = "none"
+
+        # radii 用共价半径当显示半径（相对大小看得出来即可，单位 Å）
+        from mdta.topology import COVALENT_RADII       # type: ignore
+
+        radii = [float(COVALENT_RADII.get(e, 1.5)) for e in el]
+
+        mol_in_view = mol[idx] if idx.size else np.zeros(0, int)
+        return {
+            "frame": k,
+            "time_ps": float(getattr(u.trajectory.ts, "time", 0.0) or 0.0),
+            "n_atoms": n,
+            "n_displayed": int(idx.size),
+            "step": int(step),
+            "n_residues": n_res,
+            "n_residues_shown": (int(np.unique(
+                np.asarray(u.atoms.resindices, dtype=int)[idx]).size)
+                if idx.size else 0),
+            "index": idx.tolist(),
+            "xyz": np.round(pos[idx], 3).tolist() if idx.size else [],
+            "elements": [el[i] for i in idx],
+            "names": [names[i] for i in idx],
+            "radii": [radii[i] for i in idx],
+            "resid": [int(resids[resid[i]]) for i in idx],
+            "resname": [resnames[resid[i]] for i in idx],
+            "segid": [segids[i] for i in idx],
+            "molid": mol_in_view.tolist(),
+            "bonds": bonds,
+            "bond_source": bond_kind,
+            "box": serialize._num(u.dimensions),
+            "truncated": bool(truncated),
+            # 拓扑是否够用来做"分子/残基"层级选择
+            "has_bonds": bond_kind == "topology",
+            "n_molecules": int(mol_in_view.max()) + 1 if mol_in_view.size else 0,
+        }
+
+    def hierarchy(self, *, segid: str | None = None, resname: str | None = None,
+                  offset: int = 0, limit: int = 400) -> dict:
+        """结构层级树：体系 → 组分 → 链（segid+resname）→ 残基（分页）。
+
+        层级完全按**实际拓扑**生成，不假设"残基 = 分子"：
+        · 组分来自 :meth:`catalog`（自动识别的化学组分 + 已定义的集合）；
+        · 链来自 :func:`mdta.selection.list_chains`（按 segid + resname 归并的类型）；
+        · 残基按 ``(segid, resname)`` 分页返回（上万个残基不可能一次给完）。
+        """
+        az = self.az
+        u = az.universe
+        comps = [{"name": c["name"], "n_atoms": c["n_atoms"],
+                  "n_molecules": c.get("n_molecules"),
+                  # 残基构成：界面上按残基进一步区分（protein / water / ion 太笼统）
+                  "residue_mix": c.get("residue_mix") or [],
+                  "n_residue_kinds": c.get("n_residue_kinds", 0)}
+                 for c in self.catalog()]
+        chains = self.chains()
+        # 给每条链一个"身份"（分子式 / 名称 / 类别 / 聚合度）：取该链类型**第一个分子**
+        # 的元素组成与环信息，交给 mdta.chem 推断（不猜力场，只做确定性描述）。
+        chem_cache: dict[tuple, dict] = {}
+        for ch in chains:
+            key = (str(ch.get("segid")), str(ch.get("resname")))
+            if key not in chem_cache:
+                chem_cache[key] = self._chain_chem(*key)
+            ch["chem"] = chem_cache[key]
+
+        # 每个组分只挂**自己**的链（以前前端把全局链表摊在每个组分下面，
+        # 于是两个组分展开后看起来一模一样 —— 用户实测）。
+        try:
+            res_seg = np.array([str(x) for x in u.residues.segids], dtype=object)
+            res_rn = np.array([str(x) for x in u.residues.resnames], dtype=object)
+            for c in comps:
+                ag = (az.components.get(c["name"]) or az.catalog.get(c["name"])
+                      or az.set_groups.get(c["name"]))
+                if ag is None or not ag.n_atoms:
+                    c["chains"] = []
+                    continue
+                ridx = np.unique(np.asarray(ag.atoms.resindices, dtype=np.int64))
+                pairs = set(zip(res_seg[ridx].tolist(), res_rn[ridx].tolist()))
+                c["chains"] = [ch for ch in chains
+                               if (str(ch["segid"]), str(ch["resname"])) in pairs]
+        except Exception:                                    # noqa: BLE001
+            for c in comps:
+                c["chains"] = list(chains)
+
+        out = {
+            "n_atoms": int(u.atoms.n_atoms),
+            "n_residues": int(u.residues.n_residues),
+            "n_chains": len(chains),
+            "components": comps,
+            "chains": chains,
+            "has_bonds": bool(len(u.bonds) > 0),
+            "residues": None,
+        }
+        if segid is not None or resname is not None:
+            # ⚠️ 不用 `select_atoms`：MDAnalysis 的选择语法在这个版本里对**带引号的
+            # 值**会匹配到 0 个原子（`segid "X"` → 0），而不带引号时 `resname water`
+            # 又会撞上它自己的 `water` 关键字（`Unexpected token 'water'`）。
+            # 这里要的只是"按 segid + resname 精确匹配"，直接用数组比较最稳。
+            res = u.residues
+            n_res = int(res.n_residues)
+            mask = np.ones(n_res, dtype=bool)
+            if segid:
+                try:
+                    mask &= np.asarray(res.segids, dtype=str) == str(segid)
+                except Exception as exc:                      # noqa: BLE001
+                    raise SessionError(f"体系没有 segid 信息：{exc}") from exc
+            if resname:
+                mask &= np.asarray(res.resnames, dtype=str) == str(resname)
+            picked = np.nonzero(mask)[0]
+            total = int(picked.size)
+            page = picked[int(offset):int(offset) + int(limit)]
+            rows = []
+            for i in page:
+                r = res[i]
+                idxs = np.asarray(r.atoms.indices, dtype=int)
+                rows.append({
+                    "resid": int(r.resid),
+                    "resname": str(r.resname),
+                    "segid": str(r.segid),
+                    "n_atoms": int(idxs.size),
+                    "first_index": int(idxs.min()) if idxs.size else -1,
+                    # 前 200 个原子索引足够做"点残基选中它"（更大的残基走 /structure）
+                    "indices": [int(x) for x in idxs[:200]],
+                })
+            out["residues"] = {"total": total, "offset": int(offset),
+                               "limit": int(limit), "rows": rows,
+                               "query": {"segid": segid or "", "resname": resname or ""}}
+        return out
+
+    def add_visual_selection(self, name: str, indices, *, save: bool = True) -> dict:
+        """把三维视图里选中的**原子索引**变成一条集合（`set:<名字>`）。
+
+        走的是现有 Set 机制（`mdta.sets.build_set` 的 ``indices`` 分支）：
+        于是它和手工定义的集合完全等价 —— 出现在组分清单里、可勾选参与分析、
+        MSD 的追踪语义也按"是否整分子"自动判定。
+        """
+        from mdta.sets import SetError as _SetError
+
+        nm = str(name or "").strip()
+        if not nm:
+            raise SessionError("集合需要一个名字")
+        if nm.startswith("set:"):
+            nm = nm[4:]
+        spec = {"name": nm, "indices": [int(x) for x in (indices or [])]}
+        if not spec["indices"]:
+            raise SessionError("没有选中任何原子（先在三维视图里点选，或在结构树里选中对象）")
+        # 后端的校验（索引越界 / 空选择）在这里先做一遍，错误直接回给界面
+        try:
+            from mdta.sets import build_set as _build
+
+            _ag, info = _build(self.az.universe, spec, self.az.components)
+        except _SetError as exc:
+            raise SessionError(f"选择无效：{exc}") from exc
+
+        with self._lock:
+            self.assert_idle()
+            # 同名就覆盖（用户在可视化里改选后按"更新集合"）
+            self.sets_spec = [dict(s) for s in self.sets_spec
+                              if str((s or {}).get("name") or "") != nm]
+            self.sets_spec.append(spec)
+            # 立刻生效：作为参与分析的组分重建集合
+            wanted = [str(k) for k in self.az.components] + [f"set:{nm}"]
+            info_list = self.apply_selection({"components": wanted,
+                                              "sets": list(self.sets_spec),
+                                              "primary": dict(self.primary_req
+                                                              or {"mode": "auto"})})
+            if save:
+                self.selections[nm] = {"name": nm, "n_atoms": int(info["n_atoms"]),
+                                       "kind": info["kind"],
+                                       "indices": spec["indices"],
+                                       "label": info["label"]}
+        return {"ok": True,
+                # `name` 用带前缀的 `set:<名字>`（与 components 里的键一致）；
+                # `set_name` 是没有前缀的原始名字，界面回显时用哪个都行。
+                "set": {**{k: v for k, v in info.items() if k != "indices"},
+                        "name": f"set:{nm}", "set_name": nm},
+                "selection": info_list, "selections": self.selection_list()}
+
+    def selection_list(self) -> list[dict]:
+        """已保存的可视化选择（名字 / 原子数 / 类型），供界面"加载已保存的选择"。"""
+        out = []
+        for nm, rec in (self.selections or {}).items():
+            out.append({"name": nm, "n_atoms": int(rec.get("n_atoms") or 0),
+                        "kind": rec.get("kind", ""), "label": rec.get("label", "")})
+        return out
+
+    def load_selection(self, name: str) -> dict:
+        """把某个已保存的可视化选择重新变成集合（并参与分析）。"""
+        rec = (self.selections or {}).get(str(name))
+        if rec is None:
+            raise SessionError(f"没有保存过名为 {name!r} 的选择")
+        return self.add_visual_selection(name, rec.get("indices") or [])
+
+    def delete_selection(self, name: str) -> dict:
+        """删掉一条已保存的选择（同时把它从组分 / 集合定义里摘掉）。"""
+        nm = str(name)
+        if nm.startswith("set:"):
+            nm = nm[4:]
+        with self._lock:
+            self.assert_idle()
+            self.selections.pop(nm, None)
+            self.sets_spec = [dict(s) for s in self.sets_spec
+                              if str((s or {}).get("name") or "") != nm]
+            self.az.components.pop(f"set:{nm}", None)
+            self.az.catalog.pop(f"set:{nm}", None)
+            self.az.set_groups.pop(f"set:{nm}", None)
+            self.az.msd_group_objects.pop(f"set:{nm}", None)
+            self.sets_info = [x for x in (self.sets_info or [])
+                              if str(x.get("name")) != f"set:{nm}"]
+        return {"ok": True, "selections": self.selection_list(),
+                "components": self.components(), "catalog": self.catalog()}
+
     # ----------------------------------------------------------------- 运行
     def _prepare_run(self, req: Mapping[str, Any]) -> dict:
         """校验并落实「选择 + 帧 + 分析项 + 参数」。调用方须持有锁。"""
@@ -646,6 +1207,8 @@ class Session:
             "summary_rows": serialize.summary_rows(self.results_json),
             "titles": {k: ANALYSIS_TITLES.get(k, k) for k in DEFAULT_ORDER},
             "timings": {k: round(v, 2) for k, v in timings.items()},
+            # 「跳过」而不是「失败」的项（体系不满足前提，如没有晶胞信息）
+            "skipped": dict(getattr(self.az, "skips", {}) or {}),
             "elapsed_sec": round(sum(timings.values()), 2),
         }
         if extra:
@@ -693,8 +1256,13 @@ class Session:
             for spec in self.sets_spec:
                 spec = dict(spec or {})
                 nm = str(spec.get("name") or "")
-                sets_echo.append({**spec, "name": nm,
-                                  "on": f"set:{nm}" in live})
+                idx = spec.pop("indices", None)
+                echo = {**spec, "name": nm, "on": f"set:{nm}" in live}
+                if idx is not None:
+                    # 可视化选择：只回报个数（上万个索引不必来回传）
+                    echo["kind"] = "visual"
+                    echo["n_indices"] = len(idx)
+                sets_echo.append(echo)
             sets_info = [dict(x) for x in (self.sets_info or [])]
             frames = None
             try:
@@ -729,6 +1297,8 @@ class Session:
                 # 刷新恢复（用户要求：Set 模块不能一刷新就消失）
                 "sets": sets_echo,
                 "sets_info": sets_info,
+                # 已保存的可视化选择（三维视图 → 集合）
+                "selections": self.selection_list(),
                 # 集合编辑器要用的元素多选项 / 一键预设（刷新后同样要能继续编辑）
                 "elements": _available_elements(az.universe),
                 "set_presets": _set_presets(az.universe, az.components),
@@ -737,6 +1307,7 @@ class Session:
                 "summary_rows": serialize.summary_rows(self.results_json),
                 "titles": {k: ANALYSIS_TITLES.get(k, k) for k in DEFAULT_ORDER},
                 "timings": dict(getattr(self.az, "timings", {})),
+                "skipped": dict(getattr(self.az, "skips", {}) or {}),
                 "elapsed_sec": round(sum(getattr(self.az, "timings", {}).values()), 2),
                 "job": prog,
             }
@@ -994,6 +1565,9 @@ class Session:
                 "summary_rows": serialize.summary_rows(self.results_json),
                 "titles": {k: ANALYSIS_TITLES.get(k, k) for k in DEFAULT_ORDER},
                 "timings": dict(job.timings),
+                # 体系不满足前提而**跳过**的分析（不是失败）：例如非周期体系
+                # 做不了界面宽度、没勾组分做不了 RDF。界面按"跳过：原因"显示。
+                "skipped": dict(getattr(self.az, "skips", {}) or {}),
                 "elapsed_sec": round(elapsed, 2),
                 "error": job.error,
                 "cancelled": job.cancel.is_set(),

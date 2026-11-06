@@ -312,7 +312,13 @@ class Analyzer:
             self.catalog[key] = ag
             self.set_groups[key] = ag
             self.msd_group_objects[key] = info["kind"]
-            infos.append({**info, "name": key})
+            # 「可视化选择」的集合带着完整原子索引列表 —— 那是给后端重建用的，
+            # 不必回传界面（可能上万个数），只报个数。
+            out_info = {**info, "name": key}
+            idx = out_info.pop("indices", None)
+            if idx is not None:
+                out_info["n_indices"] = len(idx)
+            infos.append(out_info)
         return infos
 
     def add_interface_component(self, name_a: str, name_b: str, cutoff: float = 5.0,
@@ -351,6 +357,13 @@ class Analyzer:
             inferred = ("由元素查表" in src) or ("由元素" in src) or ("推断" in src)
             res.meta["质量来源"] = ("由工具按元素/原子名推断" if inferred
                                     else "拓扑/MDAnalysis 提供")
+            # 「推断出来的质量**可不可信**」取决于有多少原子连元素都认不出来。
+            # PDB / XSD / GRO 这类拓扑本来就不带力场质量，按元素查表补是**常规做法**
+            # （用户明确要求：这种情况 QC 应判「正常」，不该报异常）；
+            # 只有 CG/联合原子体系（珠子名推不出元素 → 质量被按 1.0 处理）才需要提醒。
+            oi = getattr(self.trajectory, "object_info", None) or {}
+            res.meta["质量未知元素数"] = int(oi.get("n_missing_mass", 0) or 0)
+            res.meta["质量来源原文"] = src
             # 键表完整性：拓扑自带键表残缺时（MS 的 PDB 常见）工具会按坐标补键，
             # 这里把"补过"如实带进结果 —— 否则用户看到"122 分子"会以为是原样，
             # 看到"243 分子"又不知道为什么（实测正是后者让逐分子 Rg 少了一半）。
@@ -407,6 +420,7 @@ class Analyzer:
         p = dict(DEFAULT_PARAMS.get(name, {}))
         if params:
             p.update(params)
+        self.skip_reason = ""          # 每次分析前清掉上一次的原因
 
         if self.primary is None:
             self.auto_setup()
@@ -427,11 +441,13 @@ class Analyzer:
         if name == "rdf":
             groups = self._rdf_groups()
             if len(groups) < 1:
+                self.skip_reason = "没有勾选任何组分（RDF 至少需要一个组分）"
                 return None
             return ifc.analyze_rdf(self.trajectory, groups, sel, verbose=verbose, **p)
         if name == "rdf2d":
             groups = self._rdf_groups()
             if len(groups) < 1:
+                self.skip_reason = "没有勾选任何组分（面内 RDF 至少需要一个组分）"
                 return None
             # 逐帧叶层：`slab_ref_from` 给"膜"那一侧组分的名字，就用它的**逐帧质心**
             # 当叶层阈值（作者 Lipid_RDF.py 正是 z > 膜质心(t)）。给固定 slab 时优先用
@@ -448,12 +464,14 @@ class Analyzer:
                                            verbose=verbose, **p2)
         if name == "comdist":
             if len(self.components) < 2:
+                self.skip_reason = "两组分质心距需要至少勾选 2 个组分"
                 return None
             return ifc.analyze_com_distance(self.trajectory, self.components, sel,
                                             verbose=verbose, **p)
         if name == "contact":
             a, b, la, lb = self._contact_pair()
             if a is None:
+                self.skip_reason = "接触分析需要至少勾选 1 个组分"
                 return None
             res = ifc.analyze_contacts(self.trajectory, a, b, sel, verbose=verbose, **p)
             if res is not None and la:
@@ -463,6 +481,7 @@ class Analyzer:
             return res
         if name == "interface":
             if len(self.components) < 2:
+                self.skip_reason = "界面宽度分析需要至少勾选 2 个组分"
                 return None
             # 默认取**原子数最多的两个组分**当作界面两侧：分层体系里这两相
             # 才是真正的界面两侧；若按字典序取前两个，可能取到"溶解在里面的
@@ -498,6 +517,7 @@ class Analyzer:
         if name == "msd":
             groups = self._msd_groups()
             if not groups:
+                self.skip_reason = "没有勾选任何组分（MSD 至少需要一个组分）"
                 return None
             # 逐组追踪语义：`set:C`（只取碳原子）按原子，`set:链状分子` 按分子质心
             p = dict(p)
@@ -682,6 +702,11 @@ class Analyzer:
             self.results = OrderedDict()
         #: ``{分析名: 耗时秒数}``，供界面显示"哪一项最慢"
         self.timings = dict(getattr(self, "timings", {}) or {}) if keep_existing else {}
+        #: ``{分析名: 跳过原因}``：体系不满足前提（如没有晶胞信息 / 缺组分）的项。
+        #: 与"失败"区分开 —— 这类不是程序出错，界面上应当安静地跳过并给出原因。
+        self.skips: dict[str, str] = {}
+        #: 单项分析内部判断"这项做不了"时写的原因（供 :attr:`skips` 使用）
+        self.skip_reason: str = ""
         self.run_order: list[str] = list(names)
         # 预热放在计时之前：一次性初始化（分子编号展开/键图/解包裹）不该算进
         # 队首那一项的耗时里（否则改个开关就能让同一项"看起来变慢"）
@@ -715,13 +740,24 @@ class Analyzer:
             try:
                 res = self.run(name, params=params.get(name), verbose=False)
             except Exception as exc:  # noqa: BLE001
+                # 「做不了」和「算错了」要分开：像"没有盒信息"这种，是体系本身
+                # 不满足该项的前提（用户实测：非周期体系跑 RDF 直接抛
+                # ValueError: 当前帧没有模拟盒信息），不该在界面上显示成"失败"。
+                from .analysis.interface import BoxMissing
+
+                if isinstance(exc, BoxMissing):
+                    self.skips[name] = str(exc).split("\n")[0]
+                    if verbose:
+                        print(f"  -- 跳过：{self.skips[name]}")
+                    continue
                 if raise_errors:
                     raise
                 print(f"  !! {name} 失败: {type(exc).__name__}: {exc}")
                 continue
             if res is None:
+                self.skips[name] = self.skip_reason or "体系缺少这项分析所需的组分"
                 if verbose:
-                    print("  -- 跳过（体系缺少所需组分）")
+                    print(f"  -- 跳过：{self.skips[name]}")
                 continue
             self.results[name] = res
             self.timings[name] = time.time() - t0
@@ -887,3 +923,4 @@ def analyze_all(topology: str, trajectory: str | None = None, *,
         az.set_primary(primary, primary_label)
     return az.run_all(which, params=params, outdir=outdir, formats=formats,
                       excel=excel, verbose=verbose)
+

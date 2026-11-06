@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 2. 体系信息 —— 内容部分（放进折叠面板，不带卡片外壳）。
  *
  * 完整报告用**表格**渲染（后端 `info.sections` 给出「列 + 行」结构），
@@ -121,7 +121,7 @@ export default function InfoPanel({ info, onNext }) {
       )}
 
       {onNext && (
-        <button className="primary mt6" onClick={onNext}>下一步：分析设置 →</button>
+        <button className="primary mt6" onClick={onNext}>下一步：结构选择 →</button>
       )}
     </>
   )

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Web 版主界面。
  *
  * 布局（整页一屏，无页面级滚动）：
@@ -24,6 +24,9 @@ import LogPanel from './components/LogPanel'
 import QcPanel from './components/QcPanel'
 import ChartPanel from './components/ChartPanel'
 import NotesPanel from './components/NotesPanel'
+import StructurePanel from './components/StructurePanel'
+import StructureView from './components/StructureView'
+import { useStructureState } from './structureState'
 import {
   FunctionBlock,
   FrameBlock,
@@ -36,6 +39,7 @@ import {
 //: 结果区标签页。统计量与导出是**两个同级的独立页面**：
 //: 统计量只管显示指标，导出只管导出，互不掺在一起。
 const TABS = [
+  ['struct', '三维结构'],
   ['charts', '图表'],
   ['data', '数据表'],
   ['stats', '统计量'],
@@ -47,6 +51,7 @@ const TABS = [
 //: 三块折叠面板的 id
 const SEC_FILE = 'file'
 const SEC_INFO = 'info'
+const SEC_STRUCT = 'struct'
 const SEC_SETUP = 'setup'
 
 export default function App() {
@@ -113,6 +118,8 @@ export default function App() {
   const abortRef = useRef(null)
   const liveRunRef = useRef(null)
   const cancelledRef = useRef(false)
+  //: 已经写进日志的「跳过」项（后端每轮轮询都会重复回传 skipped，只记一次）
+  const skipLoggedRef = useRef(new Set())
 
   /**
    * 分析集合变更：立刻让后端算一次预览（原子数/分子数/追踪方式），
@@ -121,7 +128,7 @@ export default function App() {
    * 而 pushLog 定义在后面，useCallback 的依赖数组会在渲染期访问未初始化的
    * const（之前踩过 `Cannot access before initialization`）。
    */
-  const applySets = async (next) => {
+  const applySets = async (next, highlight = '') => {
     setSets(next)
     if (!sess?.sid) return
     const on = next.filter((x) => x.on !== false).map((x) => `set:${x.name}`)
@@ -153,8 +160,38 @@ export default function App() {
         setComponents((prev) => [...prev,
           ...setNames.filter((n) => !prev.includes(n))])
       }
+      // 新建/更新的集合 → 三维视图里**立刻高亮**（用户要求：点 ＋C 要标红）
+      if (highlight) struct.highlightSet(highlight)
     } catch (e) {
       setError(`集合预览失败: ${e.message}`)
+    }
+  }
+
+  /**
+   * 三维「结构选择」里创建 / 载入 / 删除集合之后，把后端的状态接回本地：
+   * · 组分清单（set:<名字> 已由后端变成参与分析的组分）；
+   * · 集合预览（setsInfo）与已保存选择（sess.selections）；
+   * · 本地 `sets` 里补一条 —— 可视化集合**只存名字**，原子索引一直在后端
+   *   （`Session.apply_selection` 会用 `self.selections` 把它补回去）。
+   */
+  const onVisualSelection = (r) => {
+    if (!r) return
+    const sel = r.selection || {}
+    if (sel.components || sel.catalog) {
+      setSess((cur) => (cur ? { ...cur, components: sel.catalog || cur.components } : cur))
+    }
+    if (sel.sets) setSetsInfo(sel.sets)
+    if (r.selections) {
+      setSess((cur) => (cur ? { ...cur, selections: r.selections } : cur))
+      // 删除后同步掉本地那条（后端已把它从组分里摘掉）
+      const live = new Set((r.components || []).map((x) => x.name))
+      setSets((prev) => prev.filter((x) => live.has(`set:${x.name}`)))
+    }
+    if (r.set?.name) {
+      const nm = String(r.set.name).replace(/^set:/, '')
+      setSets((prev) => (prev.some((x) => x.name === nm) ? prev
+        : [...prev, { name: nm, kind: 'visual', on: true }]))
+      setComponents((prev) => (prev.includes(r.set.name) ? prev : [...prev, r.set.name]))
     }
   }
 
@@ -162,6 +199,13 @@ export default function App() {
     const ts = new Date().toLocaleTimeString('zh-CN', { hour12: false })
     setLog((prev) => [...prev.slice(-300), `[${ts}] ${line}`])
   }, [])
+
+  /**
+   * 「结构选择」的共享状态：左侧操作台与中间「三维结构」页都用这一份
+   * （三维画面在中间显示区，控制项在左侧 —— 两边必须看到同一份选择）。
+   */
+  const struct = useStructureState({ sess, log: pushLog,
+    onSetsChanged: onVisualSelection })
 
   // 刷新恢复：把 sid 存在 localStorage，F5 之后据此把整个界面接回去
   const SID_KEY = 'mdta.sid'
@@ -352,6 +396,10 @@ export default function App() {
       return
     }
     setBusy(true); setError(''); setProgress(0); setLive(null)
+    // 用户要求：点「开始分析」立刻切到图表区（不要停在三维结构页等结果）
+    setTab('charts')
+    setVisibleCurves(null)
+    skipLoggedRef.current = new Set()      // 新一轮：跳过项重新记录
     cancelledRef.current = false
     const t0 = performance.now()
     const existingNames = Object.keys(run?.results || {})
@@ -478,6 +526,14 @@ export default function App() {
             pushLog(`  ✓ ${titles[name] || name} 完成（${panels} 张图）`)
           }
         }
+      }
+      // 「跳过」的项（体系不满足前提，例如没有晶胞信息做不了密度/界面）
+      // 一次性写进日志 —— 它们不是错误，界面不该显示成"失败"。
+      const skipped = p.skipped || {}
+      for (const [n, why] of Object.entries(skipped)) {
+        if (skipLoggedRef.current.has(n)) continue
+        skipLoggedRef.current.add(n)
+        pushLog(`  – ${titles[n] || n} 跳过：${why}`)
       }
       acc = {
         ...acc,
@@ -631,7 +687,11 @@ export default function App() {
       hint: sess ? `${sess.info.n_atoms.toLocaleString()} 原子 / ${sess.info.n_frames} 帧` : '先读取体系',
     },
     {
-      id: SEC_SETUP, title: '3. 分析设置', disabled: !sess,
+      id: SEC_STRUCT, title: '3. 结构选择', disabled: !sess,
+      hint: sess ? `${(sets?.length || 0)} 集合` : '先读取体系',
+    },
+    {
+      id: SEC_SETUP, title: '4. 分析设置', disabled: !sess,
       hint: sess ? `${components.length} 组分 / ${which.length} 项分析` : '先读取体系',
     },
   ]
@@ -718,7 +778,20 @@ export default function App() {
                       )}
                       {s.id === SEC_INFO && sess && (
                         <InfoPanel info={sess.info}
-                                   onNext={() => setOpen(SEC_SETUP)} />
+                                   onNext={() => {
+                                     // 「下一步」：直接打开结构选择并**自动渲染**结构图
+                                     // （不再需要手动点"载入结构"）
+                                     setOpen(SEC_STRUCT)
+                                     setTab('struct')
+                                     if (!struct.data && !struct.loading) struct.load()
+                                   }} />
+                      )}
+                      {s.id === SEC_STRUCT && sess && (
+                        <StructurePanel sess={sess} st={struct}
+                                        sets={sets} setsInfo={setsInfo}
+                                        onSetsChange={applySets}
+                                        onNext={() => setOpen(SEC_SETUP)}
+                                        log={pushLog} />
                       )}
                       {s.id === SEC_SETUP && sess && (
                         <>
@@ -768,6 +841,7 @@ export default function App() {
           </nav>
 
           <div className="tabbody">
+            {tab === 'struct' && <StructureView st={struct} />}
             {tab === 'charts' && (
               <ChartPanel onVisibleChange={setVisibleCurves}
                                  run={run} chart={chart} setChart={setChart}

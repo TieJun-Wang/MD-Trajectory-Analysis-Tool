@@ -1,4 +1,4 @@
-/* ==========================================================================
+﻿/* ==========================================================================
    MD Trajectory Analysis Tool — Web 前端样式
 
    布局约定（整页一屏，不出现页面级滚动）：
@@ -1234,3 +1234,148 @@ table.filetable td { text-align: center; vertical-align: middle; }
 .sets-list .mt4, .field .mt4 { margin-top: 4px; }
 .field .chips-pick select,
 .field .chips-pick input { font-size: 11.5px; }
+
+/* ============================================================ 结构选择（3D）
+   三维分子视图 + 结构层级树 + 选择信息 + 「分析集合」板块。
+   视图本身由 Three.js 画在 canvas 上（InstancedMesh，一次 draw call），
+   这里只负责版式：左视图 / 右层级树 / 底部选择信息与集合。 */
+.structpanel { display: flex; flex-direction: column; gap: 6px; }
+.structpanel.fs {
+  position: fixed; inset: 0; z-index: 60; background: #fff; padding: 10px;
+  overflow: auto; box-shadow: 0 10px 40px rgba(15, 23, 42, 0.25);
+}
+.structbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  font-size: 11px; padding: 4px 6px; background: #f8fafc;
+  border: 1px solid #e5e7eb; border-radius: 6px;
+}
+.structbar .grp { color: #6b7280; font-weight: 600; }
+.structbar .grow { flex: 1 1 auto; }
+.structbar select, .structbar input { font-size: 11px; }
+.chk-inline { display: inline-flex; align-items: center; gap: 3px; font-size: 11px; }
+.structbody { display: flex; gap: 8px; align-items: stretch; min-height: 360px; }
+.viewer {
+  position: relative; flex: 1 1 auto; min-width: 280px; height: 400px;
+  border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden;
+  background: #f7f9fc;
+}
+.structpanel.fs .viewer { height: calc(100vh - 260px); }
+.viewer-canvas { width: 100%; height: 100%; }
+.atomtip {
+  position: absolute; right: 8px; top: 8px; max-width: 240px;
+  background: rgba(17, 24, 39, 0.88); color: #fff; font-size: 11px;
+  line-height: 1.5; padding: 5px 8px; border-radius: 6px; pointer-events: none;
+}
+.viewhint {
+  position: absolute; left: 8px; bottom: 6px; font-size: 10.5px; color: #6b7280;
+  background: rgba(255, 255, 255, 0.82); padding: 2px 6px; border-radius: 4px;
+  pointer-events: none;
+}
+.tree {
+  flex: 0 0 288px; width: 288px; display: flex; flex-direction: column;
+  border: 1px solid #e5e7eb; border-radius: 6px; background: #fff; overflow: hidden;
+}
+.tree-head {
+  display: flex; align-items: baseline; gap: 6px; font-size: 11.5px;
+  font-weight: 600; padding: 5px 8px; background: #f8fafc; border-bottom: 1px solid #eef2f7;
+}
+.tree-head .dim { font-weight: 400; font-size: 10px; }
+.tree-search { margin: 5px 8px 0; font-size: 11px; }
+.tree-body { flex: 1 1 auto; overflow: auto; padding: 4px 6px 8px; font-size: 11px; }
+.tree-row {
+  display: flex; align-items: center; gap: 4px; padding: 1px 2px; border-radius: 4px;
+}
+.tree-row:hover { background: #f2f6fc; }
+.tree-row .nm { flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.tree-row .count { flex: none; color: #6b7280; font-size: 10px; }
+.tree-row .caret {
+  flex: none; width: 12px; padding: 0; border: 0; background: none; cursor: pointer;
+  color: #6b7280; font-size: 10px; line-height: 1;
+}
+.tree-row.lvl0 { padding: 2px 2px 3px; }
+.tree-row.lvl1 { padding-left: 6px; font-weight: 600; }
+.tree-row.lvl2 { padding-left: 18px; }
+.tree-row.lvl3 { padding-left: 32px; color: #374151; }
+.tree-kids { border-left: 1px dashed #e5e7eb; margin-left: 10px; }
+.tree-mini { font-size: 10px; color: #6b7280; padding: 2px 6px; }
+.tree-mini.warn { color: #b45309; }
+.selfoot { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 4px; }
+.selfoot-col { flex: 1 1 320px; min-width: 290px; }
+.selidx {
+  font-size: 10.5px; color: #374151; font-family: ui-monospace, Consolas, monospace;
+  background: #f8fafc; border: 1px solid #eef2f7; border-radius: 4px;
+  padding: 3px 6px; max-height: 56px; overflow: auto;
+}
+
+/* ==================================================== 中间「三维结构」标签页
+   三维画面铺在这里（不是左侧小面板）：左侧只放工具栏 / 层级树 / 选择信息。 */
+.structview {
+  display: flex; flex-direction: column; height: 100%;
+  flex: 1 1 auto; min-width: 0; min-height: 0;
+}
+.structview.fs {
+  position: fixed; inset: 0; z-index: 60; background: #fff; padding: 10px;
+  box-shadow: 0 10px 40px rgba(15, 23, 42, 0.25);
+}
+.structview-head {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 10px; padding-bottom: 6px;
+}
+.structview-head .charttitle { font-size: 14px; font-weight: 600; }
+.structview-head .chartsub { font-size: 10.5px; color: #6b7280; }
+.structview-head .charttools { display: flex; align-items: center; gap: 6px; }
+.structview-body {
+  position: relative; flex: 1 1 auto; min-height: 260px;
+  display: flex; flex-direction: column;
+  border: 1px solid #e5e7eb; border-radius: 6px; overflow: hidden;
+  background: #f7f9fc;
+}
+.structview-body > .viewer-canvas {
+  flex: 1 1 auto; min-height: 0; width: 100%;
+}
+/* 左侧操作台里的紧凑工具栏 / 层级树 */
+.sfield {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  font-size: 11px; padding: 3px 0;
+}
+.sfield .grp { color: #6b7280; font-weight: 600; }
+.sfield select, .sfield input { font-size: 11px; }
+
+/* 结构选择：被高亮的集合行 / 层级树头部 */
+.set-row.active { border-color: #fca5a5; background: #fff1f2; }
+.tree-head .grow { flex: 1 1 auto; }
+.tree-head { flex-wrap: wrap; }
+.tree-head .tree-search { margin: 0; flex: 1 1 120px; min-width: 90px; }
+
+/* 结构选择：搜索行 / 命中列表 / 头部留白（用户：标题别贴着操作台） */
+.structview-head { padding-left: 22px; }
+.tree-search-row {
+  display: flex; gap: 4px; align-items: center; padding: 4px 8px 2px;
+}
+.tree-search-row .tree-search { margin: 0; flex: 1 1 auto; min-width: 90px; }
+.tree-hits {
+  display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 8px 6px;
+  max-height: 96px; overflow: auto;
+}
+.tree-hits .hit {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; padding: 1px 6px; cursor: pointer;
+  border: 1px solid #c7d2fe; border-radius: 999px;
+  background: #eef2ff; color: #1e293b;
+}
+.tree-hits .hit:hover { background: #e0e7ff; border-color: #a5b4fc; }
+.tree-hits .hit .count { color: #6b7280; font-size: 9.5px; }
+button.mini.active { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
+
+/* 结构层级框：占面板宽度的 3/4 并居中（用户要求） */
+.structpanel .tree, .acc-body .tree {
+  width: 75%; margin-left: auto; margin-right: auto;
+}
+.tree-head .dim { font-size: 10px; }
+
+/* 结构层级框：占满板块宽度，只留一点点边距（用户要求） */
+.structpanel .tree, .acc-body .tree {
+  width: calc(100% - 8px); margin-left: 4px; margin-right: 4px;
+  flex: 0 0 auto;
+}

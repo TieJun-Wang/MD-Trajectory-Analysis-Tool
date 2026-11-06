@@ -12,7 +12,8 @@
   "dependencies": {
     "echarts": "^6.1.0",
     "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "react-dom": "^19.3.0",
+    "three": "^0.187.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.1.1",
