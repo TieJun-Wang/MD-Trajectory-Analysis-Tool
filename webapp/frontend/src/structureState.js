@@ -49,6 +49,10 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     setHover(null)
     setErr('')
     setOnlySelected(false)
+    // 识别结果与体系一一对应：换体系必须丢掉旧的（不能拿旧原子索引去高亮新体系）
+    setRecog(null)
+    setRecogSel(null)
+    setRecogErr('')
   }, [sid])
 
   const load = useCallback(async () => {
@@ -143,13 +147,19 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
 
   const resetView = useCallback(() => viewerRef.current?.resetView?.(), [])
 
-  /** 「重置」：清空所有选择（选中/只显示已选/悬停/错误）并把视角复位 */
+  /**
+   * 「重置」：清空所有**选择**（选中 / 只显示已选 / 悬停 / 错误），
+   * 但**不动三维视图的相机**。
+   *
+   * 用户实测要求：点了重置，原来看到哪儿就还在哪儿，只是把高亮清掉。
+   * 想回到初始视角用三维结构页右上角那个「重置视角」，两件事分开。
+   */
   const resetAll = useCallback(() => {
     setSelected(new Set())
     setOnlySelected(false)
     setHover(null)
     setErr('')
-    viewerRef.current?.resetView?.()
+    // ⚠️ 这里**故意不调** viewerRef.current.resetView()：相机位置保持原样
   }, [])
 
   /** 结构检索：残基名+编号 / 原子名 / 原子索引 → 返回命中列表（点一项即高亮）。
@@ -169,6 +179,68 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     log?.(`已高亮 ${m.label}（${(m.n_atoms || 0).toLocaleString()} 原子）`)
   }, [log])
 
+  /**
+   * **MDAnalysis 选择语句**（`select_atoms`）→ 选中并高亮命中的原子。
+   *
+   * 失败时**抛给调用方**（面板里就地显示具体原因：语句哪个词写错了），
+   * 不写到全局 err 上，免得错误信息一直挂着。
+   */
+  const runQuery = useCallback(async (expr) => {
+    const raw = String(expr || '').trim()
+    if (!sid || !raw) return null
+    const r = await api.query(sid, raw)
+    setSelected(new Set(r.indices || []))
+    log?.(`选择语句「${raw}」→ ${(r.n_atoms || 0).toLocaleString()} 原子`
+      + (r.n_residues ? ` / ${r.n_residues.toLocaleString()} 残基` : '')
+      + (r.truncated ? '（索引过多，只带回一部分用于高亮）' : ''))
+    return r
+  }, [sid, log])
+
+  // --------------------------------------- 分子 / 聚合物链识别（结构层级）
+  /** 识别结果（后端算一次并缓存；前端只负责展示与选择） */
+  const [recog, setRecog] = useState(null)
+  const [recogLoading, setRecogLoading] = useState(false)
+  const [recogErr, setRecogErr] = useState('')
+  /** 当前从识别树里选中的对象（名字 / 类型 / 原子数 / 状态），给面板显示 */
+  const [recogSel, setRecogSel] = useState(null)
+
+  const loadRecognition = useCallback(async (refresh = false) => {
+    if (!sid) return null
+    setRecogLoading(true); setRecogErr('')
+    try {
+      const r = await api.recognition(sid, refresh)
+      setRecog(r)
+      const s = r.summary || {}
+      log?.(`结构识别：${s.total_molecules?.toLocaleString()} 个分子 / `
+        + `${s.total_polymer_chains?.toLocaleString()} 条聚合物链 / `
+        + `${s.total_network_components?.toLocaleString()} 个网络组分`
+        + `（键表来源 ${s.bond_source}，用时 ${s.elapsed_sec}s）`)
+      return r
+    } catch (e) {
+      setRecogErr(`结构识别失败：${e.message}`)
+      setRecog(null)
+      return null
+    } finally {
+      setRecogLoading(false)
+    }
+  }, [sid, log])
+
+  /** 点识别树上的节点（类别 / 分组 / 单个分子或链）→ 高亮它的全部原子 */
+  const selectRecognition = useCallback(async (objectType, objectId, label = '') => {
+    if (!sid) return null
+    try {
+      const r = await api.recognitionExpand(sid, { objectType, objectId })
+      setSelected(new Set(r.indices || []))
+      setRecogSel({ objectType, objectId, label: r.label || label,
+        nAtoms: r.n_atoms || 0 })
+      log?.(`已选中 ${r.label || label}（${(r.n_atoms || 0).toLocaleString()} 原子）`)
+      return r
+    } catch (e) {
+      setRecogErr(`选中失败：${e.message}`)
+      return null
+    }
+  }, [sid, log])
+
   return {
     sid, nAtoms,
     data, loading, err, setErr,
@@ -176,7 +248,9 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     onlySelected, setOnlySelected,
     mode, setMode,
     load, pick, selectGroup, highlightSet, createFromIndices, resetView, resetAll,
-    search, highlightMatch,
+    search, highlightMatch, runQuery,
+    recog, recogLoading, recogErr, recogSel,
+    loadRecognition, selectRecognition,
     viewerRef,
   }
 }

@@ -325,6 +325,114 @@ def session_search(sid: str, q: str = "", limit: int = 20) -> dict:
         raise _fail(exc) from exc
 
 
+@app.get("/api/session/{sid}/query")
+def session_query(sid: str, expr: str = "", limit: int = 400000) -> dict:
+    """**MDAnalysis 原生选择语句**（``select_atoms``）→ 原子索引。
+
+    例：``resid 1:10 and name CA``、``resname ETH and around 5.0 resname GRA``。
+    语句写错时返回 400 + 具体原因（不让前端看栈）。
+    """
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.query(expr, limit=limit)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+# ------------------------------------------- 分子 / 聚合物链识别（结构层级）
+@app.get("/api/session/{sid}/recognition")
+def session_recognition(sid: str, refresh: bool = False) -> dict:
+    """按**拓扑键图**识别独立分子 / 聚合物链 / 网络组分，返回摘要与结构树。
+
+    `refresh=1` 强制重算；不传则读会话缓存（识别只跑一次）。
+    """
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.recognition(refresh=bool(refresh))
+    except SessionError as exc:
+        raise _fail(exc) from exc
+    except Exception as exc:                                     # noqa: BLE001
+        raise _fail(SessionError(f"识别失败：{type(exc).__name__}: {exc}")) from exc
+
+
+@app.get("/api/session/{sid}/recognition/objects")
+def session_recognition_objects(sid: str, group: int | None = None,
+                                section: str = "", offset: int = 0,
+                                limit: int = 100) -> dict:
+    """结构树展开到对象层：某个分组 / 某类别下的分子或链（分页）。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.recognition_objects(group=group, section=section,
+                                            offset=offset, limit=limit)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.get("/api/session/{sid}/recognition/expand")
+def session_recognition_expand(sid: str, object_type: str = "all",
+                               object_id: str = "") -> dict:
+    """把结构树节点展开成**完整原子索引**（`section` / `group` / `molecule` / `chain` / `all`）。
+
+    例：选择某条链的 id → 返回这条链的全部原子索引（原始 Universe 编号）。
+    """
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.recognition_expand(object_type, object_id)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.post("/api/session/{sid}/recognition/expand")
+def session_recognition_expand_post(
+        sid: str, payload: Mapping[str, Any] = Body(default={})) -> dict:
+    """同上，POST 形式（recognize.md §5.1 的写法）。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.recognition_expand(str(payload.get("object_type") or "all"),
+                                           str(payload.get("object_id") or ""))
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.get("/api/session/{sid}/recognition/molecules/{object_id}")
+def session_recognition_molecule(sid: str, object_id: str) -> dict:
+    """单个分子的详情（含全部原子索引）。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.recognition_detail(object_id)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.get("/api/session/{sid}/recognition/chains/{object_id}")
+def session_recognition_chain(sid: str, object_id: str) -> dict:
+    """单条聚合物链的详情（含全部原子索引）。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.recognition_detail(object_id)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.post("/api/session/{sid}/recognition/confirm")
+def session_recognition_confirm(sid: str,
+                                payload: Mapping[str, Any] = Body(default={})) -> dict:
+    """人工确认：改名 / 改类型 / 标记未识别。**只影响显示，不动拓扑数据**。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.recognition_confirm(payload)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
 @app.get("/api/session/{sid}/expand")
 def session_expand(sid: str, level: str = "atom", index: int | None = None,
                    segid: str = "", resname: str = "",

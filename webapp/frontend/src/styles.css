@@ -1,4 +1,4 @@
-﻿/* ==========================================================================
+/* ==========================================================================
    MD Trajectory Analysis Tool — Web 前端样式
 
    布局约定（整页一屏，不出现页面级滚动）：
@@ -1333,6 +1333,11 @@ table.filetable td { text-align: center; vertical-align: middle; }
 }
 .structview-body > .viewer-canvas {
   flex: 1 1 auto; min-height: 0; width: 100%;
+  /* 悬停切换原子时覆盖层（原子信息框）的 DOM 变化会触发重绘；把画布提成独立
+     合成层，避免被顺带重绘成空白 —— 这是"闪白屏"的另一半原因。
+     背景色与场景 clearColor 一致，万一真的空一帧也不是刺眼的白。 */
+  transform: translateZ(0);
+  background: #f7f9fc;
 }
 /* 左侧操作台里的紧凑工具栏 / 层级树 */
 .sfield {
@@ -1354,6 +1359,23 @@ table.filetable td { text-align: center; vertical-align: middle; }
   display: flex; gap: 4px; align-items: center; padding: 4px 8px 2px;
 }
 .tree-search-row .tree-search { margin: 0; flex: 1 1 auto; min-width: 90px; }
+/* 结构层级：识别分类 / 组分残基 两个视图的切换行 */
+.tree-modes {
+  display: flex; align-items: center; gap: 4px; padding: 4px 8px 0;
+}
+.tree-modes .grow { flex: 1 1 auto; }
+/* 识别类别的小图标（聚合物 / 小分子 / 网络 / 未识别） */
+.tree .badge {
+  display: inline-block; width: 12px; margin-right: 3px; text-align: center;
+  color: #475569; font-size: 10.5px;
+}
+.tree-row.lvl1 .nm .badge { color: #334155; }
+/* 选择语句输入框：语法是代码，用等宽字体，并让长语句能横向滚动 */
+.tree-search-row .tree-search.sel-atoms {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 10.5px; letter-spacing: 0;
+}
+.tree-mini.warn { word-break: break-word; }
 .tree-hits {
   display: flex; flex-wrap: wrap; gap: 4px; padding: 2px 8px 6px;
   max-height: 96px; overflow: auto;

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import os
 import shutil
@@ -251,6 +252,10 @@ class Session:
     sigs: dict = field(default_factory=dict, repr=False)
     #: 三维视图里保存下来的选择：``{名字: {name, indices, n_atoms, kind, label}}``
     selections: dict = field(default_factory=dict, repr=False)
+    #: 分子/聚合物链识别结果（:class:`mdta.recognize.Recognition`）+ 缓存标识。
+    #: 识别只跑一次：结构树反复展开/点选都读缓存，切换体系时整个 Session 重建 → 自然失效。
+    _recog: object = field(default=None, repr=False)
+    _recog_key: tuple = field(default=(), repr=False)
 
     # ------------------------------------------------------------- 基本信息
     @property
@@ -836,6 +841,169 @@ class Session:
         return {"level": lvl, "label": label, "n_atoms": int(idx.size),
                 "indices": [int(x) for x in idx]}
 
+    def query(self, expr: str, *, limit: int = 400000) -> dict:
+        """**MDAnalysis 原生选择语句**（``select_atoms``）→ 原子索引列表。
+
+        用户要求（1.0.4）：结构选择里补上 select 语句，这样 ``resid 1:10 and name CA``
+        ``resname ETH and around 5.0 resname GRA`` ``prop mass > 12`` 这类写法都能直接用。
+
+        语句写错时 MDAnalysis 会抛各种类型（``SelectionError`` / ``SyntaxError`` /
+        ``ValueError``），一律翻成``选择语句无效``+ 原因，别让前端看栈。
+        """
+        u = self.az.universe
+        raw = str(expr or "").strip()
+        if not raw:
+            raise SessionError("选择语句不能为空")
+        try:
+            ag = u.select_atoms(raw)
+        except Exception as exc:                                 # noqa: BLE001
+            raise SessionError(
+                f"选择语句无效：「{raw}」→ {type(exc).__name__}: {exc}") from exc
+        idx = np.asarray(ag.indices, dtype=np.int64)
+        try:
+            n_res = int(np.unique(np.asarray(ag.resindices, dtype=np.int64)).size)
+        except Exception:                                        # noqa: BLE001
+            n_res = 0
+        out = {
+            "query": raw,
+            "label": f"选择「{raw}」",
+            "n_atoms": int(idx.size),
+            "n_residues": n_res,
+            # 一次最多回 40 万个索引：足够覆盖实测体系，同时保护 JSON 体积
+            "indices": idx[:limit].tolist(),
+            "truncated": bool(idx.size > limit),
+        }
+        if not idx.size:
+            # 空结果基本只有一种原因：名字写错了（体系里根本没有 "name C"，
+            # 实际叫 C1/C2…）。把体系里真实存在的名字给几个，用户立刻能改对。
+            out["hint"] = self._name_hint(u)
+        return out
+
+    @staticmethod
+    def _name_hint(u) -> str:
+        """空结果时给"体系里到底有什么名字"的样本（最多各 8 个）。"""
+        def _sample(getter, n=8):
+            try:
+                vals = [str(x) for x in getter]
+            except Exception:                                    # noqa: BLE001
+                return []
+            seen, keep = set(), []
+            for v in vals:
+                if v and v not in seen:
+                    seen.add(v)
+                    keep.append(v)
+                    if len(keep) >= n:
+                        break
+            return keep
+
+        parts = []
+        rn = _sample(u.residues.resnames)
+        if rn:
+            parts.append("残基名 " + "、".join(rn))
+        an = _sample(u.atoms.names)
+        if an:
+            parts.append("原子名 " + "、".join(an))
+        try:
+            sn = _sample(u.atoms.segids)
+            if sn:
+                parts.append("segid " + "、".join(sn))
+        except Exception:                                        # noqa: BLE001
+            pass
+        return ("这条语句没有命中任何原子。体系里实际的名字："
+                + "；".join(parts) if parts else "这条语句没有命中任何原子")
+
+    def _view_bonds(self, u, idx) -> tuple[list[int], str]:
+        """拓扑键表 → **显示位置**的扁平数组 ``[a0, b0, a1, b1, ...]``。
+
+        为什么必须在这里映射：三维视图的下标是抽稀后的**显示位置**
+        （``0..n_displayed-1``），而键表给的是 Universe **原始编号**。上一版把原始
+        编号当显示下标用，越界索引直接抛异常、React 把整棵树卸掉（白屏）。所以映射
+        只做一次，前端拿到的就是"成对的显示位置"，不再做任何换算。
+
+        只取**两端都在显示集合里**的键：跨截断边界的键画不出来（另一端不画），
+        留着只会得到悬空的棍子。
+        """
+        n_disp = int(np.asarray(idx).size)
+        if not n_disp:
+            return [], "none"
+        try:
+            cons = getattr(u, "bonds", None)
+            n_b = 0 if cons is None else len(cons)
+        except Exception:                                        # noqa: BLE001
+            n_b = 0
+        if not n_b:
+            return [], "none"
+        try:
+            pairs = np.asarray(u.bonds.indices, dtype=np.int64).reshape(-1, 2)
+        except Exception:                                        # noqa: BLE001
+            return [], "none"
+        pos_of = np.full(int(u.atoms.n_atoms), -1, dtype=np.int64)
+        pos_of[np.asarray(idx, dtype=np.int64)] = np.arange(n_disp, dtype=np.int64)
+        a = pos_of[pairs[:, 0]]
+        b = pos_of[pairs[:, 1]]
+        keep = (a >= 0) & (b >= 0)
+        if not keep.any():
+            return [], "topology"
+        flat = np.stack([a[keep], b[keep]], axis=1).ravel()
+        return flat.astype(np.int64).tolist(), "topology"
+
+    @staticmethod
+    def _cell_matrix(box):
+        """``[a,b,c,alpha,beta,gamma]`` → 3×3 矩阵（列是三条棱，三斜标准取向）。
+
+        与前端 `StructureView.jsx::cellVectors` 用同一套公式，两边的盒子必须一致。
+        """
+        try:
+            a, b, c = (float(x) for x in box[:3])
+        except Exception:                                        # noqa: BLE001
+            return None
+        if not (a > 0 and b > 0 and c > 0):
+            return None
+
+        def _ang(v, dflt=90.0):
+            try:
+                x = float(v)
+            except Exception:                                    # noqa: BLE001
+                return math.radians(dflt)
+            return math.radians(x) if 0 < x < 180 else math.radians(dflt)
+
+        al = _ang(box[3] if len(box) > 3 else None)
+        be = _ang(box[4] if len(box) > 4 else None)
+        ga = _ang(box[5] if len(box) > 5 else None)
+        ca, cb, cg = math.cos(al), math.cos(be), math.cos(ga)
+        sg = math.sin(ga) or 1e-9
+        cx = c * cb
+        cy = c * (ca - cb * cg) / sg
+        cz = math.sqrt(max(0.0, c * c - cx * cx - cy * cy))
+        return np.array([[a, b * cg, cx],
+                         [0.0, b * sg, cy],
+                         [0.0, 0.0, cz]], dtype=float)
+
+    def _box_report(self, u, idx) -> dict:
+        """模拟盒是否**把原子真正围住了**（没围住就说明坐标没按周期折回）。
+
+        为什么值得算：Material Studio 的 .xsd 经常存的是展开后的坐标（盒子
+        51×49×120 Å，原子却铺开 288×273×136 Å）。盒子照画不误，只是会切过
+        分子云 —— 界面上要说清楚是"坐标没折回"，而不是看起来像个 bug。
+        """
+        dims = u.dimensions
+        if dims is None or not np.all(np.isfinite(dims[:3])):
+            return {"box": None, "box_frac_inside": None, "box_wrapped": None}
+        M = self._cell_matrix(dims)
+        if M is None:
+            return {"box": None, "box_frac_inside": None, "box_wrapped": None}
+        try:
+            pos = np.asarray(u.atoms.positions, dtype=float)[np.asarray(idx, dtype=int)]
+            # ⚠️ M 的**列**才是三条棱（A/B/C），所以分数坐标是 solve(M, p)，
+            #    不是 `p @ inv(M)`（那是转置，实测会把 74% 误算成 11%）。
+            frac = np.linalg.solve(M, pos.T).T
+            inside = bool(np.all((frac > -1e-6) & (frac < 1 + 1e-6), axis=1).mean() > 0.98)
+            pct = float(np.all((frac > -1e-6) & (frac < 1 + 1e-6), axis=1).mean())
+        except Exception:                                        # noqa: BLE001
+            inside, pct = None, None
+        return {"box": [float(x) for x in dims[:6]],
+                "box_frac_inside": pct, "box_wrapped": inside}
+
     def structure(self, frame: int = 0, max_atoms: int = 20000,
                   max_bonds: int = 0) -> dict:
         """给三维视图**拓扑（首帧）坐标** + 元素 + 层级信息。
@@ -910,10 +1078,10 @@ class Session:
             idx = np.arange(n)
         step = 1 if idx.size == n else 0
 
-        # ---- 键表：1.0.4 起**不再返回**（界面上的“显示键”已按用户要求去掉）。
-        #      若要恢复键显示，把这里换成真正的拓扑键（绝不能用距离推断冒充）。
-        bonds: list[list[int]] = []
-        bond_kind = "none"
+        # ---- 键表：球棍模型的"棍"。1.0.4 用户要求按 Material Studio 的样子画，
+        #      所以这里把**拓扑自带的键**映射成显示位置后返回（绝不用距离推断冒充，
+        #      没有键表就只画球，`bond_source="none"` 说明原因）。
+        bonds, bond_kind = self._view_bonds(u, idx)
 
         # radii 用共价半径当显示半径（相对大小看得出来即可，单位 Å）
         from mdta.topology import COVALENT_RADII       # type: ignore
@@ -942,15 +1110,99 @@ class Session:
             "molid": mol_in_view.tolist(),
             "bonds": bonds,
             "bond_source": bond_kind,
+            "n_bonds": int(len(bonds) // 2),
             "box": serialize._num(u.dimensions),
+            # 盒子照画，但要说清楚它有没有把原子围住（坐标未按周期折回时盒外还有原子）
+            **{k: v for k, v in self._box_report(u, idx).items() if k != "box"},
             "truncated": bool(truncated),
             # 拓扑是否够用来做"分子/残基"层级选择
             "has_bonds": bond_kind == "topology",
             "n_molecules": int(mol_in_view.max()) + 1 if mol_in_view.size else 0,
         }
 
-    def hierarchy(self, *, segid: str | None = None, resname: str | None = None,
-                  offset: int = 0, limit: int = 400) -> dict:
+    # --------------------------------------------------- 分子 / 聚合物链识别
+    def recognition(self, *, refresh: bool = False) -> dict:
+        """执行（或读取缓存的）**分子与聚合物链识别**结果，返回摘要 + 结构树。
+
+        识别只做一次并缓存在会话里（recognize.md §5.2）：结构树反复展开、
+        点选对象都读缓存；换体系就是新 Session，旧结果自然失效。
+        缓存标识取 ``(universe id, 原子数, 键数)``，万一有人动了拓扑也会重算。
+        """
+        rec = self._recognition(refresh=refresh)
+        out = rec.tree()
+        out["cached"] = not refresh
+        return out
+
+    def _recognition(self, *, refresh: bool = False):
+        from mdta.recognize import recognize
+
+        u = self.az.universe
+        try:
+            nb = len(u.bonds)
+        except Exception:                                        # noqa: BLE001
+            nb = 0
+        key = (id(u), int(u.atoms.n_atoms), int(nb))
+        if refresh or self._recog is None or self._recog_key != key:
+            self._recog = recognize(u)
+            self._recog_key = key
+        return self._recog
+
+    def recognition_objects(self, *, group: int | None = None, section: str = "",
+                            offset: int = 0, limit: int = 100) -> dict:
+        """某个分组（或某类别）下的对象清单（分页）—— 结构树展开到对象层用。"""
+        rec = self._recognition()
+        try:
+            return rec.objects(group, section=section, offset=int(offset),
+                               limit=int(limit))
+        except ValueError as exc:
+            raise SessionError(str(exc)) from exc
+
+    def recognition_expand(self, object_type: str, object_id: str) -> dict:
+        """把结构树上的节点展开成**完整原子索引**（原始 Universe 编号）。
+
+        识别结果里的 ``mol_of_atom`` 就是权威归属，所以这里只是查表 ——
+        不存在"前端自己算归属"的情况。
+        """
+        rec = self._recognition()
+        try:
+            return rec.expand(object_type, object_id)
+        except ValueError as exc:
+            raise SessionError(str(exc)) from exc
+
+    def recognition_detail(self, object_id: str) -> dict:
+        """单个对象/链的详情（右侧属性区）。"""
+        from mdta.recognize import _parse_mol_id
+
+        rec = self._recognition()
+        m = _parse_mol_id(object_id)
+        if m is None or not 0 <= m < rec.n_molecules:
+            raise SessionError(f"不存在的对象 {object_id!r}")
+        return rec.detail(m)
+
+    def recognition_confirm(self, payload: Mapping[str, Any]) -> dict:
+        """人工确认 / 改名 / 改类型（**只影响显示，不动拓扑数据**）。
+
+        请求：``{"object_id": "C000001", "name": "PE-A", "type": "polymer",
+                 "chain_type": "linear", "status": "manually_confirmed"}``
+        """
+        rec = self._recognition()
+        from mdta.recognize import _parse_mol_id
+
+        oid = str(payload.get("object_id") or "").strip()
+        m = _parse_mol_id(oid)
+        if m is None or not 0 <= m < rec.n_molecules:
+            raise SessionError(f"不存在的对象 {oid!r}")
+        cur = dict(rec.overrides.get(rec.mol_id(m)) or {})
+        for k in ("name", "type", "chain_type", "status"):
+            v = payload.get(k)
+            if v is not None and str(v).strip():
+                cur[k] = str(v).strip()
+        cur.setdefault("status", "manually_confirmed")
+        rec.overrides[rec.mol_id(m)] = cur
+        return {"ok": True, "object_id": rec.mol_id(m), "override": cur,
+                "detail": rec.detail(m)}
+
+    def hierarchy(self, *, segid: str | None = None, resname: str | None = None,                  offset: int = 0, limit: int = 400) -> dict:
         """结构层级树：体系 → 组分 → 链（segid+resname）→ 残基（分页）。
 
         层级完全按**实际拓扑**生成，不假设"残基 = 分子"：

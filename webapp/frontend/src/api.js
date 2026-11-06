@@ -109,8 +109,7 @@ export const api = {
   structure: (sid, frame = 0, maxAtoms = 20000) =>
     request(`/session/${sid}/structure?frame=${frame}&max_atoms=${maxAtoms}`),
 
-  /** 结构层级树：体系 → 组分 → 链（segid+resname）→ 残基（分页） */
-  hierarchy: (sid, { segid = '', resname = '', offset = 0, limit = 400 } = {}) =>
+  /** 结构层级树：体系 → 组分 → 链（segid+resname）→ 残基（分页） */  hierarchy: (sid, { segid = '', resname = '', offset = 0, limit = 400 } = {}) =>
     request(`/session/${sid}/hierarchy?segid=${encodeURIComponent(segid)}`
       + `&resname=${encodeURIComponent(resname)}&offset=${offset}&limit=${limit}`),
 
@@ -138,6 +137,42 @@ export const api = {
   /** 按残基名+编号（ETH32）/ 原子名 / 原子索引检索结构（命中即可高亮） */
   search: (sid, q, limit = 20) =>
     request(`/session/${sid}/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+
+  /**
+   * **MDAnalysis 原生选择语句**（select_atoms）→ 原子索引。
+   * 例：`resid 1:10 and name CA`、`resname ETH and around 5.0 resname GRA`。
+   * 语句写错时后端返回具体原因（前端直接把它显示在面板里）。
+   */
+  query: (sid, expr, limit = 400000) =>
+    request(`/session/${sid}/query?expr=${encodeURIComponent(expr)}&limit=${limit}`),
+
+  // ------------------------------------- 分子 / 聚合物链识别（结构层级）
+  /** 按拓扑键图识别独立分子 / 聚合物链 / 网络组分（结果在后端缓存，只算一次） */
+  recognition: (sid, refresh = false) =>
+    request(`/session/${sid}/recognition?refresh=${refresh ? 1 : 0}`),
+
+  /** 结构树展开到对象层：某分组（或某类别）下的分子或链，分页 */
+  recognitionObjects: (sid, { group = null, section = '', offset = 0,
+                              limit = 100 } = {}) => {
+    const qs = [`offset=${offset}`, `limit=${limit}`]
+    if (group !== null && group !== undefined) qs.push(`group=${group}`)
+    if (section) qs.push(`section=${encodeURIComponent(section)}`)
+    return request(`/session/${sid}/recognition/objects?${qs.join('&')}`)
+  },
+
+  /** 把识别树上的节点展开成**完整原子索引**（section / group / molecule / chain / all） */
+  recognitionExpand: (sid, { objectType = 'all', objectId = '' } = {}) =>
+    request(`/session/${sid}/recognition/expand?object_type=`
+      + `${encodeURIComponent(objectType)}&object_id=${encodeURIComponent(objectId)}`),
+
+  /** 单个分子 / 链的详情 */
+  recognitionDetail: (sid, objectId, kind = 'molecules') =>
+    request(`/session/${sid}/recognition/${kind}/${encodeURIComponent(objectId)}`),
+
+  /** 人工确认（改名 / 改类型）—— 只影响显示，不动拓扑数据 */
+  recognitionConfirm: (sid, payload) =>
+    request(`/session/${sid}/recognition/confirm`,
+      { method: 'POST', body: JSON.stringify(payload) }),
 
   /** 已保存的可视化选择 */
   selections: (sid) => request(`/session/${sid}/selections`),
