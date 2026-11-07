@@ -325,14 +325,15 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     return toggleFilter({ elements: [e] }, `element:${e}`, `元素 ${e}`)
   }, [toggleFilter])
 
-  /** 用"当前选中的原子"建集合（与手工筛选共用同一套命名流程） */
-  const createFromIndices = useCallback(async (name) => {
+  /** 用"当前选中的原子"建集合（与手工筛选共用同一套命名流程）
+   *  `from` = 这条集合怎么来的（范围原子数 / 筛选条件），只用于界面悬浮说明 */
+  const createFromIndices = useCallback(async (name, from = null) => {
     if (!sid || !selected.size) return null
     const nm = String(name || '').trim()
     if (!nm) { setErr('集合需要一个名字'); return null }
     setErr('')
     try {
-      const r = await api.createSelection(sid, nm, [...selected])
+      const r = await api.createSelection(sid, nm, [...selected], from)
       log?.(`已创建集合 set:${nm}：${r.set?.n_atoms ?? selected.size} 原子（来自三维视图的选择）`)
       onSetsChanged?.(r)
       return r

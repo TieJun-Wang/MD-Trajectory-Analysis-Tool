@@ -1372,6 +1372,22 @@ table.filetable td { text-align: center; vertical-align: middle; }
 .tree-row .count {
   flex: none; white-space: nowrap;
 }
+/* 分析项跑不了时整行置灰（用户要求：先预判，能跑的才让选） */
+label.check.disabled {
+  opacity: 0.45; cursor: not-allowed;
+}
+label.check.disabled input { cursor: not-allowed; }
+/* 模块按钮：整类已选 = active；只选了一部分 = partial（浅一点） */
+button.mini.partial {
+  background: #eef2ff; border-color: #a5b4fc; color: #1e293b;
+}
+/* 集合行：「删除」永远贴整行最右边（用户要求），名字再长也挤不跑它 */
+.set-row { display: flex; align-items: center; gap: 6px; }
+.set-row > label.check { flex: 1 1 auto; min-width: 0; }
+.set-row > label.check b {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.set-row > button.mini { margin-left: auto; flex: none; white-space: nowrap; }
 /* 选中态标红（用户实测：选中链/元素后没有任何提示，看不出选没选中） */
 .tree-row.sel {
   background: #fff1f2;

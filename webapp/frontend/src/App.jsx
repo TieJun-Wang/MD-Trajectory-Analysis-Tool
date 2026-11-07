@@ -90,6 +90,8 @@ export default function App() {
   const [order, setOrder] = useState([])
   const [which, setWhich] = useState([])
   const [groups, setGroups] = useState([])
+  //: 分析项可行性预判（后端 /select 一起返回）：跑不了的项在界面上置灰 + 说明原因
+  const [feasible, setFeasible] = useState({})
 
   const [run, setRun] = useState(null)
   const [chart, setChart] = useState({ name: '', index: 0 })
@@ -140,9 +142,14 @@ export default function App() {
           name: x.name, elements: x.elements || [], shape: x.shape || 'all',
           min_atoms: x.min_atoms || 0, max_atoms: x.max_atoms || 0,
           pure: !!x.pure,
+          // 这条集合"怎么来的"（范围 / 筛选条件）——后端原样存进 sets_spec，
+          // 集合行的悬浮提示靠它
+          ...(x.from ? { from: x.from } : {}),
         })),
       })
       setSetsInfo(r?.sets || [])
+      // 可行性**不在这里设**：统一由下面那个 effect 取（它还必须带帧选择），
+      // 两个来源写同一个 state 会互相覆盖 —— 正是"预判没生效"的一半原因。
       // 分析正在跑：后端只存选择、不重建分析器（选取与分析互不影响），
       // 这里说清楚"什么时候生效"，别让用户以为没生效
       if (r?.deferred) {
@@ -195,9 +202,11 @@ export default function App() {
     if (r.set?.name) {
       const nm = String(r.set.name).replace(/^set:/, '')
       setSets((prev) => (prev.some((x) => x.name === nm) ? prev
-        : [...prev, { name: nm, kind: 'visual', on: true }]))
+        : [...prev, { name: nm, kind: 'visual', on: true,
+          ...(r.set.from ? { from: r.set.from } : {}) }]))
       setComponents((prev) => (prev.includes(r.set.name) ? prev : [...prev, r.set.name]))
     }
+
   }
 
   const pushLog = useCallback((line) => {
@@ -345,7 +354,9 @@ export default function App() {
     api.analyses().then((a) => {
       setTitles(a.titles || {})
       setOrder(a.order || [])
-      setWhich(a.order || [])
+      // 默认**一个都不勾**（用户要求）：只有自己选了才会分析 —— 免得一上来
+      // 点「开始分析」就把 14 项全跑一遍（其中不少项当前体系根本跑不了）
+      setWhich([])
       setGroups(normalizeGroups(a.groups))
       pushLog(`已连接后端，可用分析 ${a.order?.length || 0} 项`)
       // 上次的会话还在就接回去（F5 / 重新打开页面）
@@ -656,6 +667,28 @@ export default function App() {
 
   const lastLine = useMemo(() => (log.length ? log[log.length - 1] : ''), [log])
 
+  /**
+   * **分析项可行性**：凡影响"能不能跑"的东西变了就重新问后端 ——
+   * 体系、主链、勾选的组分、集合的参与开关、**帧选择**（把最大帧数设成 1，
+   * MSD 就跑不了了）。以前只在集合变化时顺带取一次，导致很多时候
+   * 预判根本没生效：选了 MSD 却一跑就报「至少需要 2 帧」（用户实测）。
+   */
+  const feasibleKey = useMemo(() => JSON.stringify([
+    sess?.sid || '', primary, components,
+    (sets || []).map((x) => [x.name, x.on !== false]), frames,
+  ]), [sess?.sid, primary, components, sets, frames])
+
+  useEffect(() => {
+    const sid = sess?.sid
+    if (!sid) { setFeasible({}); return undefined }
+    let alive = true
+    api.feasible(sid, frames)
+      .then((r) => { if (alive) setFeasible((r && r.feasible) || {}) })
+      .catch(() => { if (alive) setFeasible({}) })
+    return () => { alive = false }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [feasibleKey])
+
   // 当前正在看的那张图：图表区与右侧「图表说明」都要用它，
   // 所以在这里统一算好再分别传下去（避免两边各算一套出现不一致）。
   const current = useMemo(() => {
@@ -810,6 +843,7 @@ export default function App() {
                           <FunctionBlock titles={titles} order={order}
                                          which={which} setWhich={setWhich}
                                          groups={groups}
+                                         feasible={feasible}
                                          estimates={live?.estimates} />
                           <ParamBlock params={params} setParams={setParams}
                                       which={which}

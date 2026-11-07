@@ -258,6 +258,7 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
                  filterBusy={!!st.filterBusy}
                  filterCount={(st.filters || []).length}
                  scopeSize={st.scopeSize || 0}
+                 filters={st.filters || []}
                  onClearFilters={() => st.clearFilters?.()}
                  activeElement={(() => {
                    const k = [...(st.selKeys || [])].find((x) => x.startsWith('element:'))

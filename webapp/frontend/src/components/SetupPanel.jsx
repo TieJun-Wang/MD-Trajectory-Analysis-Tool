@@ -2,7 +2,7 @@
  * 3. 分析设置 —— 把「分析对象 + 参数设置 + 分析功能 + 运行」合成一块，
  *    放进同一个折叠面板里，所以三块都用紧凑排版、不带卡片外壳。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api'
 import { normalizeGroups } from '../analysisGroups'
 import { fmtSec } from '../format'
@@ -21,7 +21,7 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
                           onFilterElement = null, activeElement = '',
                           onToggleFilter = null, activeKeys = null,
                           filterErr = '', filterBusy = false, filterCount = 0,
-                          scopeSize = 0, onClearFilters = null }) {
+                          scopeSize = 0, onClearFilters = null, filters = [] }) {
   if (!sess) return null
   //: 三维视图里已经选中了原子 → 默认用"这批原子"建集合
   //: （1.0.4 用户要求：预设/元素 chip 只改选择、不自动建集合，所以"添加集合"
@@ -56,7 +56,15 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
     const nm = draft.name.trim() || (draft.elements.join('') || '自定义')
     // ① 三维视图里选中了原子、且用户没改成"按筛选条件" → 用这批原子建集合
     if (useSel && selectedCount > 0 && onCreateFromIndices) {
-      onCreateFromIndices(nm)
+      // 记下这条集合"怎么来的"：集合行只显示名字，全部说明放悬浮提示
+      const from = {
+        n_atoms: Number(selectedCount) || 0,
+        scope: Number(scopeSize) || 0,
+        filters: (filters || []).map((f) => ({
+          label: f.label || f.key, n_atoms: Number(f.nAtoms || f.atoms?.size || 0),
+        })),
+      }
+      onCreateFromIndices(nm, from)
       setDraft({ name: '', elements: [], shape: 'all', min_atoms: '', max_atoms: '', pure: false })
       return
     }
@@ -225,20 +233,37 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
             {sets.map((x) => {
               const info = infoOf(x.name)
               const on = x.on !== false
+              // 行内**只显示名字**（用户实测：后面的小字太长会把「删除」挤到换行）。
+              // 原子数 / 选择来源全部放进悬浮提示：
+              //   ① 这个集合有多少原子
+              //   ② 层级树那边选了什么（范围）
+              //   ③ 分析集合那边加了哪些筛选条件
+              const fr = x.from || {}
+              const lines = []
+              const nA = Number(fr.n_atoms || info?.n_atoms || 0)
+              lines.push(nA ? `① 原子数：${nA.toLocaleString()}` : '① 原子数：（自动预览）')
+              const nScope = Number(fr.scope || 0)
+              lines.push(nScope
+                ? `② 层级树选择：范围 ${nScope.toLocaleString()} 原子`
+                : '② 层级树选择：（没有先在层级树里选中）')
+              const fl = Array.isArray(fr.filters) ? fr.filters : []
+              lines.push(fl.length
+                ? '③ 分析集合选择：' + fl.map((f) => `${f.label}`
+                  + (f.n_atoms ? `（${Number(f.n_atoms).toLocaleString()} 原子）` : ''))
+                  .join('、')
+                : '③ 分析集合选择：（没有加筛选条件）')
+              if (info?.label) lines.push(`· 后端识别为：${info.label}`)
               return (
                 <div key={x.name}
                      className={`set-row${on ? '' : ' off'}${activeSet === x.name ? ' active' : ''}`}
                      onClick={() => onHighlight?.(x.name)}
-                     title="点击在三维视图里高亮这个集合的原子">
+                     title={lines.join('\n') + '\n\n点击：在三维视图里高亮这个集合的原子'}>
                   <label className="check" style={{ fontSize: 10.5 }}
                          title={on ? '点此取消参与分析' : '点此参与分析'}
                          onClick={(e) => e.stopPropagation()}>
                     <input type="checkbox" checked={on} onChange={() => toggleSetOn(x.name)} />
                     <b>set:{x.name}</b>
                   </label>
-                  <span className="set-desc">
-                    {info ? `${info.label}` : '（自动预览）'}
-                  </span>
                   <button className="mini" onClick={(e) => { e.stopPropagation(); removeSet(x.name) }}>
                     删除
                   </button>
@@ -650,59 +675,118 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
 }
 
 export function FunctionBlock({ titles = {}, order = [], which = [], setWhich,
-                                groups, estimates = {} }) {
+                                groups, estimates = {}, feasible = {} }) {
   const toggle = (n) => setWhich(which.includes(n)
     ? which.filter((x) => x !== n) : [...which, n])
+
+  //: 后端预判：`{项: {ok, level, reason}}`。level='blocked' 的项直接置灰，
+  //: 并在 tooltip 里说明**为什么**跑不了（用户要求：先预判再选，别等跑完才知道）
+  const verdict = (n) => {
+    const v = feasible && feasible[n]
+    if (!v) return { ok: true, level: 'ok', reason: '' }
+    if (v.ok === false || v.level === 'blocked') {
+      return { ok: false, level: 'blocked', reason: v.reason || '当前体系不满足前提' }
+    }
+    return { ok: true, level: v.level || 'ok', reason: v.reason || '' }
+  }
+  const blockedCount = order.filter((n) => !verdict(n).ok).length
+  //: 当前**跑得了**的分析项。快捷按钮（全选 / 构象 / 结构 …）只许碰这些 ——
+  //: 否则会出现"置灰的项被按钮勾上、然后一跑就失败"（用户实测）。
+  const okNames = useMemo(() => order.filter((n) => verdict(n).ok),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [order, feasible])
+  const okSet = useMemo(() => new Set(okNames), [okNames])
+
+  // 可行性变了（换体系 / 改主链 / 改帧选择）→ 把已经勾上但**现在跑不了**的项撤掉。
+  // 这样"置灰"和"已选"永远是同一套体系，不会留下偷偷跑不了的残留。
+  useEffect(() => {
+    const keep = which.filter((n) => okSet.has(n))
+    if (keep.length !== which.length) setWhich(keep)
+  }, [which, okSet, setWhich])
 
   // 分组来自 /api/analyses 的 groups（权威定义在 mdta.pipeline.ANALYSIS_GROUPS），
   // normalizeGroups 里带本地兜底
   const GROUPS = normalizeGroups(groups)
 
-  // 某个「仅 XX」预设是否正好等于当前选择（用于高亮当前所处的预设）
-  const isPreset = (names) =>
-    names.length === which.length && names.every((n) => which.includes(n))
+  // 某个模块是否整类已选 / 部分已选（按钮高亮用）
+  const groupState = (names) => {
+    const allIn = names.length > 0 && names.every((n) => which.includes(n))
+    const some = !allIn && names.some((n) => which.includes(n))
+    return { allIn, some }
+  }
 
   return (
     <>
       <div className="sect-title" style={{ marginTop: 10 }}>
         分析功能
         <span className="dim" style={{ fontWeight: 400 }}>
-          {' '}（已选 {which.length} / {order.length}）
+          {' '}（已选 {which.length} / {order.length}
+          {blockedCount ? `，${blockedCount} 项当前跑不了（灰）` : ''}）
         </span>
       </div>
       {GROUPS.map(([group, names]) => (
         <div key={group} className="fgroup">
           <span className="glabel">{group}</span>
           <div className="gitems">
-            {names.map((n) => (
-              <label key={n} className="check"
-                     title={estimates?.[n] != null
-                       ? `上次实测外推：预计约 ${fmtSec(estimates[n])}`
-                       : undefined}>
-                <input type="checkbox" checked={which.includes(n)}
-                       onChange={() => toggle(n)} />
-                {titles[n] || n}
-                {/* 预估用时来自「开始分析」时的实测外推，直接标在分析项上，
-                    省得用户去别的区块里对名字 */}
-                {estimates?.[n] != null && (
-                  <span className="est-tag">≈{fmtSec(estimates[n])}</span>
-                )}
-              </label>
-            ))}
+            {names.map((n) => {
+              const v = verdict(n)
+              const tip = [v.reason,
+                estimates?.[n] != null
+                  ? `上次实测外推：预计约 ${fmtSec(estimates[n])}` : '',
+                v.level === 'warn' ? v.reason : '',
+              ].filter(Boolean).join('\n')
+              return (
+                <label key={n} className={`check${v.ok ? '' : ' disabled'}`}
+                       title={tip || undefined}>
+                  <input type="checkbox" checked={which.includes(n)}
+                         disabled={!v.ok}
+                         onChange={() => { if (v.ok) toggle(n) }} />
+                  {titles[n] || n}
+                  {/* 预估用时来自「开始分析」时的实测外推，直接标在分析项上，
+                      省得用户去别的区块里对名字 */}
+                  {estimates?.[n] != null && (
+                    <span className="est-tag">≈{fmtSec(estimates[n])}</span>
+                  )}
+                  {!v.ok && <span className="est-tag" style={{ color: '#b45309' }}>不可用</span>}
+                </label>
+              )
+            })}
           </div>
         </div>
       ))}
       <div className="btnrow">
-        <button className="mini" onClick={() => setWhich([...order])}>全选</button>
-        {GROUPS.map(([group, names, short]) => (
-          <button key={group}
-                  className={`mini ${isPreset(names) ? 'active' : ''}`}
-                  title={`只勾「${group}」这一类（${names.map(
-                    (n) => titles[n] || n).join('、')}）`}
-                  onClick={() => setWhich([...names])}>
-            仅{short}
-          </button>
-        ))}
+        {/* 「全选 / 全不选」只针对**当前跑得了**的项：置灰的直接不勾（用户要求
+            "不可用的话不能被快捷按钮勾上"）。 */}
+        <button className={`mini ${okNames.length && which.length === okNames.length ? 'active' : ''}`}
+                title={which.length === okNames.length && okNames.length
+                  ? '取消全部勾选'
+                  : `把当前可用的 ${okNames.length} 项都勾上`
+                    + (blockedCount ? `（${blockedCount} 项跑不了，不会被勾上）` : '')}
+                onClick={() => setWhich(which.length === okNames.length ? [] : [...okNames])}>
+          {which.length === okNames.length && okNames.length ? '全不选' : '全选'}
+        </button>
+        {/* 各模块按钮 = **可叠加的开关**，且只加**该模块里跑得了**的项：
+            点一下加进去，再点一下撤掉；不同模块可以同时选。 */}
+        {GROUPS.map(([group, names, short]) => {
+          const usable = names.filter((n) => okSet.has(n))
+          const allIn = usable.length > 0 && usable.every((n) => which.includes(n))
+          const some = !allIn && usable.some((n) => which.includes(n))
+          const bad = names.length - usable.length
+          return (
+            <button key={group}
+                    className={`mini${allIn ? ' active' : ''}${some ? ' partial' : ''}`}
+                    disabled={!usable.length}
+                    title={`点一下把「${group}」这一类的 ${usable.length} 项加进已选，`
+                      + '再点一下取消这一类；不同模块可以同时选\n'
+                      + usable.map((n) => titles[n] || n).join('、')
+                      + (bad ? `\n（这一类里还有 ${bad} 项当前跑不了，不会被勾上）` : '')}
+                    onClick={() => setWhich(allIn
+                      ? which.filter((n) => !usable.includes(n))
+                      : [...which, ...usable.filter((n) => !which.includes(n))])}>
+              {short || String(group).slice(0, 2)}
+            </button>
+          )
+        })}
       </div>
     </>
   )

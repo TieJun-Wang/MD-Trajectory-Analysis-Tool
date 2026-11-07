@@ -341,6 +341,34 @@ def session_query(sid: str, expr: str = "", limit: int = 400000) -> dict:
 
 
 # ------------------------------------------- 分子 / 聚合物链识别（结构层级）
+@app.get("/api/session/{sid}/feasible")
+def session_feasible(sid: str) -> dict:
+    """分析项可行性预判：`{项: {ok, level, reason}}`（界面据此置灰 + 提示）。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return {"feasible": sess.feasible()}
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.post("/api/session/{sid}/feasible")
+def session_feasible_post(sid: str,
+                          payload: Mapping[str, Any] = Body(default={})) -> dict:
+    """同上，但带上界面当前的**帧选择**（`{"frames": {...}}`）。
+
+    必须带：把最大帧数设成 1、或把时间窗收窄到只剩 1 帧时，MSD 就跑不了 ——
+    不带帧选择的话预判会以为"体系有 N 帧就能跑"，然后一跑就报
+    「MSD 至少需要 2 帧」（用户实测）。
+    """
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return {"feasible": sess.feasible(payload.get("frames") or None)}
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
 @app.get("/api/session/{sid}/recognition")
 def session_recognition(sid: str, refresh: bool = False) -> dict:
     """按**拓扑键图**识别独立分子 / 聚合物链 / 网络组分，返回摘要与结构树。
@@ -482,7 +510,8 @@ def session_selection(sid: str, payload: Mapping[str, Any] = Body(default={})) -
             return sess.load_selection(name)
         if not isinstance(raw, (list, tuple)):
             raise SessionError("indices 必须是原子索引数组")
-        return sess.add_visual_selection(name, raw)
+        return sess.add_visual_selection(name, raw,
+                                         from_meta=payload.get("from"))
     except SessionError as exc:
         raise _fail(exc) from exc
 

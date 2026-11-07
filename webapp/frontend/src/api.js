@@ -138,10 +138,19 @@ export const api = {
       method: 'POST', body: JSON.stringify({ spec }),
     }),
 
-  /** 把三维视图里选中的**原子索引**变成一条集合（可直接参与分析） */
-  createSelection: (sid, name, indices) =>
+  /** 把三维视图里选中的**原子索引**变成一条集合（可直接参与分析）
+   *  `from` = 这条集合是由什么选出来的（范围原子数 / 加了哪些筛选条件），
+   *  只用于集合行的悬浮说明。 */
+  createSelection: (sid, name, indices, from = null) =>
     request(`/session/${sid}/selection`, {
-      method: 'POST', body: JSON.stringify({ name, indices }),
+      method: 'POST', body: JSON.stringify({ name, indices, from }),
+    }),
+
+  /** 分析项可行性预判（界面据此把跑不了的项置灰 + 说明原因）。
+   *  必须带上当前**帧选择** —— 把最大帧数设成 1 或时间窗收窄后，MSD 就跑不了。 */
+  feasible: (sid, frames = null) =>
+    request(`/session/${sid}/feasible`, {
+      method: 'POST', body: JSON.stringify({ frames: frames || null }),
     }),
 
   /** 按残基名+编号（ETH32）/ 原子名 / 原子索引检索结构（命中即可高亮） */

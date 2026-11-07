@@ -650,7 +650,53 @@ class Session:
             # 可选元素与预设（界面做多选项与一键按钮）
             "elements": _available_elements(az.universe),
             "set_presets": _set_presets(az.universe, az.components),
+            # 分析项能不能跑（界面据此置灰 + tooltip 说明）
+            "feasible": self.feasible(),
         }
+
+    def feasible(self, frames: Mapping[str, Any] | None = None) -> dict:
+        """分析项**可行性预判**（点「开始分析」之前就把跑不了的项说清楚）。
+
+        只看晶胞 / 帧数 / 键表 / 当前勾选的组分与分析对象，不触发任何分析计算，
+        所以开销可以忽略；`/select` 的返回里也带一份，界面据此把项置灰。
+
+        ``frames``：界面上的**帧选择**（起始/结束/间隔/平衡段/最大帧数）。
+        一定要传 —— "体系有 100 帧"不等于"这次要算 100 帧"：把最大帧数设成 1
+        或者把时间窗收窄，MSD 就只剩下 1 帧，跑起来直接报「MSD 至少需要 2 帧」。
+        """
+        from mdta.feasible import preflight
+
+        n_frames = None
+        total_frames = None
+        try:
+            total_frames = int(self.az.trajectory.n_frames)
+        except Exception:                                        # noqa: BLE001
+            total_frames = None
+        if frames:
+            def _f(key):
+                v = dict(frames).get(key)
+                if v in ("", None):
+                    return None
+                try:
+                    return float(v)
+                except Exception:                                # noqa: BLE001
+                    return None
+
+            mf = dict(frames).get("max_frames")
+            try:
+                self.az.set_frames(
+                    start_ps=_f("start_ps"), stop_ps=_f("stop_ps"),
+                    interval_ps=_f("interval_ps"), equil_ps=_f("equil_ps"),
+                    max_frames=int(mf) if mf not in ("", None) else None)
+                n_frames = int(self.az.require_frames().n_frames)
+            except Exception:                                    # noqa: BLE001
+                n_frames = 0
+        try:
+            return preflight(self.az, n_frames=n_frames,
+                             total_frames=total_frames)
+        except Exception as exc:                                 # noqa: BLE001
+            return {"_error": {"ok": True, "level": "warn",
+                               "reason": f"可行性预判失败：{exc}"}}
 
     # ------------------------------------------------- 三维结构与交互式选择
     def _sets_only(self, specs) -> tuple[list[dict], dict]:
@@ -718,6 +764,7 @@ class Session:
             "sets": list(self.sets_info),
             "elements": _available_elements(az.universe),
             "set_presets": _set_presets(az.universe, az.components),
+            "feasible": self.feasible(),
             "note": "分析正在运行：选择已保存，将在下一次运行时生效",
         }
 
@@ -1414,12 +1461,16 @@ class Session:
             pass
         return out
 
-    def add_visual_selection(self, name: str, indices, *, save: bool = True) -> dict:
+    def add_visual_selection(self, name: str, indices, *, save: bool = True,
+                             from_meta: Mapping | None = None) -> dict:
         """把三维视图里选中的**原子索引**变成一条集合（`set:<名字>`）。
 
         走的是现有 Set 机制（`mdta.sets.build_set` 的 ``indices`` 分支）：
         于是它和手工定义的集合完全等价 —— 出现在组分清单里、可勾选参与分析、
         MSD 的追踪语义也按"是否整分子"自动判定。
+
+        ``from_meta``：这条集合是**由什么选出来的**（范围多少原子、加了哪些筛选
+        条件）。只用于界面悬浮说明，不参与任何计算，随 `sets_spec` 一起存会话。
         """
         from mdta.sets import SetError as _SetError
 
@@ -1429,6 +1480,8 @@ class Session:
         if nm.startswith("set:"):
             nm = nm[4:]
         spec = {"name": nm, "indices": [int(x) for x in (indices or [])]}
+        if isinstance(from_meta, Mapping) and from_meta:
+            spec["from"] = dict(from_meta)
         if not spec["indices"]:
             raise SessionError("没有选中任何原子（先在三维视图里点选，或在结构树里选中对象）")
         # 后端的校验（索引越界 / 空选择）在这里先做一遍，错误直接回给界面
@@ -1459,7 +1512,8 @@ class Session:
                 out_info = cur or {**{k: v for k, v in info.items()
                                       if k != "indices"}, "name": f"set:{nm}"}
                 return {"ok": True, "deferred": True,
-                        "set": {**out_info, "set_name": nm},
+                        "set": {**out_info, "set_name": nm,
+                                "from": dict(from_meta or {})},
                         "selection": None,
                         "selections": self.selection_list()}
             # 立刻生效：作为参与分析的组分重建集合
@@ -1472,7 +1526,8 @@ class Session:
                 # `name` 用带前缀的 `set:<名字>`（与 components 里的键一致）；
                 # `set_name` 是没有前缀的原始名字，界面回显时用哪个都行。
                 "set": {**{k: v for k, v in info.items() if k != "indices"},
-                        "name": f"set:{nm}", "set_name": nm},
+                        "name": f"set:{nm}", "set_name": nm,
+                        "from": dict(from_meta or {})},
                 "selection": info_list, "selections": self.selection_list()}
 
     def selection_list(self) -> list[dict]:
@@ -1534,7 +1589,14 @@ class Session:
         )
         selection = self.az.require_frames()
 
-        which = list(req.get("which") or DEFAULT_ORDER)
+        raw_which = req.get("which")
+        # ⚠️ 以前写的是 `list(req.get("which") or DEFAULT_ORDER)` —— 前端传**空列表**
+        #    （界面默认一个都不勾）时，`[] or DEFAULT_ORDER` 会变成"全跑 14 项"，
+        #    跟"没选就不分析"完全相反。现在只有**没传**才用默认顺序，传空就是空。
+        which = (list(raw_which) if isinstance(raw_which, (list, tuple))
+                 else list(DEFAULT_ORDER))
+        if not which:
+            raise SessionError("还没有勾选任何分析项（在「分析功能」里勾选后开始分析）")
         # 校验要针对**全部已注册分析项**，而不是 DEFAULT_ORDER（后者只是"默认
         # 勾选的那批"）。否则界面里能勾上、提交却报"未知分析项"的分析（如
         # rdf2d / comdist 这类可选项）在前端就完全用不了。
