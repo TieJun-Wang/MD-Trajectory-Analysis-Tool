@@ -650,11 +650,18 @@ def ensure_object_attrs(universe, *, verbose: bool = False) -> dict:
         pass
     if has_mol:
         n_mol = int(len(set(np.asarray(u.residues.molnums, dtype=int).tolist())))
-        try:
-            n_frag = len(u.atoms.fragments)
-        except Exception:                                     # noqa: BLE001
-            n_frag = 0
         mean_per_mol = n / max(n_mol, 1)
+        # 「退化」判据需要**同时**满足"碎片数 ≥ 3×分子数"和"平均每分子 ≥ 8 原子"。
+        # 后一条只看数字就能判，所以**先算它**：平均每分子只有几个原子时
+        # （正常力场拓扑都这样，例如 AdK 47681 原子 / 11089 分子 = 4.3），
+        # 根本不可能退化，就不必去算 `u.atoms.fragments` ——
+        # 那一步在 tpr 上要 1 s 左右（实测），纯属白算。
+        n_frag = n_mol
+        if mean_per_mol >= 8.0:
+            try:
+                n_frag = len(u.atoms.fragments)
+            except Exception:                                 # noqa: BLE001
+                n_frag = 0
         # 自带 molnums 也可能是**退化**的（Material Studio 的 PDB 会把整个体系塞进
         # 1–2 个残基，于是"分子数=2"而键图有上百个碎片）。这种情况不覆盖、而是
         # **不提供 molnums**，让下游自动回退到"键连通分量"（见

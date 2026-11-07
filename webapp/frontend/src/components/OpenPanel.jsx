@@ -2,7 +2,7 @@
  * 1. 文件读取 —— 内容部分（放进折叠面板，不带卡片外壳）。
  */
 import { useEffect, useState } from 'react'
-import {api, assignFile, fileRoles, guessTrajectory, streamOpenProgress } from '../api'
+import { api, assignFile, fileRoles, streamOpenProgress } from '../api'
 
 export default function OpenPanel({ onOpened, log }) {
   const [dir, setDir] = useState('')
@@ -36,20 +36,26 @@ export default function OpenPanel({ onOpened, log }) {
   //: ⚠️ 规则是"**能给拓扑就一定进拓扑槽**"：`.pdb` 本来就是结构文件，
   //: 主点击绝不能把它塞进轨迹槽。用户实际踩过的坑就是 `.pdb` 掉进了轨迹槽
   //: （后端先返回了 `kind="both"`，老前端只认 `kind === 'topology'`）。
+  //:
+  //: ⚠️ 1.0.4 起**不再自动匹配同名轨迹**（用户要求）：有时候只想看拓扑信息，
+  //: 一选拓扑就被塞进一个轨迹槽反而挡路。而且**再点一次同一个文件 = 取消**，
+  //: 这样误选的文件随时能摘掉。
   const pick = (file) => {
     const { role, next } = assignFile(file, { topology, trajectory })
     if (role === 'topology') {
-      setTopology(next.topology)
-      const prev = trajectory
-      log?.(`选择拓扑文件: ${file.name}`)
-      if (listing) {
-        const guess = guessTrajectory(file.path, listing.files)
-        if (guess && !prev) {
-          setTrajectory(guess)
-          log?.(`自动匹配到同名轨迹: ${guess.split(/[\\/]/).pop()}`)
-        }
+      if (topology === file.path) {          // 再点一次 → 取消
+        setTopology('')
+        log?.(`已取消拓扑文件: ${file.name}`)
+        return
       }
+      setTopology(next.topology)
+      log?.(`选择拓扑文件: ${file.name}`)
     } else {
+      if (trajectory === file.path) {        // 再点一次 → 取消
+        setTrajectory('')
+        log?.(`已取消轨迹文件: ${file.name}`)
+        return
+      }
       setTrajectory(next.trajectory)
       log?.(`选择轨迹文件: ${file.name}`)
     }
@@ -58,16 +64,19 @@ export default function OpenPanel({ onOpened, log }) {
   /** 「两者皆可」的格式：明确指定放到哪个槽（主点击 = 拓扑，这里可以改成轨迹） */
   const useAs = (file, role) => {
     if (role === 'topology') {
+      if (topology === file.path) {
+        setTopology('')
+        log?.(`已取消拓扑文件: ${file.name}`)
+        return
+      }
       setTopology(file.path)
       log?.(`用作拓扑: ${file.name}`)
-      if (listing) {
-        const guess = guessTrajectory(file.path, listing.files)
-        if (guess && guess !== file.path) {
-          setTrajectory(guess)
-          log?.(`自动匹配到同名轨迹: ${guess.split(/[\\/]/).pop()}`)
-        }
-      }
     } else {
+      if (trajectory === file.path) {
+        setTrajectory('')
+        log?.(`已取消轨迹文件: ${file.name}`)
+        return
+      }
       setTrajectory(file.path)
       log?.(`用作轨迹: ${file.name}`)
     }

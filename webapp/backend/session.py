@@ -256,6 +256,9 @@ class Session:
     #: 识别只跑一次：结构树反复展开/点选都读缓存，切换体系时整个 Session 重建 → 自然失效。
     _recog: object = field(default=None, repr=False)
     _recog_key: tuple = field(default=(), repr=False)
+    #: 分析正在跑时新建/改动的集合（`set:<名字>` → AtomGroup），只建不算。
+    #: 它们会出现在组分候选清单里，等这一轮结束后的下一次 run 真正注册进分析器。
+    _pending_sets: dict = field(default_factory=dict, repr=False)
 
     # ------------------------------------------------------------- 基本信息
     @property
@@ -433,6 +436,14 @@ class Session:
         for name, ag in list(self.az.components.items()) + list(
                 self.az.extra_components.items()):
             out.append(self._component_item(name, ag, active=True))
+        # 分析跑着的时候新建的集合：只建了没注册，但界面上要能勾（下一轮才生效）
+        seen = {str(x.get("name")) for x in out}
+        for name, ag in (self._pending_sets or {}).items():
+            if str(name) in seen:
+                continue
+            item = self._component_item(name, ag, active=True)
+            item["pending"] = True
+            out.append(item)
         return out
 
     def catalog(self) -> list[dict]:
@@ -460,6 +471,17 @@ class Session:
                 continue
             seen.add(key)
             out.append(self._component_item(name, ag, active=True))
+        # 分析跑着时新建的集合（尚未注册进分析器，下一轮 run 才生效）
+        pending = self._pending_sets or {}
+        if pending:
+            for name, ag in pending.items():
+                key = str(name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                item = self._component_item(name, ag, active=True)
+                item["pending"] = True
+                out.append(item)
         return out
 
     def primary_molecules(self) -> int:
@@ -484,8 +506,11 @@ class Session:
         选成 `set:C` 会报「不存在组分 'set:C'」（用户实测：集合对回转半径不起作用，
         一半原因在这里；另一半是主链还停在自动识别的最大链上）。
         """
-        # 分析进行中时不许改选择：会动到同一个 Universe
-        self.assert_idle()
+        # 分析进行中：**选择只存索引/定义，不碰分析器**（用户实测要求 ——
+        # "选取"和"分析"必须互不影响：分析跑着的时候照样能筛条件、建集合）。
+        if self.is_running:
+            return self._apply_selection_deferred(req)
+        self._pending_sets = {}
         req = dict(req or {})
         az = self.az
         az.auto_setup()
@@ -628,6 +653,74 @@ class Session:
         }
 
     # ------------------------------------------------- 三维结构与交互式选择
+    def _sets_only(self, specs) -> tuple[list[dict], dict]:
+        """**只构建**分析集合（不碰分析器状态），返回 ``(infos, {set:<名>: AtomGroup})``。
+
+        用途：分析正在跑的时候，界面上照样能增删集合、看预览 —— 这一步只读 Universe
+        的拓扑/首帧坐标，写进会话自己的 ``sets_spec``/``sets_info``，等下一次 run
+        才真正注册进 ``Analyzer``。这样"选取"与"分析"互不干扰（用户实测要求）。
+        """
+        from mdta.sets import SetError as _SetError
+        from mdta.sets import build_set
+
+        base = dict(getattr(self.az, "components", {}) or {})
+        infos: list[dict] = []
+        groups: dict = {}
+        for spec in specs or []:
+            spec = dict(spec or {})
+            name = str(spec.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                ag, info = build_set(self.az.universe, spec, base)
+            except _SetError as exc:
+                raise SessionError(f"分析集合定义有误：{exc}") from exc
+            key = f"set:{name}"
+            groups[key] = ag
+            out = {**info, "name": key}
+            idx = out.pop("indices", None)
+            if idx is not None:
+                out["n_indices"] = len(idx)
+            infos.append(out)
+        return infos, groups
+
+    def _apply_selection_deferred(self, req: Mapping[str, Any]) -> dict:
+        """分析正在跑时的 `apply_selection`：**只存选择，不动分析器**。
+
+        存的东西：集合定义（含可视化选的索引）+ 集合预览 + 主链/勾选意图。
+        返回结构与空闲时同形（界面不用分支），多一个 ``deferred: True``。
+        """
+        az = self.az
+        if req.get("sets") is not None:
+            self.sets_spec = [dict(x) for x in (req.get("sets") or [])
+                              if isinstance(x, Mapping)]
+        # 可视化选择只回传名字，索引从会话里补回来（与空闲分支同一套规则）
+        for spec in self.sets_spec:
+            if "indices" not in spec:
+                rec = (self.selections or {}).get(str(spec.get("name") or ""))
+                if rec and rec.get("indices"):
+                    spec["indices"] = list(rec["indices"])
+        infos, groups = self._sets_only(self.sets_spec)
+        self.sets_info = infos
+        self._pending_sets = groups
+        if req.get("primary") is not None:
+            self.primary_req = dict(req.get("primary") or {"mode": "auto"})
+        return {
+            "deferred": True,
+            "primary_label": az.primary_label,
+            "primary": dict(self.primary_req or {"mode": "auto"}),
+            "primary_atoms": (int(az.primary.n_atoms)
+                              if az.primary is not None else 0),
+            "primary_molecules": self.primary_molecules(),
+            "components": self.components(),
+            "active": [str(n) for n in az.components],
+            "catalog": self.catalog(),
+            "sets": list(self.sets_info),
+            "elements": _available_elements(az.universe),
+            "set_presets": _set_presets(az.universe, az.components),
+            "note": "分析正在运行：选择已保存，将在下一次运行时生效",
+        }
+
     def _chain_chem(self, segid: str, resname: str) -> dict:
         """一条链类型（segid+resname）的化学身份：分子式 / 名称 / 类别 / 聚合度。
 
@@ -1292,6 +1385,35 @@ class Session:
                                "query": {"segid": segid or "", "resname": resname or ""}}
         return out
 
+    def set_atoms(self, spec: Mapping[str, Any]) -> dict:
+        """按一条集合定义算出**原子索引**（只读；分析跑着的时候也能用）。
+
+        前端拿它把"元素 C / 链状分子 / 含环分子 / 大分子"做成**可切换的选择条件**：
+        点一下 = 把这些原子并进三维选择，再点一下 = 取消 —— 而不是一点就偷偷建一个集合。
+        这里只读 Universe（`_sets_only`），不碰 `Analyzer`，所以运行中同样安全。
+        """
+        spec = dict(spec or {})
+        # 只做选择用的临时名字（`build_set` 需要 name 字段才会处理）
+        spec.setdefault("name", "_probe")
+        infos, groups = self._sets_only([spec])
+        if not groups:
+            raise SessionError("集合定义为空，算不出原子")
+        key, ag = next(iter(groups.items()))
+        info = infos[0] if infos else {}
+        idx = np.sort(np.asarray(ag.indices, dtype=np.int64))
+        out = {
+            "label": str(info.get("label") or key),
+            "kind": str(info.get("kind") or "atom"),
+            "n_atoms": int(idx.size),
+            "indices": idx.tolist(),
+            "spec": {k: v for k, v in spec.items() if k != "name"},
+        }
+        try:
+            out["n_molecules"] = int(info.get("n_molecules") or 0)
+        except Exception:                                        # noqa: BLE001
+            pass
+        return out
+
     def add_visual_selection(self, name: str, indices, *, save: bool = True) -> dict:
         """把三维视图里选中的**原子索引**变成一条集合（`set:<名字>`）。
 
@@ -1318,22 +1440,34 @@ class Session:
             raise SessionError(f"选择无效：{exc}") from exc
 
         with self._lock:
-            self.assert_idle()
             # 同名就覆盖（用户在可视化里改选后按"更新集合"）
             self.sets_spec = [dict(s) for s in self.sets_spec
                               if str((s or {}).get("name") or "") != nm]
             self.sets_spec.append(spec)
+            if save:
+                self.selections[nm] = {"name": nm, "n_atoms": int(info["n_atoms"]),
+                                       "kind": info["kind"],
+                                       "indices": spec["indices"],
+                                       "label": info["label"]}
+            if self.is_running:
+                # 分析正在跑：只存索引与定义，不重建分析器里的集合（下一轮 run 生效）。
+                # 用户实测要求：跑分析的时候照样能选原子、建集合。
+                infos, groups = self._sets_only(self.sets_spec)
+                self.sets_info = infos
+                self._pending_sets = groups
+                cur = next((i for i in infos if i.get("name") == f"set:{nm}"), None)
+                out_info = cur or {**{k: v for k, v in info.items()
+                                      if k != "indices"}, "name": f"set:{nm}"}
+                return {"ok": True, "deferred": True,
+                        "set": {**out_info, "set_name": nm},
+                        "selection": None,
+                        "selections": self.selection_list()}
             # 立刻生效：作为参与分析的组分重建集合
             wanted = [str(k) for k in self.az.components] + [f"set:{nm}"]
             info_list = self.apply_selection({"components": wanted,
                                               "sets": list(self.sets_spec),
                                               "primary": dict(self.primary_req
                                                               or {"mode": "auto"})})
-            if save:
-                self.selections[nm] = {"name": nm, "n_atoms": int(info["n_atoms"]),
-                                       "kind": info["kind"],
-                                       "indices": spec["indices"],
-                                       "label": info["label"]}
         return {"ok": True,
                 # `name` 用带前缀的 `set:<名字>`（与 components 里的键一致）；
                 # `set_name` 是没有前缀的原始名字，界面回显时用哪个都行。
@@ -1362,14 +1496,17 @@ class Session:
         if nm.startswith("set:"):
             nm = nm[4:]
         with self._lock:
-            self.assert_idle()
             self.selections.pop(nm, None)
             self.sets_spec = [dict(s) for s in self.sets_spec
                               if str((s or {}).get("name") or "") != nm]
-            self.az.components.pop(f"set:{nm}", None)
-            self.az.catalog.pop(f"set:{nm}", None)
-            self.az.set_groups.pop(f"set:{nm}", None)
-            self.az.msd_group_objects.pop(f"set:{nm}", None)
+            self._pending_sets.pop(f"set:{nm}", None)
+            # 分析跑着的时候只摘定义（不碰分析器的字典，避免与运行线程抢同一个 dict）；
+            # 下一轮 run 会按新的 sets_spec 重建，等于同样删掉。
+            if not self.is_running:
+                self.az.components.pop(f"set:{nm}", None)
+                self.az.catalog.pop(f"set:{nm}", None)
+                self.az.set_groups.pop(f"set:{nm}", None)
+                self.az.msd_group_objects.pop(f"set:{nm}", None)
             self.sets_info = [x for x in (self.sets_info or [])
                               if str(x.get("name")) != f"set:{nm}"]
         return {"ok": True, "selections": self.selection_list(),
@@ -1582,9 +1719,13 @@ class Session:
 
     def assert_idle(self) -> None:
         """正在跑分析时，禁止别的接口去动同一个 Universe。"""
-        job = self._job
-        if job is not None and job.status == "running":
+        if self.is_running:
             raise SessionError("分析正在运行中，请先等待完成或点「取消」")
+
+    @property
+    def is_running(self) -> bool:
+        job = self._job
+        return job is not None and job.status == "running"
 
     def start_run(self, req: Mapping[str, Any]) -> dict:
         """**立即返回**并在线程里跑分析；前端轮询 :meth:`run_progress` 拿增量结果。

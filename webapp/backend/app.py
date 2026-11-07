@@ -433,6 +433,21 @@ def session_recognition_confirm(sid: str,
         raise _fail(exc) from exc
 
 
+@app.post("/api/session/{sid}/sets/atoms")
+def session_set_atoms(sid: str, payload: Mapping[str, Any] = Body(default={})) -> dict:
+    """按一条集合定义算出**原子索引**（只读，分析运行中也安全）。
+
+    界面用它把「元素 C / 链状分子 / 含环分子 / 大分子」做成**可切换的选择条件**：
+    点一下并进三维选择，再点一下取消；要留成分析用的集合再点「＋ 添加集合」。
+    """
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.set_atoms(payload.get("spec") or payload)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
 @app.get("/api/session/{sid}/expand")
 def session_expand(sid: str, level: str = "atom", index: int | None = None,
                    segid: str = "", resname: str = "",

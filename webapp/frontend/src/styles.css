@@ -1364,6 +1364,26 @@ table.filetable td { text-align: center; vertical-align: middle; }
   display: flex; align-items: center; gap: 4px; padding: 4px 8px 0;
 }
 .tree-modes .grow { flex: 1 1 auto; }
+/* 行尾的「选中」按钮 / 计数**不许被长名字挤走或折行**（用户实测：
+   聚乙二醇这类长名字会把「选中」压成两行）。名字一律省略号，全文进 tooltip。 */
+.tree-row .mini {
+  flex: none; white-space: nowrap; align-self: center;
+}
+.tree-row .count {
+  flex: none; white-space: nowrap;
+}
+/* 选中态标红（用户实测：选中链/元素后没有任何提示，看不出选没选中） */
+.tree-row.sel {
+  background: #fff1f2;
+  box-shadow: inset 2px 0 0 #ef4444;
+}
+.tree-row.sel .nm { color: #b91c1c; font-weight: 600; }
+button.mini.sel {
+  background: #fee2e2; border-color: #fca5a5; color: #b91c1c; font-weight: 600;
+}
+.chip-pick.sel {
+  background: #fee2e2; border-color: #fca5a5; color: #b91c1c; font-weight: 600;
+}
 /* 识别类别的小图标（聚合物 / 小分子 / 网络 / 未识别） */
 .tree .badge {
   display: inline-block; width: 12px; margin-right: 3px; text-align: center;
@@ -1387,6 +1407,10 @@ table.filetable td { text-align: center; vertical-align: middle; }
   background: #eef2ff; color: #1e293b;
 }
 .tree-hits .hit:hover { background: #e0e7ff; border-color: #a5b4fc; }
+.tree-hits .hit.sel {
+  background: #fee2e2; border-color: #fca5a5; color: #b91c1c; font-weight: 600;
+}
+.tree-hits .hit.sel .count { color: #b91c1c; }
 .tree-hits .hit .count { color: #6b7280; font-size: 9.5px; }
 button.mini.active { background: #fee2e2; border-color: #fca5a5; color: #7f1d1d; }
 

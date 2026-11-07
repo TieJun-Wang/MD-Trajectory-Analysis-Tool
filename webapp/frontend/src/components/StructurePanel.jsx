@@ -115,6 +115,8 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
 
   const selCount = st.selected?.size || 0
   const recog = st.recog
+  //: 搜索命中项也要能标红（用户实测：点了命中项看不出选中）
+  const isSel = (key) => !!(st.selKeys && st.selKeys.has(key))
 
   return (
     <>
@@ -140,6 +142,13 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
                   }}
                   title="清空所有选择（高亮 / 只显示已选 / 搜索 / 分析集合）；三维视图的视角保持不变">
             重置
+          </button>
+          <button className={`mini ${st.additive ? 'active' : ''}`}
+                  onClick={() => st.setAdditive(!st.additive)}
+                  title={'累加选择：开时点击结构层级会把原子**加到**已有选择上，'
+                    + '再点同一项则取消那部分（想同时选两条链、或"某条链 + 它的氢"就靠它）；'
+                    + '关掉就退回"点谁选谁"'}>
+            累加
           </button>
           <button className={`mini ${st.onlySelected ? 'active' : ''}`}
                   onClick={() => st.setOnlySelected(!st.onlySelected)}
@@ -189,8 +198,10 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
               <div className="dim tree-mini">没有匹配项（试试 ETH32、C1、索引 123）</div>
             )}
             {hits.map((m, i) => (
-              <button key={`${m.label}-${i}`} className="hit"
-                      title={`${m.n_atoms} 原子`}
+              <button key={`${m.label}-${i}`}
+                      className={`hit${isSel(`hit:${m.label}`) ? ' sel' : ''}`}
+                      title={`${m.n_atoms} 原子`
+                        + (isSel(`hit:${m.label}`) ? '（已选中，再点一次取消）' : '')}
                       onClick={() => st.highlightMatch(m)}>
                 {m.label}
                 <span className="count">{m.n_atoms}</span>
@@ -239,7 +250,19 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
                  selectedCount={selCount}
                  onCreateFromIndices={(nm) => st.createFromIndices(nm)}
                  onHighlight={highlight}
-                 activeSet={activeSet} />
+                 activeSet={activeSet}
+                 onFilterElement={(el) => st.filterElement(el)}
+                 onToggleFilter={(spec, key, label) => st.toggleFilter(spec, key, label)}
+                 activeKeys={st.selKeys}
+                 filterErr={st.filterErr || ''}
+                 filterBusy={!!st.filterBusy}
+                 filterCount={(st.filters || []).length}
+                 scopeSize={st.scopeSize || 0}
+                 onClearFilters={() => st.clearFilters?.()}
+                 activeElement={(() => {
+                   const k = [...(st.selKeys || [])].find((x) => x.startsWith('element:'))
+                   return k ? k.slice('element:'.length) : ''
+                 })()} />
 
       {onNext && (
         <button className="primary mt6" onClick={onNext}>下一步：分析设置 →</button>
@@ -295,15 +318,18 @@ function RecogTree({ st, recog }) {
 
   const sections = recog.sections || []
   const summary = recog.summary || {}
+  //: 哪些节点当前是选中的（用户实测：选中后没有标红，根本看不出选中了没）
+  const isSel = (key) => !!(st.selKeys && st.selKeys.has(key))
+  const selCls = (key) => (isSel(key) ? ' sel' : '')
 
   return (
     <div className="tree-body">
       <div className="tree-row lvl0">
         <b>体系</b>
         <span className="count">{(summary.total_atoms || 0).toLocaleString()}</span>
-        <button className="mini"
+        <button className={`mini${selCls('recog:all:')}`}
                 onClick={() => st.selectRecognition('all', '', '全部原子')}>
-          选中全部
+          {isSel('recog:all:') ? '已选' : '选中全部'}
         </button>
       </div>
 
@@ -315,7 +341,8 @@ function RecogTree({ st, recog }) {
         const isOpen = openSec.has(sec.key)
         return (
           <div key={sec.key}>
-            <div className={`tree-row lvl1 ${isOpen ? 'open' : ''}`}>
+            <div className={`tree-row lvl1 ${isOpen ? 'open' : ''}`
+              + selCls(`recog:section:${sec.key}`)}>
               <button className="caret" onClick={() => toggle(setOpenSec, sec.key)}>
                 {isOpen ? '▾' : '▸'}
               </button>
@@ -324,9 +351,9 @@ function RecogTree({ st, recog }) {
                 {sec.label}
               </span>
               <span className="count">{sec.n_objects.toLocaleString()} / {sec.n_groups}</span>
-              <button className="mini"
+              <button className={`mini${selCls(`recog:section:${sec.key}`)}`}
                       onClick={() => st.selectRecognition('section', sec.key, sec.label)}>
-                选中
+                {isSel(`recog:section:${sec.key}`) ? '已选' : '选中'}
               </button>
             </div>
             {isOpen && sec.groups.map((g) => {
@@ -334,6 +361,7 @@ function RecogTree({ st, recog }) {
               const gOpen = openGrp.has(gi)
               const page = objs[gi]
               const chem = g.chem || {}
+              const gKey = `recog:group:${g.group_id}`
               const tip = [
                 `类型 ${g.type_label}`,
                 g.chain_type ? `链类型 ${g.chain_type_label}` : '',
@@ -344,7 +372,7 @@ function RecogTree({ st, recog }) {
               ].filter(Boolean).join('\n')
               return (
                 <div key={gi}>
-                  <div className={`tree-row lvl2 ${gOpen ? 'open' : ''}`}>
+                  <div className={`tree-row lvl2 ${gOpen ? 'open' : ''}` + selCls(gKey)}>
                     <button className="caret" onClick={() => {
                       toggle(setOpenGrp, gi)
                       if (!page) loadObjs(gi)
@@ -359,9 +387,9 @@ function RecogTree({ st, recog }) {
                     <span className="count">
                       {g.n_objects.toLocaleString()}× / {g.n_atoms.toLocaleString()}
                     </span>
-                    <button className="mini"
+                    <button className={`mini${selCls(gKey)}`}
                             onClick={() => st.selectRecognition('group', g.group_id, g.label)}>
-                      选中
+                      {isSel(gKey) ? '已选' : '选中'}
                     </button>
                   </div>
 
@@ -374,28 +402,32 @@ function RecogTree({ st, recog }) {
                             {page.total.toLocaleString()} 个对象
                             （显示 {page.rows.length}）
                           </div>
-                          {page.rows.map((o) => (
-                            <div key={o.molecule_id} className="tree-row lvl3">
-                              <span className="nm"
-                                    title={[
-                                      `${o.type_label} · ${o.chain_type_label}`,
-                                      `原子 ${o.n_atoms}，键 ${o.n_bonds}，`
-                                        + `重原子 ${o.n_heavy}，环秩 ${o.n_rings}`,
-                                      o.status_label,
-                                    ].join('\n')}>
-                                {o.name}
-                                {o.status !== 'recognized'
-                                  ? <span className="dim"> · {o.status_label}</span> : ''}
-                              </span>
-                              <span className="count">{o.n_atoms}</span>
-                              <button className="mini"
-                                      onClick={() => st.selectRecognition(
-                                        o.object_type, o.object_id,
-                                        `${o.name} · ${o.chain_type_label || o.type_label}`)}>
-                                选中
-                              </button>
-                            </div>
-                          ))}
+                          {page.rows.map((o) => {
+                            const oKey = `recog:${o.object_type}:${o.object_id}`
+                            return (
+                              <div key={o.molecule_id}
+                                   className={`tree-row lvl3${selCls(oKey)}`}>
+                                <span className="nm"
+                                      title={[
+                                        `${o.type_label} · ${o.chain_type_label}`,
+                                        `原子 ${o.n_atoms}，键 ${o.n_bonds}，`
+                                          + `重原子 ${o.n_heavy}，环秩 ${o.n_rings}`,
+                                        o.status_label,
+                                      ].join('\n')}>
+                                  {o.name}
+                                  {o.status !== 'recognized'
+                                    ? <span className="dim"> · {o.status_label}</span> : ''}
+                                </span>
+                                <span className="count">{o.n_atoms}</span>
+                                <button className={`mini${selCls(oKey)}`}
+                                        onClick={() => st.selectRecognition(
+                                          o.object_type, o.object_id,
+                                          `${o.name} · ${o.chain_type_label || o.type_label}`)}>
+                                  {isSel(oKey) ? '已选' : '选中'}
+                                </button>
+                              </div>
+                            )
+                          })}
                           {page.total > (page.offset || 0) + page.rows.length && (
                             <button className="mini" disabled={busy[gi]}
                                     onClick={() => loadObjs(
@@ -433,58 +465,72 @@ function ClassicTree({ st, hier }) {
   const [openComp, setOpenComp] = useState(() => new Set())
   const [openChain, setOpenChain] = useState(() => new Set())
   const [res, setRes] = useState({})       // key → {total, rows, offset}
+  const [resErr, setResErr] = useState('')  // 残基分页失败的原因（以前被吞掉，看起来像"点了没反应"）
   const sid = st.sid
 
   const chains = (hier?.chains || [])
   const loadRes = async (c, offset = 0) => {
     const key = `${c.segid}|${c.resname}`
+    setResErr('')
     try {
       const r = await api.hierarchy(sid, { segid: c.segid, resname: c.resname,
         offset, limit: 300 })
       setRes((prev) => ({ ...prev, [key]: { ...(r.residues || {}), offset } }))
-    } catch (e) { /* 残基分页失败不影响树的其他部分 */ }
+    } catch (e) {
+      setResErr(`读取残基失败：${e.message}`)
+    }
   }
+
+  const isSel = (key) => !!(st.selKeys && st.selKeys.has(key))
+  const selCls = (key) => (isSel(key) ? ' sel' : '')
 
   return (
     <div className="tree-body">
-      <div className="tree-row lvl0">
+      {resErr && <div className="tree-mini warn">{resErr}</div>}
+      <div className={`tree-row lvl0${selCls('classic:all')}`}>
         <b>体系</b>
         <span className="count">{hier ? hier.n_atoms.toLocaleString() : '—'}</span>
-        <button className="mini" onClick={() => st.selectGroup({ level: 'all' })}>
-          选中全部
+        <button className={`mini${selCls('classic:all')}`}
+                onClick={() => st.selectGroup({ level: 'all', key: 'classic:all' })}>
+          {isSel('classic:all') ? '已选' : '选中全部'}
         </button>
       </div>
-      {(hier?.components || []).map((c) => (
-        <div key={c.name}>
-          <div className={`tree-row lvl1 ${openComp.has(c.name) ? 'open' : ''}`}>
-            <button className="caret" onClick={() => setOpenComp((p) => {
-              const n = new Set(p)
-              if (n.has(c.name)) n.delete(c.name); else n.add(c.name)
-              return n
-            })}>{openComp.has(c.name) ? '▾' : '▸'}</button>
-            <span className="nm"
-                  title={(c.residue_mix || []).map((m) => `${m.resname}×${m.n}`)
-                    .join('、') + (c.n_residue_kinds
-                      ? `（共 ${c.n_residue_kinds} 种残基）` : '')}>
-              {c.name}
-              {c.residue_mix && c.residue_mix.length
-                ? ` · ${c.residue_mix.slice(0, 3).map((m) => m.resname).join('/')}`
-                : ''}
-              {c.n_residue_kinds > 3 ? ` 等 ${c.n_residue_kinds} 种` : ''}
-            </span>
-            <span className="count">{c.n_atoms.toLocaleString()}</span>
-            <button className="mini"
-                    onClick={() => st.selectGroup({ level: 'atom', component: c.name })}>
-              选中
-            </button>
-          </div>
-          {openComp.has(c.name) && (c.chains || chains).map((ch) => {
-            const key = `${ch.segid}|${ch.resname}`
-            const isOpen = openChain.has(key)
-            const page = res[key]
-            return (
-              <div key={key}>
-                <div className={`tree-row lvl2 ${isOpen ? 'open' : ''}`}>
+      {(hier?.components || []).map((c) => {
+        const cKey = `classic:comp:${c.name}`
+        return (
+          <div key={c.name}>
+            <div className={`tree-row lvl1 ${openComp.has(c.name) ? 'open' : ''}`
+              + selCls(cKey)}>
+              <button className="caret" onClick={() => setOpenComp((p) => {
+                const n = new Set(p)
+                if (n.has(c.name)) n.delete(c.name); else n.add(c.name)
+                return n
+              })}>{openComp.has(c.name) ? '▾' : '▸'}</button>
+              <span className="nm"
+                    title={(c.residue_mix || []).map((m) => `${m.resname}×${m.n}`)
+                      .join('、') + (c.n_residue_kinds
+                        ? `（共 ${c.n_residue_kinds} 种残基）` : '')}>
+                {c.name}
+                {c.residue_mix && c.residue_mix.length
+                  ? ` · ${c.residue_mix.slice(0, 3).map((m) => m.resname).join('/')}`
+                  : ''}
+                {c.n_residue_kinds > 3 ? ` 等 ${c.n_residue_kinds} 种` : ''}
+              </span>
+              <span className="count">{c.n_atoms.toLocaleString()}</span>
+              <button className={`mini${selCls(cKey)}`}
+                      onClick={() => st.selectGroup({ level: 'atom',
+                        component: c.name, key: cKey })}>
+                {isSel(cKey) ? '已选' : '选中'}
+              </button>
+            </div>
+            {openComp.has(c.name) && (c.chains || chains).map((ch) => {
+              const key = `${ch.segid}|${ch.resname}`
+              const chKey = `classic:chain:${key}`
+              const isOpen = openChain.has(key)
+              const page = res[key]
+              return (
+                <div key={key}>
+                  <div className={`tree-row lvl2 ${isOpen ? 'open' : ''}` + selCls(chKey)}>
                   <button className="caret" onClick={() => {
                     setOpenChain((p) => {
                       const n = new Set(p)
@@ -500,18 +546,22 @@ function ClassicTree({ st, hier }) {
                             ? `分子式 ${ch.chem.formula}` : '',
                           ch.chem && ch.chem.category
                             ? `类别 ${ch.chem.category}` : '',
+                          ch.chem && ch.chem.alias
+                            ? `俗称 ${ch.chem.alias}` : '',
                           ch.chem && ch.chem.note ? ch.chem.note : '',
                         ].filter(Boolean).join('\n')}>
+                    {/* 行内只留短标签；名字/俗称全文在 tooltip 里（否则长名字会把
+                        「选中」按钮挤到第二行 —— 用户实测） */}
                     {ch.label}
-                    {ch.chem && ch.chem.name ? ` · ${ch.chem.name}` : ''}
+                    {ch.chem && ch.chem.name
+                      ? ` · ${String(ch.chem.name).replace(/（.*$/, '').slice(0, 12)}` : ''}
                     {ch.chem && ch.chem.dp ? `（n≈${ch.chem.dp}）` : ''}
-                    {ch.chem && ch.chem.alias
-                      ? <span className="dim"> {ch.chem.alias}</span> : ''}
                   </span>
                   <span className="count">{ch.count}× / {ch.n_atoms.toLocaleString()}</span>
-                  <button className="mini"
+                  <button className={`mini${selCls(chKey)}`}
                           onClick={() => st.selectGroup({ level: 'atom',
-                            segid: ch.segid, resname: ch.resname })}>选中</button>
+                            segid: ch.segid, resname: ch.resname,
+                            key: chKey })}>{isSel(chKey) ? '已选' : '选中'}</button>
                 </div>
                 {isOpen && (
                   <div className="tree-kids">
@@ -520,14 +570,22 @@ function ClassicTree({ st, hier }) {
                         <div className="dim tree-mini">
                           残基 {page.total.toLocaleString()} 个（显示 {page.rows.length}）
                         </div>
-                        {page.rows.map((r) => (
-                          <div key={`${r.segid}:${r.resid}`} className="tree-row lvl3">
-                            <span className="nm">{r.resname}{r.resid}</span>
-                            <span className="count">{r.n_atoms}</span>
-                            <button className="mini" onClick={() => st.selectGroup({
-                              level: 'residue', index: r.first_index })}>选中</button>
-                          </div>
-                        ))}
+                        {page.rows.map((r) => {
+                          const rKey = `classic:res:${r.segid}:${r.resid}`
+                          return (
+                            <div key={`${r.segid}:${r.resid}`}
+                                 className={`tree-row lvl3${selCls(rKey)}`}>
+                              <span className="nm">{r.resname}{r.resid}</span>
+                              <span className="count">{r.n_atoms}</span>
+                              <button className={`mini${selCls(rKey)}`}
+                                      onClick={() => st.selectGroup({
+                                        level: 'residue', index: r.first_index,
+                                        key: rKey })}>
+                                {isSel(rKey) ? '已选' : '选中'}
+                              </button>
+                            </div>
+                          )
+                        })}
                         {page.total > page.rows.length && (
                           <button className="mini" onClick={() => loadRes(
                             ch, page.offset + page.rows.length)}>
@@ -543,7 +601,8 @@ function ClassicTree({ st, hier }) {
             )
           })}
         </div>
-      ))}
+        )
+      })}
       {hier && !hier.has_bonds && (
         <div className="tree-mini warn">
           拓扑没有可靠键表：不能按「分子」归类（残基 / 链仍可用）。

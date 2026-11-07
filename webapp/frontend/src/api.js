@@ -128,6 +128,16 @@ export const api = {
     return request(`/session/${sid}/expand?${qs.join('&')}`)
   },
 
+  /**
+   * 按一条**集合定义**算出原子索引（只读，分析运行中也安全）。
+   * 用来把「元素 C / 链状分子 / 含环分子 / 大分子」做成**可切换的选择条件**：
+   * 点一下并进三维选择、再点一下取消 —— 而不是一点就自动建一个集合。
+   */
+  setAtoms: (sid, spec) =>
+    request(`/session/${sid}/sets/atoms`, {
+      method: 'POST', body: JSON.stringify({ spec }),
+    }),
+
   /** 把三维视图里选中的**原子索引**变成一条集合（可直接参与分析） */
   createSelection: (sid, name, indices) =>
     request(`/session/${sid}/selection`, {

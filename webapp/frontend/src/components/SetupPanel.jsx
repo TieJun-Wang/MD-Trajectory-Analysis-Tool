@@ -17,12 +17,16 @@ import { fmtSec } from '../format'
  */
 export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
                           selectedCount = 0, onCreateFromIndices = null,
-                          onHighlight = null, activeSet = '' }) {
+                          onHighlight = null, activeSet = '',
+                          onFilterElement = null, activeElement = '',
+                          onToggleFilter = null, activeKeys = null,
+                          filterErr = '', filterBusy = false, filterCount = 0,
+                          scopeSize = 0, onClearFilters = null }) {
   if (!sess) return null
-  //: 三维视图里已经选中了原子 → 默认用"这批原子"建集合（用户要求：只有一套命名流程）
-  // 默认按筛选条件建（勾上才用三维视图里的选中原子）——默认勾上会让"选 H 再添加"
-  // 看起来像 H 没生效（用户实测）。
-  const [useSel, setUseSel] = useState(false)
+  //: 三维视图里已经选中了原子 → 默认用"这批原子"建集合
+  //: （1.0.4 用户要求：预设/元素 chip 只改选择、不自动建集合，所以"添加集合"
+  //:   就应该默认拿当前选择来建，改名/选条件时才切到按筛选条件建）
+  const [useSel, setUseSel] = useState(true)
   // ---- 分析集合（Set）：本地只存"定义"，原子数/追踪方式来自后端预览（setsInfo）
   const els = sess.elements || []
   const presets = sess.set_presets || []
@@ -69,6 +73,9 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
     setDraft({ name: '', elements: [], shape: 'all', min_atoms: '', max_atoms: '', pure: false })
   }
   const infoOf = (name) => (setsInfo || []).find((x) => x.name === `set:${name}`)
+  //: 当前生效的筛选条件键（`element:H` / `preset:链状分子`），用来把 chip 标红
+  const elActive = String(activeElement || '')
+  const keys = activeKeys instanceof Set ? activeKeys : new Set()
 
   return (
     <>
@@ -77,35 +84,83 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
         <span className="dim" style={{ fontWeight: 400 }}>（可选：只算某一类原子或分子）</span>
       </div>
       <div className="field">
+        {/* 选择现状：范围 + 条件 → 实际选中。点了 chip 这里会立刻变，避免"没反应" */}
+        <div className="tree-mini dim" style={{ padding: '2px 0 4px' }}>
+          当前选择 {Number(selectedCount).toLocaleString()} 原子
+          {`（范围 ${Number(scopeSize).toLocaleString()}`
+            + (filterCount ? ` ∩ 条件 ${filterCount} 条` : '') + '）'}
+          {filterBusy ? ' · 计算中…' : ''}
+          {filterCount > 0 && onClearFilters && (
+            <button className="mini" style={{ marginLeft: 6 }}
+                    onClick={onClearFilters}
+                    title="只清掉筛选条件，保留层级树的选中范围">
+              清条件
+            </button>
+          )}
+        </div>
+        {filterErr && <div className="tree-mini warn">{filterErr}</div>}
         {presets.length > 0 && (
           <div className="chips-pick mt4"
-               title="点一下就建好这类集合；也可以自己选元素 / 形态">
-            {presets.map((p) => (
-              <button key={p.name} className="chip-pick"
-                      title={p.hint + '\n预览：' + p.preview}
-                      onClick={() => addSet({ ...p.spec, name: p.name })}>
-                ＋{p.name}
-              </button>
-            ))}
+               title={'这些和结构层级里的选中是**同一套选择**：点一下把它们加进三维选择，'
+                 + '再点一下取消；要留成分析用的集合，再点下面的「＋ 添加集合」'}>
+            {presets.map((p) => {
+              const k = `preset:${p.name}`
+              const on = keys.has(k)
+              return (
+                <button key={p.name}
+                        className={`chip-pick${on ? ' sel' : ''}`}
+                        title={`${p.hint}\n预览：${p.preview}`
+                          + (on ? '\n（已选中，再点一次取消）' : '')}
+                        onClick={() => {
+                          if (onToggleFilter) {
+                            onToggleFilter({ ...p.spec, name: p.name }, k, p.name)
+                            return
+                          }
+                          addSet({ ...p.spec, name: p.name })
+                        }}>
+                  {on ? '✓ ' : '＋'}{p.name}
+                </button>
+              )
+            })}
           </div>
         )}
 
         {els.length > 0 && (
-          <div className="chips-pick mt4" title="选元素（不选 = 不按元素筛）">
+          <div className="chips-pick mt4"
+               title={'点元素 = 在当前选择上加一条**筛选条件**（与层级树的选中同级）：'
+                 + '已经选中一条链，再点 H 就是"这条链的氢"；再点一次取消这条条件。'
+                 + '什么都没选时就是整个体系的该元素'}>
             {els.slice(0, 12).map((e) => (
-              // 点元素 = **一键建集合并高亮**（与左边的 ＋C 预设同一行为）；
-              // 想组合多个元素时用下面的「其他原子」下拉累积到草稿再添加。
+              // 点元素 = 加/取消一条筛选条件（不建集合）。
+              // "选中一条链 → 点 H" = 这条链的氢；再点 H = 取消该条件（用户实测要求）。
               <button key={e}
-                      className={`chip-pick ${draft.elements.includes(e) ? 'on' : ''}`}
-                      title={`只看元素 ${e}（点一下直接生成集合并高亮）`}
-                      onClick={() => addSet({ name: e, elements: [e] })}>{e}</button>
+                      className={`chip-pick ${draft.elements.includes(e) ? 'on' : ''}`
+                        + `${elActive && elActive === e ? ' sel' : ''}`}
+                      title={keys.has(`element:${e}`)
+                        ? `取消筛选条件：元素 ${e}`
+                        : `加上筛选条件：元素 ${e}`
+                          + (selectedCount > 0 ? '（与当前选择取交集）' : '')}
+                      onClick={() => {
+                        if (onFilterElement) {
+                          onFilterElement(e)
+                          return
+                        }
+                        // 兜底（没接筛选回调时退回老行为：一键建集合）
+                        addSet({ name: e, elements: [e] })
+                      }}>{e}</button>
             ))}
-            {/* 元素多于 12 个时，其余元素用下拉框补选（选项来自体系实际出现的元素） */}
+            {/* 「其他原子」下拉：元素多于 12 个时也能点到；作用范围与上面 chip 一致 */}
             {els.length > 12 && (
               <select value="" onChange={(e) => {
-                if (e.target.value) toggleEl(e.target.value)
+                const el = e.target.value
+                if (el) {
+                  if (onFilterElement) onFilterElement(el)
+                  else toggleEl(el)
+                }
                 e.target.value = ''
-              }} title="其他原子（体系里出现的元素）">
+              }} title={selectedCount > 0
+                ? `在当前已选里取某个元素`
+                : '取整个体系的某个元素'}>
                 <option value="">其他原子…</option>
                 {els.slice(12).map((e) => (
                   <option key={e} value={e}>{e}</option>
@@ -113,11 +168,17 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
               </select>
             )}
             {/* 始终提供一个"其他原子"下拉：列出全部元素，方便按名字挑 */}
-            {els.length > 0 && (
+            {els.length > 0 && els.length <= 12 && (
               <select value="" onChange={(e) => {
-                if (e.target.value) toggleEl(e.target.value)
+                const el = e.target.value
+                if (el) {
+                  if (onFilterElement) onFilterElement(el)
+                  else toggleEl(el)
+                }
                 e.target.value = ''
-              }} title="从体系里出现过的元素中选择">
+              }} title={selectedCount > 0
+                ? `在当前已选里取某个元素`
+                : '取整个体系的某个元素'}>
                 <option value="">其他原子…</option>
                 {els.map((e) => (
                   <option key={`all-${e}`} value={e}>{e}</option>

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Web 版主界面。
  *
  * 布局（整页一屏，无页面级滚动）：
@@ -143,6 +143,11 @@ export default function App() {
         })),
       })
       setSetsInfo(r?.sets || [])
+      // 分析正在跑：后端只存选择、不重建分析器（选取与分析互不影响），
+      // 这里说清楚"什么时候生效"，别让用户以为没生效
+      if (r?.deferred) {
+        pushLog('分析正在运行：集合已保存，下一次运行分析时生效')
+      }
       if (r?.catalog || r?.components) {
         setSess((cur) => (cur ? {
           ...cur,

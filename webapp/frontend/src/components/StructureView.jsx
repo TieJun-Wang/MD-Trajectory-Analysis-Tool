@@ -41,9 +41,16 @@ const BALL_MIN_PX = 1.3            // 球半径的屏幕下限（像素）
 const ROT_PER_PX = 0.004           // 旋转灵敏度（rad / 像素）：用户要求调低（原 0.008）
 const PAN_PER_PX = 0.0009          // 平移灵敏度（视野半径 / 像素）：原 0.0016
 const ZOOM_PER_DELTA = 0.0016      // 滚轮缩放灵敏度（rad 的指数）：原 0.0011，太慢
-//: 相机离目标最近能到多少 Å。0.1 Å 远小于任何键长，足够看清单个原子内部。
-const MIN_RADIUS_A = 0.1
+//: 最近能放大到什么程度：**最大那颗原子直径 ≈ 视野高的 BALL_FILL 倍**。
+//: 1.8 倍 = 相机能钻进原子内部（用户要求"可以穿透不同的分子、一直放大到单个分子"）。
+const BALL_FILL = 1.8
+//: 最远能缩小到什么程度：**整个模拟盒占视野的 1/3**（用户要求，防止无限缩小）
+const BOX_FILL = 1 / 3
+//: 没有模拟盒、或算不出来时的兜底上下限（Å）
+const MIN_RADIUS_A = 0.01
 const MAX_RADIUS_A = 20000
+//: 双击原子后停下来的相机距离（Å）：约在"一条键"尺度上，正好看清一个分子内部
+const FOCUS_RADIUS_A = 2.2
 
 /* 模拟盒：白色细柱（用户要求"白色条状"）。
  * 用圆柱而不是 LineSegments：白色细线在浅色背景上几乎看不见，圆柱有明暗边。
@@ -71,6 +78,46 @@ export function recalcScales(st) {
   // 盒棱：纯屏幕尺寸 → 任何缩放级别都是同一条细线，不会挡住原子
   st.boxRadA = BOX_PX * pxToA
   return pxToA
+}
+
+/**
+ * 缩放的上下限：**按体系自身尺寸算**，不是硬编码常数。
+ *
+ * · 最近（`radiusMin`）：最大的那颗原子直径 ≈ 视野高的 3/4 —— 再近就只是在
+ *   看一个原子的内部，没有意义；用户要求"单个原子可以铺满区域四分之三"。
+ * · 最远（`radiusMax`）：整个模拟盒 ≈ 视野的 1/3 —— 防止无限缩小（用户要求）。
+ *   若原子铺得比盒子还开（坐标没按周期折回），则至少保留"能回到初始视角"，
+ *   否则一加载就被自己的限制卡住。
+ */
+function computeZoomLimits(st, data) {
+  const tanHalf = Math.tan(Math.PI / 8)
+  // ---- 最远：盒子在画面里占 1/3 → 2·boxR = BOX_FILL·viewH = BOX_FILL·2r·tanHalf
+  let boxR = 0
+  const vecs = cellVectors(data.box)
+  if (vecs) {
+    const [A, B, C] = vecs
+    boxR = Math.hypot(A[0] + B[0] + C[0], A[1] + B[1] + C[1],
+      A[2] + B[2] + C[2]) / 2          // 体对角线的一半
+  }
+  const homeR = st.home ? st.home.radius : 100
+  st.boxRadius = boxR
+  st.radiusMax = boxR > 0
+    ? boxR / (BOX_FILL * tanHalf)
+    : homeR * 1.6
+  if (boxR > 0) st.radiusMax = Math.max(st.radiusMax, homeR)   // 别比初始视角还近
+  st.radiusMax = Math.min(st.radiusMax, MAX_RADIUS_A)
+
+  // ---- 最近：最大球直径 = BALL_FILL·viewH
+  let maxBall = 0.3
+  for (let i = 0; i < data.n_displayed; i += 1) {
+    const r = (data.radii[i] || 1.4) * RADIUS_SCALE
+    if (r > maxBall) maxBall = r
+  }
+  st.maxBallA = maxBall
+  st.radiusMin = maxBall / (BALL_FILL * tanHalf)
+  st.radiusMin = Math.min(st.radiusMin, homeR * 0.5)          // 别比初始视角还远
+  st.radiusMin = Math.max(st.radiusMin, MIN_RADIUS_A)
+  return st.radiusMin
 }
 
 /** 球半径（Å）：共价半径 × 系数，并受屏幕下限保护 */
@@ -173,7 +220,7 @@ export default function StructureView({ st }) {
         )}
         {data && (
           <div className="viewhint">
-            球棍模型 · 左键拖动旋转 · 滚轮缩放 · 右键拖动平移 · 单击原子高亮（Ctrl 单击加减）
+            球棍模型 · 左键拖动旋转 · 滚轮缩放 · **双击原子钻进分子** · 右键拖动平移 · 单击原子高亮（Ctrl 单击加减）
           </div>
         )}
       </div>
@@ -240,6 +287,8 @@ export function buildGeometry(st, data) {
     // 屏幕空间最小半径：大体系按真实共价半径画只有不到一个像素，看起来像"什么都没有"。
     // 球和棍各有一个下限；缩放时会重算（见 recalcScales）。
     recalcScales(st)
+    // 缩放上下限按体系自身尺寸定（单原子占满 3/4 / 盒子占 1/3）
+    computeZoomLimits(st, data)
 
     // 按元素分组 → 每种元素一个 InstancedMesh（draw call 少、半径可不同）
     const byEl = new Map()
@@ -597,6 +646,22 @@ function Viewer({ data, selected, onlySelected, onPick, onHover,
       center: new THREE.Vector3(),
     }
     st.el = box                 // 数据/状态 effect 里要量尺寸，只能通过 st 拿
+    // 「双击聚焦」：把注视点挪到该原子上，并把相机拉到 FOCUS_RADIUS_A。
+    // 这是"钻进分子里"的唯一入口 —— 绕质心旋转 + 滚轮只能靠近质心，
+    // 想看清多分子体系里的某一个分子，必须先把它变成新的注视点。
+    st.focusOn = (atomIndex) => {
+      const data = st.lastData
+      if (!data) return
+      const dp = st.posOf ? st.posOf.get(atomIndex) : undefined
+      if (dp === undefined || dp < 0) return
+      const [ox, oy, oz] = st.offset || [0, 0, 0]
+      const p = data.xyz[dp]
+      st.target = new THREE.Vector3(p[0] - ox, p[1] - oy, p[2] - oz)
+      const lo = st.radiusMin || MIN_RADIUS_A
+      st.sph.radius = Math.max(lo, Math.min(st.sph.radius, FOCUS_RADIUS_A))
+      st.refresh?.()
+      kick()
+    }
     stRef.current = st
 
     const render = () => {
@@ -703,16 +768,24 @@ function Viewer({ data, selected, onlySelected, onPick, onHover,
       //    于是每次单击都被当作拖动直接 return，原子永远选不中（用户实测）。
       if (wasDragging && dist > 4) return
       const idx = pickAt(ev.clientX, ev.clientY)
-      if (idx !== null && idx !== undefined) {
-        pickRef.current?.(idx, ev.ctrlKey || ev.metaKey)
+      if (idx === null || idx === undefined) return
+      // 双击某个原子 = **把镜头移到它身上并放大到分子内部**（用户要求：
+      // "可以穿透不同的分子、一直放大到多分子里的单个分子" —— 光靠绕质心转
+      // 是钻不进去的，得有一个"聚焦到这里"的手势）
+      if (ev.detail >= 2) {
+        st.focusOn?.(idx)
+        return
       }
+      pickRef.current?.(idx, ev.ctrlKey || ev.metaKey)
     }
     const onWheel = (ev) => {
       ev.preventDefault()
       const before = st.sph.radius
-      // 下限从 0.5 Å 放到 0.1 Å：0.5 Å 时视野高度约 0.41 Å，只够看半个原子；
-      // 现在可以一直推到"一个原子占满屏幕"。上限不变（远到看见整个盒子）。
-      st.sph.radius = Math.min(MAX_RADIUS_A, Math.max(MIN_RADIUS_A,
+      // 上下限都按体系自身算（见 computeZoomLimits）：
+      //   最近 = 最大那颗原子直径 ≈ 视野 3/4；最远 = 模拟盒 ≈ 视野 1/3。
+      const lo = st.radiusMin || MIN_RADIUS_A
+      const hi = st.radiusMax || MAX_RADIUS_A
+      st.sph.radius = Math.min(hi, Math.max(lo,
         st.sph.radius * Math.exp(ev.deltaY * ZOOM_PER_DELTA)))
       // 缩放会改变"每像素多少 Å"→ 球/棍/盒棱的屏幕尺度跟着变（球棍模型靠这一步才成立：
       // 拉远靠下限保住可见，靠近让真实比例接管）。变化超过 8% 才重算矩阵，别每格都刷。
@@ -780,6 +853,7 @@ function Viewer({ data, selected, onlySelected, onPick, onHover,
     if (!st || !data) return
     try {
       buildGeometry(st, data)
+      st.lastData = data          // 「双击聚焦」要用它换算原子坐标
       st.kick()
     } catch (e) {
       // 这一层兜底很关键：effect 里抛错会让 React 卸掉整棵树（表现为白屏）。
