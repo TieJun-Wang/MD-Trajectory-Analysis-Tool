@@ -70,6 +70,10 @@ export default function App() {
   const [params, setParams] = useState({
     cutoff: 5.0, axis: 2, nbins: 100, rmax: 12, dihedral_mode: 'auto',
     rdf_mode: 'inter', msd_object: 'molecule', gauche_edge: 120,
+    // 「减去整体漂移」默认**关**：Materials Studio Forcite 的 MSD 不去漂移，
+    // 默认关掉才能与它逐点对齐（实测 PE50：关掉差 0.000%，开着差 −0.01…−0.19%）。
+    // NPT 体系里整盒缓慢平移会污染 MSD，那时再勾上。
+    msd_drift: false,
     orient_mode: 'repeat', orient_stride: 1, contact_mode: 'inter', g_ref: '',
     // Rg：「分析对象」是**二选一**（整体体系 / 分子·链，默认分子·链），程序只算
     // 选中的那种，不再同时算整组与逐分子两套。`per_molecule` 现在只归 R_ee 用。
@@ -92,6 +96,8 @@ export default function App() {
   const [groups, setGroups] = useState([])
   //: 分析项可行性预判（后端 /select 一起返回）：跑不了的项在界面上置灰 + 说明原因
   const [feasible, setFeasible] = useState({})
+  //: 数据能力检测（坐标/轨迹/键/质量/电荷/分子归属/周期盒 + 静态 or 动态模式）
+  const [caps, setCaps] = useState(null)
 
   const [run, setRun] = useState(null)
   const [chart, setChart] = useState({ name: '', index: 0 })
@@ -122,61 +128,68 @@ export default function App() {
   const cancelledRef = useRef(false)
   //: 已经写进日志的「跳过」项（后端每轮轮询都会重复回传 skipped，只记一次）
   const skipLoggedRef = useRef(new Set())
+  //: 选择同步计数：每成功把「主链 + 组分 + 集合」发给后端一次就 +1。
+  //: 可行性预判读的是**后端**状态，所以同步完成后要让它重新问一次
+  //: （否则界面上勾了组分、预判里仍是"没勾组分"，RDF 一直置灰 —— 用户实测的 bug）。
+  const [selSync, setSelSync] = useState(0)
+  const selKeyRef = useRef('')
 
   /**
-   * 分析集合变更：立刻让后端算一次预览（原子数/分子数/追踪方式），
-   * 同时刷新组分清单（集合是"一等公民组分"，RDF/接触/界面/MSD 都能选到）。
+   * **选择同步**：把"主链 + 参与分析的组分 + 集合"整份发给后端。
+   *
+   * 为什么必须同步（用户实测的真 bug）：可行性预判、`/capabilities`、以及任何
+   * 读 `/select` 之后状态的接口，都是读**后端**的组分/主链。以前只在「开始分析」
+   * 时把选择塞进请求体，于是界面上"分析设置 → 分析对象"里勾了组分，预判里却
+   * 还是"没勾任何组分"，RDF / 密度 / 接触 这些就一直置灰 —— 看着像"选了也跑不了"。
+   *
+   * 由下面那个防抖 effect 触发（打字/连点不会每个动作都发一次请求）。
    * 注意：这里故意用普通函数而不是 useCallback —— 它依赖 pushLog，
    * 而 pushLog 定义在后面，useCallback 的依赖数组会在渲染期访问未初始化的
    * const（之前踩过 `Cannot access before initialization`）。
    */
-  const applySets = async (next, highlight = '') => {
+  const syncSelection = async (payload) => {
+    const r = await api.select(sess.sid, payload)
+    setSetsInfo(r?.sets || [])
+    // 可行性**不在这里设**：统一由下面那个 effect 取（它还必须带帧选择），
+    // 两个来源写同一个 state 会互相覆盖 —— 正是"预判没生效"的一半原因。
+    // 但同步完成后要**戳一下**那个 effect：它读的是后端状态，刚变过。
+    setSelSync((n) => n + 1)
+    if (r?.deferred) {
+      pushLog('分析正在运行：选择已保存，下一次运行分析时生效')
+    }
+    if (r?.catalog || r?.components) {
+      setSess((cur) => (cur ? {
+        ...cur,
+        // 组件胶囊 / 主链下拉框读**候选清单**（catalog）：没勾的条目也要在，
+        // 否则取消勾选后整张表就空了（用户实测）。
+        components: r.catalog || cur.components,
+        // 「自动」主链会跟着勾选的集合走（后端 apply_selection 的约定），
+        // 这里把新的标签带回来，界面上"自动（集合 set:C …）"才是真的
+        primary_label: r.primary_label ?? cur.primary_label,
+        primary_atoms: r.primary_atoms ?? cur.primary_atoms,
+      } : cur))
+      // 新集合默认参与分析：补进 components（胶囊里会显示成选中态）。
+      // 已经是"关"状态的集合**不要**补（否则界面上关了、后端还在算）。
+      const off = new Set((payload.sets || [])
+        .filter((x) => x.on === false).map((x) => x.name))
+      const setNames = (r.components || []).map((c) => c.name)
+        .filter((n) => n.startsWith('set:') && !off.has(n.slice(4)))
+      setComponents((prev) => [...prev,
+        ...setNames.filter((n) => !prev.includes(n))])
+    }
+    return r
+  }
+
+  /**
+   * 分析集合变更：只改本地状态（+ 立刻在三维视图里高亮），
+   * 后端同步交给下面的防抖 effect —— 这样"勾选框 / 主链 / 组分胶囊 / 集合"
+   * 走的是**同一条**同步路径，不会出现某一条路忘了通知后端。
+   */
+  const applySets = (next, highlight = '') => {
     setSets(next)
     if (!sess?.sid) return
-    const on = next.filter((x) => x.on !== false).map((x) => `set:${x.name}`)
-    try {
-      const r = await api.select(sess.sid, {
-        primary,
-        components: [...components, ...on],
-        sets: next.map((x) => ({
-          name: x.name, elements: x.elements || [], shape: x.shape || 'all',
-          min_atoms: x.min_atoms || 0, max_atoms: x.max_atoms || 0,
-          pure: !!x.pure,
-          // 这条集合"怎么来的"（范围 / 筛选条件）——后端原样存进 sets_spec，
-          // 集合行的悬浮提示靠它
-          ...(x.from ? { from: x.from } : {}),
-        })),
-      })
-      setSetsInfo(r?.sets || [])
-      // 可行性**不在这里设**：统一由下面那个 effect 取（它还必须带帧选择），
-      // 两个来源写同一个 state 会互相覆盖 —— 正是"预判没生效"的一半原因。
-      // 分析正在跑：后端只存选择、不重建分析器（选取与分析互不影响），
-      // 这里说清楚"什么时候生效"，别让用户以为没生效
-      if (r?.deferred) {
-        pushLog('分析正在运行：集合已保存，下一次运行分析时生效')
-      }
-      if (r?.catalog || r?.components) {
-        setSess((cur) => (cur ? {
-          ...cur,
-          // 组件胶囊 / 主链下拉框读**候选清单**（catalog）：没勾的条目也要在，
-          // 否则取消勾选后整张表就空了（用户实测）。
-          components: r.catalog || cur.components,
-          // 「自动」主链会跟着勾选的集合走（后端 apply_selection 的约定），
-          // 这里把新的标签带回来，界面上"自动（集合 set:C …）"才是真的
-          primary_label: r.primary_label ?? cur.primary_label,
-          primary_atoms: r.primary_atoms ?? cur.primary_atoms,
-        } : cur))
-        // 新集合默认参与分析：补进 components（chips 里会显示成选中态）
-        const setNames = (r.components || []).map((c) => c.name)
-          .filter((n) => n.startsWith('set:'))
-        setComponents((prev) => [...prev,
-          ...setNames.filter((n) => !prev.includes(n))])
-      }
-      // 新建/更新的集合 → 三维视图里**立刻高亮**（用户要求：点 ＋C 要标红）
-      if (highlight) struct.highlightSet(highlight)
-    } catch (e) {
-      setError(`集合预览失败: ${e.message}`)
-    }
+    // 新建/更新的集合 → 三维视图里**立刻高亮**（用户要求：点 ＋C 要标红）
+    if (highlight) struct.highlightSet(highlight)
   }
 
   /**
@@ -469,7 +482,10 @@ export default function App() {
         density: { axis: Number(params.axis), nbins: Number(params.nbins) },
         interface: { axis: Number(params.axis), nbins: Math.max(Number(params.nbins), 60) },
         rdf: { rmax: Number(params.rmax), nbins: 120, mode: params.rdf_mode },
-        msd: { object: params.msd_object, remove_drift: true },
+        // `remove_drift`：默认**关**（= Materials Studio Forcite 的口径，实测逐点一致）。
+        // NPT 体系里整盒平移会把 MSD 抬起来，那时把「减去整体漂移」勾上。
+        msd: { object: params.msd_object,
+               remove_drift: params.msd_drift === true },
         contact: { cutoff: Number(params.cutoff), mode: params.contact_mode },
         dihedral: { mode: params.dihedral_mode,
                     gauche_edge: Number(params.gauche_edge) || 120 },
@@ -503,11 +519,14 @@ export default function App() {
       },
       selection: {
         primary,
-        // 集合参与与否用 `set:<名字>` 表达（后端严格按此过滤）
-        components: [...components,
+        // 集合参与与否用 `set:<名字>` 表达（后端严格按此过滤）。
+        // `components` 里可能残留旧集合名（同步时已过滤），这里统一再过滤一遍，
+        // 免得"界面上关掉的集合"被当成参与者。
+        components: [...components.filter((c) => !String(c).startsWith('set:')),
           ...sets.filter((x) => x.on !== false).map((x) => `set:${x.name}`)],
         sets: sets.map((x) => ({
-          name: x.name, elements: x.elements || [], shape: x.shape || 'all',
+          name: x.name, on: x.on !== false,
+          elements: x.elements || [], shape: x.shape || 'all',
           min_atoms: x.min_atoms || 0, max_atoms: x.max_atoms || 0,
           pure: !!x.pure,
         })),
@@ -673,10 +692,61 @@ export default function App() {
    * MSD 就跑不了了）。以前只在集合变化时顺带取一次，导致很多时候
    * 预判根本没生效：选了 MSD 却一跑就报「至少需要 2 帧」（用户实测）。
    */
+  // 能力只跟体系有关：换 sid 才重新问一次
+  useEffect(() => {
+    const sid = sess?.sid
+    if (!sid) { setCaps(null); return undefined }
+    let alive = true
+    api.capabilities(sid)
+      .then((r) => { if (alive) setCaps(r || null) })
+      .catch(() => { if (alive) setCaps(null) })
+    return () => { alive = false }
+  }, [sess?.sid])
+
+  /**
+   * **把选择同步给后端**（防抖 350ms）。
+   *
+   * 三种触发都走这一条：组分胶囊点选、主链切换、集合增删/开关。
+   * 后端拿到之后 `az.components / az.primary` 就与界面一致，
+   * 于是 `/feasible`（可行性预判）与真正开跑时的口径相同 ——
+   * 勾上组分后 RDF / 密度 / 接触 立刻可用（用户实测的 bug 就是这里断的）。
+   */
+  useEffect(() => {
+    const sid = sess?.sid
+    if (!sid) return undefined
+    // 组分里不带 `set:`（集合的参与开关由 sets 的 on 决定，写两份会互相打架：
+    // 关掉的集合会因为还留在 components 里而被后端继续当成参与者）
+    const comps = (components || []).filter((c) => !String(c).startsWith('set:'))
+    const on = (sets || []).filter((x) => x.on !== false).map((x) => `set:${x.name}`)
+    const payload = {
+      primary,
+      components: [...comps, ...on],
+      sets: (sets || []).map((x) => ({
+        name: x.name, on: x.on !== false,
+        elements: x.elements || [], shape: x.shape || 'all',
+        min_atoms: x.min_atoms || 0, max_atoms: x.max_atoms || 0,
+        pure: !!x.pure,
+        // 这条集合"怎么来的"（范围 / 筛选条件）—— 后端原样存进 sets_spec，
+        // 集合行的悬浮提示靠它
+        ...(x.from ? { from: x.from } : {}),
+      })),
+    }
+    const key = JSON.stringify(payload)
+    if (key === selKeyRef.current) return undefined
+    const timer = setTimeout(() => {
+      selKeyRef.current = key
+      syncSelection(payload).catch((e) => {
+        setError(`选择同步失败: ${e.message}`)
+      })
+    }, 350)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sess?.sid, primary, components, sets])
+
   const feasibleKey = useMemo(() => JSON.stringify([
     sess?.sid || '', primary, components,
-    (sets || []).map((x) => [x.name, x.on !== false]), frames,
-  ]), [sess?.sid, primary, components, sets, frames])
+    (sets || []).map((x) => [x.name, x.on !== false]), frames, selSync,
+  ]), [sess?.sid, primary, components, sets, frames, selSync])
 
   useEffect(() => {
     const sid = sess?.sid
@@ -815,7 +885,7 @@ export default function App() {
                         <OpenPanel onOpened={onOpened} log={pushLog} />
                       )}
                       {s.id === SEC_INFO && sess && (
-                        <InfoPanel info={sess.info}
+                        <InfoPanel info={sess.info} caps={caps}
                                    onNext={() => {
                                      // 「下一步」：直接打开结构选择并**自动渲染**结构图
                                      // （不再需要手动点"载入结构"）
@@ -828,6 +898,11 @@ export default function App() {
                         <StructurePanel sess={sess} st={struct}
                                         sets={sets} setsInfo={setsInfo}
                                         onSetsChange={applySets}
+                                        components={components}
+                                        onToggleComponent={(name) => setComponents(
+                                          (prev) => (prev.includes(name)
+                                            ? prev.filter((c) => c !== name)
+                                            : [...prev, name]))}
                                         onNext={() => setOpen(SEC_SETUP)}
                                         log={pushLog} />
                       )}

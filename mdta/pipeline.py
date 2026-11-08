@@ -86,6 +86,8 @@ ANALYSIS_TITLES = {
     "boo": "键取向序参数 BOO",
     "crystal": "晶体/非晶区域识别",
     "msd": "均方位移 MSD",
+    # 扩散系数：由 MSD 线性区拟合的独立分析项（静态模式不支持）
+    "diffusion": "扩散系数 D",
 }
 
 #: 按设计大纲的**模块**给分析项分组：``[(模块名, (分析项, ...)), ...]``。
@@ -95,7 +97,7 @@ ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("链构象", ("rg", "ree", "dihedral")),
     ("空间结构", ("density", "rdf", "rdf2d", "comdist", "contact", "interface")),
     ("取向与结晶", ("orientation", "order", "boo", "crystal")),
-    ("动力学与输运", ("msd",)),
+    ("动力学与输运", ("msd", "diffusion")),
 ]
 
 #: 分组在**快捷按钮行**上用的 2 字缩写。
@@ -140,13 +142,15 @@ class Analyzer:
 
     def __init__(self, topology: str, trajectory: str | None = None, *,
                  guess_bonds: bool | None = None,
-                 velocities: bool | None = None):
+                 velocities: bool | None = None,
+                 autodetect: bool | None = None):
         # `guess_bonds=True`：忽略拓扑里已有的键、按坐标重新猜（CONECT 不完整的
         # PDB 用）。**必须能一路传到 Analyzer** —— 否则 Web 端把参数传给了
         # `load_trajectory` 做校验、Analyzer 又重新加载一次、参数就丢了。
         # `velocities=True`：MS 的 .trj 转成 TRR（坐标 + 速度）后再读，同理必须透传。
         self.trajectory: MDTrajectory = load_trajectory(
-            topology, trajectory, guess_bonds=guess_bonds, velocities=velocities)
+            topology, trajectory, guess_bonds=guess_bonds, velocities=velocities,
+            **(dict() if autodetect is None else {"autodetect": bool(autodetect)}))
         self.frames: FrameSelection | None = None
         self.primary = None            # 主链（构象/结晶分析对象）
         self.primary_label: str = "链"
@@ -514,6 +518,15 @@ class Analyzer:
             ag, lab = self._orientation_target()
             return boo_mod.analyze_crystal_regions(self.trajectory, ag, sel,
                                                    label=lab, verbose=verbose, **p)
+        if name == "diffusion":
+            # 扩散系数 = MSD 线性区拟合（同一套计算，只重新组织输出）
+            groups = self._msd_groups()
+            if not groups:
+                self.skip_reason = "没有勾选任何组分（扩散系数至少需要一个组分）"
+                return None
+            p = dict(p)
+            return dyn.analyze_diffusion(self.trajectory, groups, sel,
+                                         verbose=verbose, **p)
         if name == "msd":
             groups = self._msd_groups()
             if not groups:
@@ -659,8 +672,64 @@ class Analyzer:
             self.frames, self.current = keep_frames, keep_current
         return out
 
-    def run_all(self, which: Sequence[str] | None = None, *,
-                params: Mapping[str, Mapping] | None = None,
+    def _annotate_frames(self, res, sel):
+        """**单帧体系**（只读了结构文件）给结果打标 + 一条说明。
+
+        用户实测关心的问题：只上传结构文件时"图表是不是就没了"。实际分成两类：
+        · **随时间变化**的曲线（Rg(t)、接触数(t)、MSD…）只有 1 个点 —— 相当于快照；
+        · **静态**面板（RDF、密度分布、各种分布直方图）本来就是单帧即可，照常有效。
+        所以这里只加标记与一句话说明，让界面把这件事写清楚，而不是让人以为图坏了。
+        """
+        try:
+            n = int(getattr(sel, "n_frames", 0) or 0)
+        except Exception:                                        # noqa: BLE001
+            n = 0
+        if res is None or n > 1:
+            return res
+        res.meta["single_frame"] = 1
+        res.meta["n_frames"] = n
+        # **把"随时间变化"的面板整个去掉**：只有 1 帧时它就是一个点，
+        # 画出来既没信息量、又让人以为"时间序列坏掉了"（用户实测提问：
+        # "xsd 不是只有一帧吗，怎么还能绘制出随时间变化的图"）。
+        # 静态面板（RDF / 密度 / 各种分布）照常保留 —— 那些本来就不依赖帧数。
+        try:
+            n_panel = int(res.panel_count)
+        except Exception:                                    # noqa: BLE001
+            n_panel = 0
+        remap: dict[int, int] = {}
+        dropped: list[int] = []
+        for i in range(n_panel):
+            xl = str(getattr(res.panel(i), "xlabel", "") or "")
+            if ("时间" in xl) or ("time" in xl.lower()):
+                dropped.append(i)
+                continue
+            remap[i] = len(remap)
+        if dropped and not remap:
+            # **所有面板都是时间序列**（质心距 / 有序度 / 晶区…）：单帧下这张图
+            # 没有任何可看的东西，整项记为"跳过"，而不是留一堆 1 点的空图。
+            self.skip_reason = (
+                f"只有 {n} 帧（只读了结构文件）：这一项的 {len(dropped)} 张图"
+                "全是随时间变化，单帧下没有可看的内容，已省略")
+            return None
+        if dropped:
+            keep: list = []
+            for c in res.curves:
+                if c.panel in remap:
+                    c.panel = remap[c.panel]
+                    keep.append(c)
+            res.curves = keep
+            res.panels = [res.panels[i] for i in sorted(remap)
+                          if i < len(res.panels)]
+        note = (f"只算了 {n} 帧（只读了结构文件，没配轨迹？）："
+                + (f"**随时间变化**的 {len(dropped)} 张面板已省略（1 个点没有意义），"
+                   "下面都是**静态分布**图（RDF / 密度 / 各种分布），这些与帧数无关、"
+                   "结果有效。"
+                   if dropped else
+                   "结果是**单帧快照**；RDF / 密度 / 各种分布这类静态面板不受影响。"))
+        res.add_notes(note)
+        return res
+
+    def run_all(self, which: Sequence[str] | None = None, *,                params: Mapping[str, Mapping] | None = None,
                 outdir: str | None = None, formats: Sequence[str] = ("csv", "png"),
                 excel: bool = True, panel_pngs: bool = False,
                 verbose: bool = True,
@@ -756,6 +825,22 @@ class Analyzer:
                 continue
             if res is None:
                 self.skips[name] = self.skip_reason or "体系缺少这项分析所需的组分"
+                if verbose:
+                    print(f"  -- 跳过：{self.skips[name]}")
+                continue
+            res = self._annotate_frames(res, sel)
+            if res is not None:
+                # 自适应可视化：判定每条曲线的数据类型 / 推荐图型 / 统计量
+                try:
+                    from .autoviz import annotate_curves
+
+                    annotate_curves(res)
+                except Exception:                            # noqa: BLE001
+                    pass
+            if res is None:
+                # 单帧体系里"全是时间序列"的分析项：整项记为跳过，不留空图
+                self.skips[name] = (self.skip_reason
+                                    or "只有 1 帧：这一项的图全是随时间变化，已省略")
                 if verbose:
                     print(f"  -- 跳过：{self.skips[name]}")
                 continue

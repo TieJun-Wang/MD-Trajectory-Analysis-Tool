@@ -21,7 +21,8 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
                           onFilterElement = null, activeElement = '',
                           onToggleFilter = null, activeKeys = null,
                           filterErr = '', filterBusy = false, filterCount = 0,
-                          scopeSize = 0, onClearFilters = null, filters = [] }) {
+                          scopeSize = 0, onClearFilters = null, filters = [],
+                          components = [], onToggleComponent = null }) {
   if (!sess) return null
   //: 三维视图里已经选中了原子 → 默认用"这批原子"建集合
   //: （1.0.4 用户要求：预设/元素 chip 只改选择、不自动建集合，所以"添加集合"
@@ -81,6 +82,12 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
     setDraft({ name: '', elements: [], shape: 'all', min_atoms: '', max_atoms: '', pure: false })
   }
   const infoOf = (name) => (setsInfo || []).find((x) => x.name === `set:${name}`)
+  //: **自动识别出的组分**（protein / water / ion / polymer[seg] …）——
+  //: 用户要求：分析集合区也要能看到、能勾，且与「分析设置 → 分析对象」里的
+  //: 胶囊是**同一份选择**（不是两条独立的路）。`set:` 开头的条目属于自定义集合，
+  //: 下面单独一块，别混进来。
+  const autoComps = (sess.components || [])
+    .filter((c) => c && c.name && !String(c.name).startsWith('set:'))
   //: 当前生效的筛选条件键（`element:H` / `preset:链状分子`），用来把 chip 标红
   const elActive = String(activeElement || '')
   const keys = activeKeys instanceof Set ? activeKeys : new Set()
@@ -228,6 +235,37 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
           </div>
         )}
 
+        {autoComps.length > 0 && (
+          <div className="mt4">
+            <div className="tree-mini dim" style={{ padding: '2px 0 3px' }}>
+              自动识别的组分（勾上就参与分析，和「分析设置 → 分析对象」是同一份选择）
+            </div>
+            <div className="sets-list">
+              {autoComps.map((c) => {
+                const on = (components || []).includes(c.name)
+                return (
+                  <div key={c.name}
+                       className={`set-row${on ? '' : ' off'}`}>
+                    <label className="check"
+                           title={(on ? '点此取消参与分析' : '点此参与分析')
+                             + `\n${Number(c.n_atoms || 0).toLocaleString()} 原子`
+                             + (c.n_residues != null ? ` / ${c.n_residues} 残基` : '')
+                             + (c.n_molecules != null ? ` / ${c.n_molecules} 个分子` : '')}>
+                      <input type="checkbox" checked={on}
+                             onChange={() => onToggleComponent?.(c.name)} />
+                      <b>{c.name}</b>
+                    </label>
+                    <span className="set-desc">
+                      {Number(c.n_atoms || 0).toLocaleString()} 原子
+                      {c.n_molecules != null ? ` · ${c.n_molecules} 分子` : ''}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )}
+
         {(sets || []).length > 0 && (
           <div className="sets-list mt4">
             {sets.map((x) => {
@@ -258,7 +296,7 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
                      className={`set-row${on ? '' : ' off'}${activeSet === x.name ? ' active' : ''}`}
                      onClick={() => onHighlight?.(x.name)}
                      title={lines.join('\n') + '\n\n点击：在三维视图里高亮这个集合的原子'}>
-                  <label className="check" style={{ fontSize: 10.5 }}
+                  <label className="check"
                          title={on ? '点此取消参与分析' : '点此参与分析'}
                          onClick={(e) => e.stopPropagation()}>
                     <input type="checkbox" checked={on} onChange={() => toggleSetOn(x.name)} />
@@ -279,6 +317,30 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
 }
 
 
+/**
+ * 各分析项**用哪个对象**算 —— 界面上只显示一行短文字，完整解释放悬浮提示
+ * （用户要求：一行解释一个功能，别在界面上铺一大段字）。
+ *
+ * 这份清单必须与 `mdta/analysis/*` 里真正读的对象一致（改实现时一并改这里）。
+ */
+const PRIMARY_USES = [
+  ['Rg 回转半径', '按这个对象的全部原子算 Rg(t)；对象里有多个分子时还给出逐分子 Rg 平均'],
+  ['R_ee 端到端距离', '取这个对象的两端原子（键连图里只连一根键的原子）算直线距离'],
+  ['二面角', '沿这个对象的成键关系找出所有可转二面角，给 P(φ) 与 trans/gauche 比例'],
+  ['取向', '把这个对象切成链段，算二阶序参数 S、P2 与链段取向角分布'],
+  ['结构有序度', '这个对象每个原子的局部有序度加权成指数（按主链的近邻算）'],
+  ['结晶 / 非晶识别', '用这个对象的 q6/q̄6 判固相原子，再连通成晶簇数晶区占比'],
+]
+const COMPONENT_USES = [
+  ['密度', '沿选定方向分箱，分别统计每个组分的质量/数密度剖面'],
+  ['RDF', '组分内或组分对之间的径向分布 g(r)，同分子配对可剔除'],
+  ['二维 RDF', 'x–y 平面内的径向分布（厚层体系看面内结构）'],
+  ['接触', 'A 组分与 B 组分之间距离 < cutoff 的原子对数（随时间）'],
+  ['界面', '两组分的密度剖面求交点定位界面，再给 10–90 界面宽度'],
+  ['质心距', '两组分的质心距离随时间变化（需要 ≥2 个组分）'],
+  ['MSD / 扩散系数', '每个勾选的组分各算一条曲线（集合也一样）'],
+]
+
 export function SelectionBlock({ sess, primary, setPrimary, components, setComponents,
                                       sets = [], setsInfo = [], onSetsChange = null }) {
   if (!sess) return null
@@ -290,6 +352,13 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
       ? components.filter((c) => c !== name)
       : [...components, name])
   }
+  const nOn = comps.filter((c) => components.includes(c.name)).length
+  const primaryTip = '主链（分析对象）用来算这些：\n'
+    + PRIMARY_USES.map(([k, v]) => `· ${k}：${v}`).join('\n')
+  const compTip = '「参与分析的对象」用来算这些（一行一个功能）：\n'
+    + COMPONENT_USES.map(([k, v]) => `· ${k}：${v}`).join('\n')
+    + '\n\n勾几个就按几个算：MSD / 扩散系数每个对象各一条曲线；'
+    + 'RDF / 接触 / 界面 / 质心距按组分两两（或 A–B 对）计算。'
 
   return (
     <>
@@ -297,9 +366,9 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
 
       <label className="field">
         <span>主链</span>
-        <span className="hint dim" style={{ fontSize: 10.5 }}
-              title="回转半径 / 端到端距离 / 二面角 / 取向 / 结晶都按这个对象算">
-          {sets.length > 0 ? '勾了集合就用集合' : 'Rg / 二面角 / 取向按它算'}
+        <span className="hint dim" style={{ fontSize: 10.5 }} title={primaryTip}>
+          {sets.length > 0 ? '勾了集合就用集合 · ' : ''}
+          Rg / R_ee / 二面角 / 取向 / 有序度 / 结晶 按它算
         </span>
         <select
           value={primary.mode === 'custom' ? 'custom' : JSON.stringify(primary)}
@@ -355,19 +424,22 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
       )}
 
       <div className="field">
-        <span>
-          参与分析的对象
-          <span className="dim" style={{ fontWeight: 400 }}>
-            {` · 已勾 ${comps.filter((c) => components.includes(c.name)).length}`
-              + ` / ${comps.length}，点胶囊切换`}
-          </span>
+        <span>参与分析的对象</span>
+        <span className="hint dim" style={{ fontSize: 10.5 }} title={compTip}>
+          密度 / RDF / 接触 / 界面 / 质心距 / MSD / 扩散系数 按勾选的组分算
+        </span>
+        <span className="tree-mini dim" style={{ padding: '2px 0 4px' }}
+              title={compTip}>
+          {`已勾 ${nOn} / ${comps.length}，点胶囊切换`
+            + (nOn === 0 ? '（RDF / 密度 / 接触 这些需要至少 1 个组分）' : '')}
         </span>
         <div className="chips-pick">
           {comps.map((c) => (
             <button key={c.name}
                     className={`chip-pick ${components.includes(c.name) ? 'on' : ''}`}
                     onClick={() => toggleComponent(c.name)}
-                    title={`${c.n_atoms.toLocaleString()} 原子 / ${c.n_residues} 残基`
+                    title={`${Number(c.n_atoms || 0).toLocaleString()} 原子`
+                      + (c.n_residues != null ? ` / ${c.n_residues} 残基` : '')
                       + (c.n_molecules != null
                         ? ` / ${c.n_molecules} 个分子${c.n_molecules === 1
                           ? '（单分子）' : ''}` : '')}>
@@ -641,11 +713,16 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       F('g_ref', '局部结构 g_ref', 'input', numInput('留空不计入', { step: 1, ...p('g_ref') }),
         '留空不计入'),
     ]],
-    ['均方位移 MSD', ['msd'], [
+    ['均方位移 MSD', ['msd', 'diffusion'], [
       F('msd_object', 'MSD 追踪对象', 'select', sel('msd_object', [
         ['molecule', '分子质心（默认）'],
         ['atom', '原子'],
       ])),
+      F('msd_drift', '去漂移', 'check',
+        chk('msd_drift', '减去整体漂移',
+          '默认不勾（= Materials Studio Forcite 的口径，可逐点对齐）。\n'
+          + 'NPT 体系里整盒缓慢平移会把 MSD 抬高，那时勾上；'
+          + '勾上后 MSD 会小 0.01%~0.2%（实测 PE50）。'), '减去整体漂移', 3),
       F('tau_intervals', 'τ 分段数', 'input',
         numInput('5', { step: 1, min: 1, ...p('tau_intervals') }), '留空不限'),
     ]],

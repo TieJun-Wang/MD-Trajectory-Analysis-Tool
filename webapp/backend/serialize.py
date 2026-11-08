@@ -75,6 +75,25 @@ def _downsample(x: np.ndarray, y: np.ndarray,
     return x[idx], y[idx], True
 
 
+def _viz_json(viz):
+    """把自适应可视化的判定转成纯 JSON（numpy 标量/数组都转掉）。"""
+    if not isinstance(viz, dict):
+        return None
+    out = {}
+    for k, v in viz.items():
+        if isinstance(v, dict):
+            out[str(k)] = {str(a): _num(b) for a, b in v.items()}
+        elif isinstance(v, (list, tuple)):
+            out[str(k)] = [_num(x) for x in v]
+        elif isinstance(v, (str, bool)) or v is None:
+            out[str(k)] = v
+        elif isinstance(v, int):
+            out[str(k)] = int(v)
+        else:
+            out[str(k)] = _num(v)
+    return out
+
+
 def curve_to_json(curve, max_points: int | None = MAX_POINTS) -> dict:
     x, y, ds = _downsample(np.asarray(curve.x, dtype=float),
                            np.asarray(curve.y, dtype=float), max_points)
@@ -88,7 +107,29 @@ def curve_to_json(curve, max_points: int | None = MAX_POINTS) -> dict:
         "downsampled": bool(ds),
         # 所属分析对象（空 = 单系列）：前端据此"默认只显示第一个对象"
         "group": str(getattr(curve, "group", "") or ""),
+        # 自适应可视化引擎的判定（数据类型 / 推荐图型 / 统计量 / 窄分布建议）
+        "viz": _viz_json(getattr(curve, "viz", None)),
     }
+
+
+def _heat_json(h) -> dict:
+    """二维热力图 → JSON。``z`` 是 ``len(y) x len(x)`` 的二维表。"""
+    h = dict(h or {})
+    z = h.get("z") or []
+    out = {
+        "panel": int(h.get("panel") or 0),
+        "title": str(h.get("title") or ""),
+        "xlabel": str(h.get("xlabel") or ""),
+        "ylabel": str(h.get("ylabel") or ""),
+        "note": str(h.get("note") or ""),
+        "x": [_num(v) for v in (h.get("x") or [])],
+        "y": [_num(v) for v in (h.get("y") or [])],
+        "z": [[_num(v) for v in row] for row in z],
+    }
+    for k in ("vmin", "vmax"):
+        if h.get(k) is not None:
+            out[k] = _num(h[k])
+    return out
 
 
 def panel_to_json(result, index: int) -> dict:
@@ -101,6 +142,9 @@ def panel_to_json(result, index: int) -> dict:
         "xscale": p.xscale or "linear",
         "yscale": p.yscale or "linear",
         "legend": bool(p.legend),
+        # 极坐标图（角度分布）/ 二维热力图（接触矩阵、空间热力图）
+        "polar": bool(getattr(p, "polar", False)),
+        "heatmap": bool(getattr(p, "heatmap", False)),
         "curves": [str(c.label) for c in result.curves_of(index)],
     }
 
@@ -113,6 +157,9 @@ def result_to_json(result, max_points: int | None = MAX_POINTS) -> dict:
         "n_panels": n_panels,
         "panels": [panel_to_json(result, i) for i in range(n_panels)],
         "curves": [curve_to_json(c, max_points) for c in result.curves],
+        # 二维热力图（接触矩阵 / 空间热力图）：与曲线并行的一条通道
+        "heatmaps": [_heat_json(h) for h in
+                     (getattr(result, "heatmaps", None) or [])],
         "summary": {str(k): _num(v) for k, v in result.summary.items()},
         "notes": [str(x) for x in result.notes],
         # 每条说明的作用域（属于哪张图 / 哪条曲线）——前端据此只显示与当前

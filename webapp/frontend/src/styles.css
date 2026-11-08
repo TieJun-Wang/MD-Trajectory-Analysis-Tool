@@ -564,6 +564,18 @@ table.stats.qc td.qc-c1 { color: #374151; }
   border: 1px solid var(--line-strong); border-radius: 6px;
   background: #fff; color: var(--text); font: inherit; font-size: 12.5px;
 }
+/* ⚠️ `.field input { width:100% }` 会连**复选框**一起算进去：集合行里的
+   `[✓] set:名字` 于是勾选框被撑成一整行宽，名字被挤到右下、甚至换行错位
+   （用户实测"选择框占的位置不对导致文字出错"）。复选框/单选钮必须
+   交还给浏览器默认尺寸，也不吃内边距。 */
+.field input[type="checkbox"], .field input[type="radio"] {
+  width: auto; min-width: 0; height: auto; padding: 0; margin: 0;
+  flex: none; border: 0; border-radius: 0; background: none;
+}
+/* 胶囊区里的下拉/输入同样不该吃满整行 */
+.field .chips-pick input, .field .chips-pick select {
+  width: auto; min-width: 0;
+}
 .field input:focus, .field select:focus {
   outline: 2px solid var(--accent-soft); border-color: var(--accent);
 }

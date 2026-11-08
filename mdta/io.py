@@ -245,6 +245,11 @@ class TrajectoryError(RuntimeError):
 BOND_GUESSABLE_SUFFIXES = _BOND_GUESSABLE
 #: 超过这个原子数就不自动猜键了（猜键是 O(N) 但常数不小）
 AUTO_GUESS_MAX_ATOMS = 300_000
+#: **力场拓扑**：键表来自力场参数（不是从坐标推的），天然可信。
+#: 所以即使调用方写了 ``guess_bonds=False``，也不需要做"键表残缺"体检 ——
+#: 那一步要数碎片（``atoms.fragments``），大体系上既慢又吃内存，而且会把
+#: 「TIP4P 水的 M 位点」这种正常的孤立原子误判成"键表断了"，进而删掉力场键表。
+FORCE_FIELD_BOND_SUFFIXES = frozenset({".tpr", ".psf", ".dms", ".pdbqt"})
 
 
 @dataclass
@@ -271,6 +276,10 @@ class MDTrajectory:
     #: 文件约为 XTC 的 5~6 倍），``False``/``None`` 只转坐标（XTC，最小）。
     #: 速度是 MS ``.trj`` 里本来就有的（第 4-6 条 double 数组），XTC 装不下。
     velocities: bool | None = None
+    #: 是否允许**自动配对同名轨迹**（.xsd/.xtd ↔ .trj/.xtc、.tpr ↔ .xtc …）。
+    #: Web 端默认关掉：用户只选了一个结构文件时，不该悄悄把同目录的轨迹也读进来
+    #: （否则"只想看结构"会变成六千帧的轨迹分析 —— 用户实测踩过）。
+    autodetect: bool = True
     #: 猜键结果统计（未猜时为 ``None``）
     bond_guess_info: dict | None = None
     #: 对象层属性补齐诊断（elements / masses / molnums）
@@ -314,7 +323,8 @@ class MDTrajectory:
             # Materials Studio 文档（.xsd/.xtd）常常**与轨迹同名不同后缀**：
             # 只给了一个时自动把另一个配上（.xtd 里写着 <Trajectory End=…/>，
             # 真正的坐标在同名 .trj 里；.trj 再由 ms_trj 转成 XTC 读取）。
-            if self.trajectory is None and is_ms_structure(self.topology):
+            if (self.trajectory is None and self.autodetect
+                    and is_ms_structure(self.topology)):
                 sib = ms_sibling_trajectory(self.topology)
                 if sib:
                     self.trajectory = sib
@@ -539,6 +549,28 @@ class MDTrajectory:
                   atoms=self.ms_info["n_atoms"], bonds=self.ms_info["n_bonds"])
         if traj:
             u.load_new(traj, **kw)
+            # 轨迹文件里**没有周期盒**时（MS 的 .trj 常见；老的转换缓存也有），
+            # MDAnalysis 报 dimensions=None，MSD/RDF/密度/界面就全都没有 PBC ——
+            # 必须让用户知道"这些数为什么不对"，而不是悄悄算下去。
+            try:
+                u.trajectory[0]        # 先读一帧：不读的话 ts.dimensions 还是空的
+                _d = u.trajectory.ts.dimensions
+            except Exception:                                    # noqa: BLE001
+                _d = None
+            _cell = self._topology_cell()
+            _bad = (_d is None or not np.all(np.isfinite(np.asarray(_d, dtype=float)))
+                    or float(np.min(np.asarray(_d, dtype=float)[:3])) <= 0)
+            if _bad and _cell is not None:
+                try:
+                    u.trajectory.ts.dimensions = np.asarray(_cell, dtype=np.float32)
+                except Exception:                                # noqa: BLE001
+                    pass
+                self.load_notes.append(
+                    f"⚠️ 轨迹 {os.path.basename(traj)} 里**没有周期盒**信息"
+                    f"（MS 的 .trj 帧头常常是 0）；已按拓扑 {os.path.basename(self.topology)} "
+                    f"的晶胞 a×b×c = {_cell[0]:.3g}×{_cell[1]:.3g}×{_cell[2]:.3g} Å 补上。"
+                    f"重新读取一次（或删掉同目录里旧的转换缓存）会更彻底 —— 否则"
+                    f"MSD / RDF / 密度 / 界面这些依赖 PBC 的量会偏。")
             hint = self.ms_info.get("trajectory_hint") or {}
             n_decl = hint.get("n_frames")
             try:
@@ -565,6 +597,34 @@ class MDTrajectory:
                 f"没找到同名轨迹文件时只能按单帧分析。")
         return u
 
+    def _topology_cell(self):
+        """拓扑文件里的晶胞（6 值），读不到返回 ``None``。
+
+        Materials Studio 的 ``.xsd`` / ``.xtd`` 里写着晶胞（``AVector/BVector/CVector``），
+        而 ``.trj`` 帧头经常**只有晶格矩阵、没有可用的 (a,b,c,α,β,γ)**；转换时必须
+        把拓扑的晶胞补上，否则转出来的轨迹没有周期盒（用户实测踩过）。
+        """
+        cell = (self.ms_info or {}).get("cell")
+        if cell:
+            try:
+                arr = np.asarray(cell, dtype=float).ravel()
+                if arr.size >= 6 and np.all(arr[:3] > 0):
+                    return arr[:6]
+            except Exception:                                    # noqa: BLE001
+                pass
+        if self.topology and is_ms_structure(self.topology):
+            try:
+                from .ms_structure import read_ms_structure
+
+                doc = read_ms_structure(self.topology)
+                cell = doc.get("cell")
+                arr = np.asarray(cell, dtype=float).ravel() if cell is not None else None
+                if arr is not None and arr.size >= 6 and np.all(arr[:3] > 0):
+                    return arr[:6]
+            except Exception:                                    # noqa: BLE001
+                return None
+        return None
+
     def _convert_trajectory(self) -> str:
         """把需要转换的轨迹（Materials Studio ``.trj``）转成 XTC / TRR，返回新路径。
 
@@ -584,8 +644,11 @@ class MDTrajectory:
         info = _ms.trj_info(self.trajectory)
         _progress(f"转换 Materials Studio .trj → {what}",
                   frames=info.get("n_frames"), atoms=info.get("n_atoms"))
+        # ⚠️ **把拓扑的晶胞带进转换**：MS 的 .trj 帧头里经常没有晶胞
+        #    （PE50-g2020 实测：DefCell 前三个是 0），老代码于是写出"没有盒"的
+        #    XTC/TRR → 打开后 u.dimensions = None，MSD/RDF/密度/界面全都没有 PBC。
         out = _ms.convert_trj(
-            self.trajectory, fmt=fmt,
+            self.trajectory, fmt=fmt, cell=self._topology_cell(),
             progress=lambda msg: _progress(f"转换 Materials Studio .trj → {what}",
                                            note=msg))
         self.converted_xtc = str(out)
@@ -817,37 +880,57 @@ class MDTrajectory:
         forced = self.guess_bonds is True
         if not forced and not has_bonds and not needs_bond_guessing(u):
             return
-        # 用户/旧版界面显式说了"不猜键"：一般照办，但**自带键表明显残缺时仍然修**
-        # （实测 MS 的 PDB：polymer[P] 被 CONECT 切成 243 个碎片，其中 121 个是孤立
-        #  H —— 逐分子 Rg 被这些"0 Å 的单原子"拉低到 2.19 Å，而真值 4.39 Å）。
-        # 不修就得靠用户自己发现，而这条错误**不会报任何异常**。
-        repair_broken = False
-        degen_note = ""
-        if self.guess_bonds is False:
-            from .topology import topology_degeneracy
-
-            degen = topology_degeneracy(u.atoms)
-            if not degen.get("degenerate"):
-                return
-            repair_broken = True
-            degen_note = str(degen.get("note", ""))
-            forced = True                     # 走"替换旧键表"的路径
-        suf = Path(self.topology or "").suffix.lower()
-        if self.guess_bonds is None and suf not in BOND_GUESSABLE_SUFFIXES:
-            return                                   # .tpr 等本应带键，不强猜
+        n_bonds_before = len(u.bonds) if has_bonds else 0
+        # 大体系一律不猜 —— 这个判断必须**排在"数碎片"之前**：以前放在后面，
+        # 于是 `.tpr`（几十万原子、上百万键）在判定"要不要猜键"时先跑了一遍
+        # `atoms.fragments`（MDAnalysis 要给每个原子建 Fragment 对象），
+        # 既慢（AdK 就是 2 s）又吃内存（大体系能到 GB 级，用户实测卡在「读取」）。
         if u.atoms.n_atoms > AUTO_GUESS_MAX_ATOMS:
             self.bond_guess_info = {
                 "skipped": f"原子数 {u.atoms.n_atoms:,} 超过自动猜键上限 "
                            f"{AUTO_GUESS_MAX_ATOMS:,}，已跳过",
             }
             return
+        # 用户/旧版界面显式说了"不猜键"：一般照办，但**自带键表明显残缺时仍然修**
+        # （实测 MS 的 PDB：polymer[P] 被 CONECT 切成 243 个碎片，其中 121 个是孤立
+        #  H —— 逐分子 Rg 被这些"0 Å 的单原子"拉低到 2.19 Å，而真值 4.39 Å）。
+        # 不修就得靠用户自己发现，而这条错误**不会报任何异常**。
+        repair_broken = False
+        degen_note = ""
+        suf = Path(self.topology or "").suffix.lower()
+        if self.guess_bonds is False:
+            # ⚠️ **力场拓扑（.tpr / .psf / .dms）的键表来自力场参数，是权威的**：
+            #    这类体系里的"孤立原子"往往是 TIP4P 水的 M 位点、约束粒子之类，
+            #    完全正常。以前不管三七二十一先做"键表残缺"体检，于是 AdK 的
+            #    .tpr（11084 个 M 位点 = 50% 碎片是孤立原子）被误判成"残缺"，
+            #    把力场键表**删掉**再按坐标重猜 —— 既慢又多此一举，还会改变
+            #    分子划分。现在按后缀直接信任它。
+            if suf in FORCE_FIELD_BOND_SUFFIXES:
+                self.bond_guess_info = {
+                    "skipped": (f"{suf} 是力场拓扑（键表来自力场参数），"
+                                f"按请求不按坐标重猜"),
+                    "kept_topology_bonds": True,
+                    "bonds": n_bonds_before,
+                }
+                return
+            from .topology import topology_degeneracy
 
-        n_bonds_before = len(u.bonds) if has_bonds else 0
+            _progress("检查键表完整性")
+            degen = topology_degeneracy(u.atoms)
+            if not degen.get("degenerate"):
+                return
+            repair_broken = True
+            degen_note = str(degen.get("note", ""))
+            forced = True                     # 走"替换旧键表"的路径
+        if self.guess_bonds is None and suf not in BOND_GUESSABLE_SUFFIXES:
+            return                                   # .tpr 等本应带键，不强猜
         n_frag_before = 0
         old_bonds = None
         if has_bonds and not forced:
             try:
-                n_frag_before = len(u.atoms.fragments)
+                from .topology import _bond_component_count
+
+                n_frag_before = _bond_component_count(u.atoms)
                 # `u.bonds.indices` 是 (n_bonds, 2)：**逐行**才是一对原子
                 # （写成 `for a, b in arr.T` 会试图把长度为 n 的列拆成两个 → ValueError，
                 #  于是快照失败、退化成"在旧键表上追加"，实测键数 5953 而不是 5954）
@@ -1231,13 +1314,14 @@ def load_trajectory(
             found = _autodetect_trajectory(topology)
             if found:
                 return MDTrajectory(topology, found, guess_bonds=guess_bonds,
-                                    velocities=velocities)
+                                    velocities=velocities,
+                                    autodetect=autodetect)
 
     if topology is None and trajectory is not None:
         raise TrajectoryError("缺少拓扑文件。")
 
     return MDTrajectory(topology, trajectory, guess_bonds=guess_bonds,
-                        velocities=velocities)
+                        velocities=velocities, autodetect=autodetect)
 
 
 def scan_input_files(paths: Iterable[str]) -> tuple[list[str], list[str]]:

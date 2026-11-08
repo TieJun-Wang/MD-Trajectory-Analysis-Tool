@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 2. 体系信息 —— 内容部分（放进折叠面板，不带卡片外壳）。
  *
  * 完整报告用**表格**渲染（后端 `info.sections` 给出「列 + 行」结构），
@@ -80,12 +80,13 @@ export function InfoReport({ sections }) {
   )
 }
 
-export default function InfoPanel({ info, onNext }) {
+export default function InfoPanel({ info, onNext, caps = null }) {
   const [expanded, setExpanded] = useState(false)
   if (!info) return null
 
   const rows = summaryRows(info)
   const sections = info.sections || []
+  const capItems = caps && caps.items ? Object.entries(caps.items) : []
 
   return (
     <>
@@ -94,6 +95,39 @@ export default function InfoPanel({ info, onNext }) {
           {rows.map(([k, v]) => <tr key={k}><th>{k}</th><td>{v}</td></tr>)}
         </tbody>
       </table>
+
+      {/* 数据能力检测：不靠后缀，直接看体系里到底有什么（坐标/轨迹/键/质量/
+          电荷/分子归属/周期盒）。模式（静态 / 动态）就是从这里来的。 */}
+      {capItems.length > 0 && (
+        <div className="mt6">
+          <div className="sect-title" style={{ marginTop: 6 }}>
+            数据能力
+            <span className="dim" style={{ fontWeight: 400 }}>
+              {' '}（{caps.mode_label || ''}）
+            </span>
+          </div>
+          <table className="kv">
+            <tbody>
+              {capItems.map(([k, v]) => (
+                <tr key={k} title={v.detail || ''}>
+                  <th>
+                    <span style={{ color: v.ok ? '#15803d' : '#b45309' }}>
+                      {v.ok ? '✓' : '✗'}
+                    </span>{' '}
+                    {v.label}
+                  </th>
+                  <td style={{ color: v.level === 'ok' ? undefined : '#b45309' }}>
+                    {v.detail || '—'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {(caps.warnings || []).map((w, i) => (
+            <div key={i} className="tree-mini warn" style={{ paddingLeft: 0 }}>{w}</div>
+          ))}
+        </div>
+      )}
 
       <div className="chips">
         {Object.entries(info.categories || {}).map(([k, v]) => (

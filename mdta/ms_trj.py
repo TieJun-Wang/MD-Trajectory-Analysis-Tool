@@ -25,9 +25,11 @@ MDAnalysis **不认识** ``.trj``（它是 MS 的私有二进制格式），所�
 
 输出格式与精度
 --------------
-* **XTC**（默认）：只存坐标，文件最小 —— 量化步长 1e-4 nm = 0.001 Å
-  （单点误差 ≤5e-4 Å）。官方 ``Trj2Ascii`` 导出的是完整 double，所以这点差别
-  就是"我们 vs 官方"的全部偏差；想更准可以设 ``MDTA_XTC_PRECISION=100000``。
+* **XTC**（默认）：只存坐标，文件最小 —— 量化步长 1e-5 nm = **1e-4 Å**
+  （单点误差 ≤5e-5 Å）。官方 ``Trj2Ascii`` 导出的是完整 double，这点差别就是
+  "我们 vs 官方"的全部偏差（实测 PE50 的 Rg 与 Forcite 差 **1.0e-6 Å**）。
+  想更省可以设 ``MDTA_XTC_PRECISION=10000``（1e-3 Å，文件小 20%），
+  想更严可以设 ``1e6``（1e-5 Å，文件大 20%），或直接用 TRR（float32 无量化）。
 * **TRR**（``fmt="trr"``，界面上「保留速度数据」）：坐标 **+ 速度**，
   坐标 float32（误差 ~1e-6 Å），速度单位 Å/ps。``.trj`` 里第 4-6 条 double
   数组就是速度，XTC 格式没有这个字段，只有 TRR（MDAnalysis 原生可读、
@@ -66,10 +68,20 @@ import numpy as np
 TRJ_MODULE = "ms_trj.py"
 XTC_MODULE = "xtcwriter.py"
 
-#: XTC 坐标量化精度：坐标（nm）× precision 后取整。10000 = 步长 1e-4 nm = 0.001 Å，
-#: 单点最大误差 5e-4 Å（旧的 1000 是 0.01 Å 步长 / 5e-3 误差，100 更粗到 0.05 Å）。
-#: 官方 Trj2Ascii 导出的是**完整 double**，所以这个步长就是"我们 vs 官方"的全部偏差。
-XTC_PRECISION = 10000.0
+#: XTC 坐标量化精度：坐标（nm）× precision 后取整。
+#: **默认 1e5** = 步长 1e-5 nm = **1e-4 Å**（单点最大误差 5e-5 Å）。
+#:
+#: 为什么是 1e5（实测 PE50-g2020，3200 原子 × 2001 帧，Rg 对 Forcite）：
+#:   精度    步长      文件      转换   读+Rg    Rg mean|Δ|   Rg max|Δ|
+#:   1e3     1e-2 Å    25.0 MB   1.1 s  0.2 s    1.07e-04     3.87e-04
+#:   1e4     1e-3 Å    33.0 MB   0.5 s  0.2 s    9.55e-06     3.22e-05
+#:   1e5     1e-4 Å    41.0 MB   0.6 s  0.3 s    1.03e-06     3.41e-06   ← 选它
+#:   1e6     1e-5 Å    49.1 MB   0.8 s  0.4 s    2.47e-07     1.15e-06
+#: 再往上加一档只多买 4 倍精度、却多花 20% 体积与读盘时间，而 1e-4 Å 的量化
+#: 对本工具的任何量（键长 1.5 Å、RDF 分箱 0.1 Å、二面角、MSD）都已经看不见 ——
+#: 残差只剩 Forcite 自己的舍入与 PBC 展开约定，属于"再准也没意义"的区间。
+#: 想要绝对无量化就用 TRR（float32，≈1e-6 Å，文件约 3 倍）。
+XTC_PRECISION = 1.0e5
 #: 想改精度可以设环境变量 ``MDTA_XTC_PRECISION``（越大越准、文件越大）。
 PRECISION_ENV = "MDTA_XTC_PRECISION"
 
@@ -232,18 +244,27 @@ def xc_precision() -> float:
 
 
 def cached_xtc(trj: str, *, fmt: str = "xtc", precision: float | None = None,
-               velocities: bool = False) -> Path:
-    """按「绝对路径 + 大小 + 修改时间 + 输出格式 + 精度」算缓存文件名。
+               velocities: bool = False, cell=None) -> Path:
+    """按「绝对路径 + 大小 + 修改时间 + 输出格式 + 精度 + 晶胞」算缓存文件名。
 
     ⚠️ 精度与格式**必须进缓存键**：以前只按路径/大小/时间，改了精度或想换 TRR
     时会直接命中旧文件，看上去"改了没生效"（实测用户遇到 0.02/0.05 Å 的旧精度
     缓存，而代码里早就是 1e-3 Å 了）。
+    ⚠️ **晶胞也要进缓存键**：`.trj` 帧头里常常没有晶胞，我们改用拓扑文件的晶胞
+    写进转换结果；老缓存是"没有盒"的版本，必须让它失效（否则仍然复现
+    "MSD/Rg 没有 PBC"的问题）。
     """
     p = Path(trj).expanduser().resolve()
     st = p.stat()
     prec = xc_precision() if precision is None else float(precision)
     fmt = "trr" if str(fmt).lower() == "trr" else "xtc"
     tag = f"{fmt}|{prec:g}|{int(bool(velocities))}"
+    if cell is not None:
+        try:
+            tag += "|cell:" + ",".join(f"{float(x):.3f}" for x in
+                                       np.asarray(cell).ravel()[:6])
+        except Exception:                                        # noqa: BLE001
+            pass
     key = hashlib.sha1(
         f"{p}|{st.st_size}|{int(st.st_mtime)}|{tag}".encode("utf-8")
     ).hexdigest()[:12]
@@ -259,13 +280,60 @@ def writer_kind() -> str:
     return _xtc_writer_kind
 
 
-def _cell6(cell) -> np.ndarray:
-    """MS 的 ``cell=(a,b,c,α,β,γ)`` → MDAnalysis 的 6 值尺寸（缺角就按 90° 补）。"""
-    c = np.asarray(cell, dtype=np.float32)
-    if c.size >= 6:
-        return c[:6]
-    if c.size == 3:
-        return np.concatenate([c[:3], np.array([90.0, 90.0, 90.0], dtype=np.float32)])
+def _cell6(cell, fallback=None) -> np.ndarray:
+    """MS 的 ``cell=(a,b,c,α,β,γ)`` → MDAnalysis 的 6 值尺寸（缺角就按 90° 补）。
+
+    ⚠️ **``.trj`` 帧头里的晶胞经常是空的**（实测 PE50-g2020：每帧的
+    ``DefCell`` 前三个是 0，只有后面的晶格矩阵有值，而 pymsdump 读出来的
+    ``fr.cell`` 是空的）。以前这里直接返回 ``[0,0,0,90,90,90]``，于是转换出来的
+    XTC/TRR **没有周期盒**：MDAnalysis 报 ``dimensions=None``，unwrap / MSD / RDF /
+    密度 / 界面全都没有 PBC —— 用户实测"Rg、MSD 跟 Forcite 差得太多"就是这个。
+    现在：帧里没有合法晶胞时退回**拓扑文件给的晶胞**（``fallback``）。
+    """
+    def _usable(v: np.ndarray) -> bool:
+        """只有「3 个棱长」或「≥6 个且角度合法」才当作有效晶胞。
+
+        ⚠️ 光看前三个数 >0 不够：MS 的 `.trj` 帧头里 ``DefCell`` 会把**晶格矩阵**
+        拆成 ``(42.6, 49.2, 120, 0, 0, 24.6, …)`` 这样的数列 —— 棱长看着都正常，
+        但 α=β=0° 是退化盒，MDAnalysis 照样报 ``dimensions=None``，
+        于是"写了盒等于没写"（实测就是这个坑）。所以角度必须落在 (1°, 179°)。
+        """
+        if v.size != 3 and v.size < 6:
+            return False
+        if not bool(np.all(np.isfinite(v[:3]))) or not bool(np.all(v[:3] > 0)):
+            return False
+        if v.size >= 6:
+            ang = np.asarray(v[3:6], dtype=float)
+            if not bool(np.all(np.isfinite(ang))):
+                return False
+            if bool(np.any(ang <= 1.0)) or bool(np.any(ang >= 179.0)):
+                return False
+            try:
+                from MDAnalysis.lib.mdamath import triclinic_vectors
+
+                m = np.asarray(triclinic_vectors(
+                    np.concatenate([np.asarray(v[:3], dtype=np.float32),
+                                    np.asarray(ang, dtype=np.float32)])), dtype=float)
+                if abs(float(np.linalg.det(m))) <= 0.0:
+                    return False
+            except Exception:                                    # noqa: BLE001
+                pass
+        return True
+
+    c = np.asarray(cell, dtype=np.float32).ravel() if cell is not None \
+        else np.zeros(0, dtype=np.float32)
+    ok = _usable(c)
+    if not ok and fallback is not None:
+        f = np.asarray(fallback, dtype=np.float32).ravel()
+        if _usable(f):
+            c = f
+            ok = True
+    if ok:
+        if c.size >= 6:
+            return c[:6].astype(np.float32)
+        if c.size == 3:
+            return np.concatenate([c[:3], np.array([90.0, 90.0, 90.0],
+                                                   dtype=np.float32)])
     return np.array([0, 0, 0, 90, 90, 90], dtype=np.float32)
 
 
@@ -284,7 +352,8 @@ def xtc_precision_digits(precision: float) -> int:
 
 
 def _write_xtc(src, out: Path, precision: float,
-               progress: Callable[[str], None] | None) -> int:
+               progress: Callable[[str], None] | None,
+               fallback_cell=None) -> int:
     """``.trj`` → XTC（只存坐标；文件小、分析最快）。
 
     **优先用 MDAnalysis 自带的 XTC 写入器**（C 扩展 libxrd / libmdaxdr）：
@@ -307,7 +376,7 @@ def _write_xtc(src, out: Path, precision: float,
         try:
             for fr in src.iter_frames(step=1):
                 ts.positions = fr.xyz
-                ts.dimensions = _cell6(fr.cell)
+                ts.dimensions = _cell6(fr.cell, fallback_cell)
                 ts.time = float(fr.time)
                 try:
                     ts.data["step"] = int(fr.step)
@@ -334,7 +403,9 @@ def _write_xtc(src, out: Path, precision: float,
     w = XTCWriter(str(out), precision=precision)
     try:
         for fr in src.iter_frames(step=1):
-            w.write(fr.xyz, fr.cell[:3], step=fr.step, time=fr.time)
+            # 纯 Python 写入器只要三条棱长；帧里没有就用拓扑晶胞的棱长
+            cell3 = _cell6(fr.cell, fallback_cell)[:3]
+            w.write(fr.xyz, cell3, step=fr.step, time=fr.time)
             n += 1
             if progress and n % 500 == 0:
                 progress(f"转换 .trj → XTC（纯 Python 兜底）：{n}/"
@@ -345,7 +416,7 @@ def _write_xtc(src, out: Path, precision: float,
 
 
 def _write_trr(src, out: Path, progress: Callable[[str], None] | None,
-               with_velocities: bool = True) -> int:
+               with_velocities: bool = True, fallback_cell=None) -> int:
     """``.trj`` → TRR（坐标，可选 **+ 速度**；float32，坐标误差 ~1e-6 Å）。
 
     为什么用 TRR：XTC 装不下速度（格式里没有这个字段），而 MS 的 ``.trj`` 里
@@ -374,7 +445,7 @@ def _write_trr(src, out: Path, progress: Callable[[str], None] | None,
             if with_velocities and fr.vel is not None:
                 ts.velocities = fr.vel
             # 盒矢量：fr.cell = (a, b, c, alpha, beta, gamma)；MDAnalysis 要 6 个值
-            ts.dimensions = _cell6(fr.cell)
+            ts.dimensions = _cell6(fr.cell, fallback_cell)
             ts.time = float(fr.time)
             try:
                 ts.data["step"] = int(fr.step)
@@ -394,7 +465,8 @@ def convert_trj(trj: str, *, fmt: str = "xtc",
                 precision: float | None = None,
                 velocities: bool | None = None,
                 progress: Callable[[str], None] | None = None,
-                force: bool = False) -> Path:
+                force: bool = False,
+                cell=None) -> Path:
     """把 ``.trj`` 转成缓存轨迹并返回路径（命中缓存就直接返回）。
 
     ``fmt``
@@ -404,6 +476,9 @@ def convert_trj(trj: str, *, fmt: str = "xtc",
         单点最大误差 5e-4 Å）。**精度与格式都参与缓存键**，改了就自动重建。
     ``velocities``
         ``fmt="trr"`` 时默认带上速度；显式给 ``False`` 可只写坐标（体积减半）。
+    ``cell``
+        **拓扑文件的晶胞**（6 值）。``.trj`` 帧里没有晶胞时（实测很常见）就用它
+        写进转换结果 —— 否则转出来的轨迹没有周期盒，MSD/RDF/密度/界面全部失去 PBC。
     """
     p = Path(trj).expanduser().resolve()
     if not p.is_file():
@@ -412,7 +487,8 @@ def convert_trj(trj: str, *, fmt: str = "xtc",
     if velocities is None:
         velocities = (fmt == "trr")
     prec = xc_precision() if precision is None else float(precision)
-    out = cached_xtc(str(p), fmt=fmt, precision=prec, velocities=velocities)
+    out = cached_xtc(str(p), fmt=fmt, precision=prec, velocities=velocities,
+                     cell=cell)
     if out.is_file() and not force and out.stat().st_size > 0:
         if progress:
             progress(f"使用已转换的缓存（{out.name}）")
@@ -441,8 +517,10 @@ def convert_trj(trj: str, *, fmt: str = "xtc",
     src = MSTrajectory(str(p))
     tmp = out.with_name(out.name + ".part")
     try:
-        n = (_write_trr(src, tmp, progress, with_velocities=bool(velocities))
-             if fmt == "trr" else _write_xtc(src, tmp, prec, progress))
+        n = (_write_trr(src, tmp, progress, with_velocities=bool(velocities),
+                        fallback_cell=cell)
+             if fmt == "trr" else _write_xtc(src, tmp, prec, progress,
+                                             fallback_cell=cell))
     except Exception as exc:                                     # noqa: BLE001
         try:
             tmp.unlink(missing_ok=True)

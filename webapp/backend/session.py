@@ -259,6 +259,9 @@ class Session:
     #: 分析正在跑时新建/改动的集合（`set:<名字>` → AtomGroup），只建不算。
     #: 它们会出现在组分候选清单里，等这一轮结束后的下一次 run 真正注册进分析器。
     _pending_sets: dict = field(default_factory=dict, repr=False)
+    #: 数据能力检测结果缓存（见 :meth:`capabilities`）
+    _caps: dict | None = field(default=None, repr=False)
+    _caps_key: tuple = field(default=(), repr=False)
 
     # ------------------------------------------------------------- 基本信息
     @property
@@ -652,7 +655,22 @@ class Session:
             "set_presets": _set_presets(az.universe, az.components),
             # 分析项能不能跑（界面据此置灰 + tooltip 说明）
             "feasible": self.feasible(),
+            "capabilities": self.capabilities(),
         }
+
+    def capabilities(self, *, refresh: bool = False) -> dict:
+        """**数据能力检测**：坐标 / 多帧轨迹 / 键连接 / 质量 / 电荷 /
+        分子归属 / 周期盒，外加 ``mode``（static / dynamic）。
+
+        只读，算一次就缓存（换体系即换 Session，缓存自然失效）。
+        """
+        from mdta.capabilities import detect
+
+        key = (id(self.az.universe), int(self.az.universe.atoms.n_atoms))
+        if refresh or self._caps is None or self._caps_key != key:
+            self._caps = detect(self.az)
+            self._caps_key = key
+        return self._caps
 
     def feasible(self, frames: Mapping[str, Any] | None = None) -> dict:
         """分析项**可行性预判**（点「开始分析」之前就把跑不了的项说清楚）。
@@ -765,6 +783,7 @@ class Session:
             "elements": _available_elements(az.universe),
             "set_presets": _set_presets(az.universe, az.components),
             "feasible": self.feasible(),
+            "capabilities": self.capabilities(),
             "note": "分析正在运行：选择已保存，将在下一次运行时生效",
         }
 
@@ -2206,13 +2225,17 @@ class SessionRegistry:
     def open(self, topology: str, trajectory: str | None = None,
              progress_token: str | None = None,
              guess_bonds: bool | None = None,
-             velocities: bool | None = None) -> Session:
+             velocities: bool | None = None,
+             autodetect: bool | None = None) -> Session:
         """打开一个体系。``progress_token`` 非空时记录加载进度供前端轮询。
 
         ``guess_bonds=True``：忽略拓扑里已有的键、按坐标重新猜。用于
         ``CONECT`` 不完整的 PDB（Material Studio 导出常见；实测某体系只有
         4393 个键、键图碎片 1203 个，重新猜键后 5953 键 / 124 个分子）。
         ``velocities=True``：读 MS 的 ``.trj`` 时把**速度**一并保留（转成 TRR）。
+        ``autodetect=False``：**不自动配对同名轨迹** —— 只给了结构文件时
+        就老老实实按单帧结构打开（否则 .xsd 同目录里有个 .xtc 就会被悄悄
+        读成六千帧的轨迹分析，用户实测踩过）。
         """
         prog: OpenProgress | None = None
         if progress_token:
@@ -2228,7 +2251,8 @@ class SessionRegistry:
         try:
             return self._open_inner(topology, trajectory, prog,
                                     guess_bonds=guess_bonds,
-                                    velocities=velocities)
+                                    velocities=velocities,
+                                    autodetect=autodetect)
         except Exception as exc:  # noqa: BLE001 - 记录失败原因后原样抛出
             if prog is not None:
                 prog.error = str(exc)
@@ -2239,7 +2263,8 @@ class SessionRegistry:
     def _open_inner(self, topology: str, trajectory: str | None,
                     prog: "OpenProgress | None",
                     guess_bonds: bool | None = None,
-                    velocities: bool | None = None) -> Session:
+                    velocities: bool | None = None,
+                    autodetect: bool | None = None) -> Session:
         if not topology:
             raise SessionError("必须提供拓扑文件；可用格式：" + _topology_help())
         if not os.path.isfile(topology):
@@ -2267,7 +2292,9 @@ class SessionRegistry:
                 f"可用轨迹格式：{_trajectory_help()}")
         try:
             mdt = load_trajectory(topology, trajectory, guess_bonds=guess_bonds,
-                                  velocities=velocities)
+                                  velocities=velocities,
+                                  **(dict() if autodetect is None
+                                     else {"autodetect": bool(autodetect)}))
         except TrajectoryError as exc:
             raise SessionError(str(exc)) from exc
 
@@ -2284,7 +2311,7 @@ class SessionRegistry:
         # `guess_bonds` 必须传给 Analyzer（它会**重新加载**拓扑）：否则校验用的
         # load_trajectory 带了参数、真正分析的这一份却没带，等于开关失效。
         az = Analyzer(topology, trajectory, guess_bonds=guess_bonds,
-                      velocities=velocities)
+                      velocities=velocities, autodetect=autodetect)
         az.auto_setup()
         _progress("识别组分与主链")
         # 体系信息在这里就算好（并缓存）：它的耗时全部来自"重复扫盘"，

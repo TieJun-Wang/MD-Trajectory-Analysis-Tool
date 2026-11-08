@@ -1289,10 +1289,14 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
     定义 ``r < cutoff`` 为发生接触，统计：
 
     - 接触对数量随时间变化
-    - - 参与接触的 A 组原子数随时间变化
+    - 参与接触的 A 组原子数随时间变化
     - 最小原子间距随时间变化
-    - 平均接触数、接触概率（至少存在一次接触的帧比例）
-    - 单个 A 组原子的接触概率分布
+    - 平均接触数、接触概率（只进**摘要**，不再画逐原子柱图 —— 用户要求）
+    - 接触对占据率（持续性，只进摘要）与接触矩阵（A×B 二维热力图）
+    - 配位数分布（瞬时接触数的直方图）
+
+    ``top_n`` 是旧版"逐原子柱状图画前 N 个"的参数，逐原子图删掉后不再生效，
+    保留仅为兼容已保存的参数。
 
     同组 vs 异组（重要）
     --------------------
@@ -1367,6 +1371,15 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
     occ_key: np.ndarray | None = None
     occ_cnt: np.ndarray | None = None
     nb_u = int(mdt.universe.atoms.n_atoms)
+    # **接触矩阵**（A×B）：原子数可能上万，直接画矩阵既看不清也传不动，
+    # 所以按原子序号**分块**统计"每帧每对块之间的平均接触数"。
+    # 块数上限 48，保证前端热力图 ≤48×48。
+    _nb = 48
+    n_ba = int(min(_nb, max(1, na)))
+    n_bb = int(min(_nb, max(1, nb)))
+    bin_a = np.minimum((np.arange(na) * n_ba) // max(na, 1), n_ba - 1)
+    bin_b = np.minimum((np.arange(nb) * n_bb) // max(nb, 1), n_bb - 1)
+    mat = np.zeros((n_ba, n_bb), dtype=float)
 
     for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
         pa = np.asarray(group_a.positions, dtype=float)
@@ -1408,6 +1421,13 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
                 np.add.at(contact_sum, np.asarray(pairs[:, 1], dtype=np.int64), 1.0)
             else:
                 np.add.at(contact_sum, np.asarray(pairs[:, 0], dtype=np.int64), 1.0)
+            # 接触矩阵：把每帧的接触对按块累加（同组时两个端点都在 A，
+            # 就对称地算两次，避免只填上三角）
+            _pa = bin_a[np.asarray(pairs[:, 0], dtype=np.int64)]
+            _pb = bin_b[np.asarray(pairs[:, 1], dtype=np.int64)]
+            np.add.at(mat, (_pa, _pb), 1.0)
+            if same:
+                np.add.at(mat, (_pb, _pa), 1.0)
             # 瞬时配位数（复用同一批配对，零额外距离计算）
             _i0 = np.asarray(pairs[:, 0], dtype=np.int64)
             cnt = np.bincount(_i0, minlength=na)
@@ -1464,11 +1484,10 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
     res.panels = [
         Panel(xlabel=tlabel, ylabel="接触数", title="接触数随时间变化"),
         Panel(xlabel=tlabel, ylabel="最小原子间距 (Å)", title="最小原子间距随时间变化"),
-        Panel(xlabel="A 组原子序号（按接触数降序）", ylabel="平均接触数",
-              title="各原子的平均接触数（每个原子平均接触到几个 B 原子）"),
+        # **接触矩阵**（A×B，按原子序号分块）：静态模式下的主力图
+        Panel(xlabel="B 组原子（按序号分块）", ylabel="A 组原子（按序号分块）",
+              title="接触矩阵（每帧平均接触数）", heatmap=True),
         Panel(xlabel="接触对数", ylabel="频数", title="接触对数分布"),
-        Panel(xlabel="A 组原子序号（按接触概率降序）", ylabel="接触概率",
-              title="各原子的接触概率"),
     ]
     res.add_curve("接触对数", tx, n_pairs, panel=0)
     res.add_curve(f"参与接触的 A 组原子数 (共 {na})", tx, n_atoms_a, panel=0)
@@ -1495,13 +1514,11 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
             "（最小原子间距恒为 0），把接触对数翻倍，而且实测慢 5～7 倍。"
         )
 
-    # ------------------------------------------------ 单原子：平均接触数（主指标）
+    # ------------------------------------------------ 单原子：平均接触数（**只进摘要**）
+    # 用户要求（1.0.4）：「各原子的平均接触数」「各原子的接触概率」这两张逐原子柱状图
+    # 删掉 —— 它们是"上万个原子按接触数排序"的柱图，图上看不出结构，还占大量传参；
+    # 有区分度的信息留在摘要里（均值 / 中位数 / 最大值 / 0 接触原子数…）。
     per_atom = contact_sum / float(n) if n else contact_sum
-    order_c = np.argsort(-per_atom)
-    nshow = int(top_n) if top_n and top_n > 0 else min(na, 400)
-    show_c = order_c[:nshow]
-    res.add_curve("平均接触数", np.arange(1, nshow + 1), per_atom[show_c],
-                  kind="bar", panel=2)
     res.summary["平均接触数（每个 A 组原子）"] = (float(np.mean(per_atom))
                                             if per_atom.size else float("nan"))
     res.summary["单原子平均接触数 中位数"] = (float(np.median(per_atom))
@@ -1510,12 +1527,8 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
                                         if per_atom.size else float("nan"))
     res.summary["平均接触数为 0 的 A 组原子数"] = int(np.sum(per_atom == 0))
 
-    # ------------------------------------------------ 单原子：接触概率（辅助指标）
+    # ------------------------------------------------ 单原子：接触概率（**只进摘要**）
     prob = hit_count / float(n) if n else hit_count
-    order = np.argsort(-prob)
-    show = order[:min(nshow, prob.size)]
-    res.add_curve("接触概率", np.arange(1, show.size + 1), prob[show],
-                  kind="bar", panel=4)
     res.summary["原子接触概率平均值"] = float(np.mean(prob)) if prob.size else float("nan")
     res.summary["接触概率 > 0 的 A 组原子数"] = int(np.sum(prob > 0))
     res.summary["完全无接触的 A 组原子数"] = int(np.sum(prob == 0))
@@ -1560,13 +1573,8 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
             res.summary[f"最持久接触对 #{rank}"] = (
                 f"{_atom_label(ra)} – {_atom_label(rb)}"
                 f"  占据率 {occ[idx]:.3f}")
-        # 占据率分布
-        e = np.linspace(0.0, 1.0, 21)
-        h, _ = np.histogram(occ, bins=e)
-        res.panels.append(Panel(xlabel="接触对占据率", ylabel="接触对数",
-                                title="接触对占据率分布（持续存在的配对）"))
-        res.add_curve("占据率分布", bin_edges_to_centers(e), h.astype(float),
-                      kind="bar", panel=5)
+        # 「占据率分布」面板已按用户要求删除：占据率本身仍在摘要里
+        # （平均值 / 始终接触的接触对数 / 最持久接触对），只是不再单独画分布图。
         res.add_notes(
             f"接触对占据率 = 某一对 (i∈A, j∈B) 处于接触的帧数 / 总帧数，"
             f"共出现 {n_pairs_seen:,} 个不同的接触对，平均占据率 "
@@ -1623,6 +1631,30 @@ def analyze_contacts(mdt, group_a, group_b, selection: FrameSelection, *,
         res.add_notes(
             "该组分对的全部原子对都属于**同一个分子**，分子间接触恒为空："
             "若要看分子内的接触，请把配对模式改成 intra。")
+    # ------------------------------------------------ 接触矩阵（A×B 二维热力图）
+    if mat.size and float(mat.sum()) > 0:
+        # 每帧平均接触数；块中心用原子序号（1 基）表示"这一段原子"
+        z = mat / max(int(n), 1)
+        cx = (np.arange(n_bb) + 0.5) * (nb / max(n_bb, 1)) + 0.5
+        cy = (np.arange(n_ba) + 0.5) * (na / max(n_ba, 1)) + 0.5
+        res.heatmaps.append({
+            "panel": 2,                     # 与上面的 heatmap 面板对齐            "title": f"接触矩阵（{n_ba}×{n_bb} 分块，每帧平均接触数）",
+            "xlabel": f"B 组原子序号（1–{nb}，按序号分 {n_bb} 块）",
+            "ylabel": f"A 组原子序号（1–{na}，按序号分 {n_ba} 块）",
+            "x": [float(v) for v in cx],
+            "y": [float(v) for v in cy],
+            "z": [[float(v) for v in row] for row in z],
+            "vmin": 0.0,
+            "vmax": float(z.max()),
+            "note": ("每个格 = 这一段 A 原子与这一段 B 原子之间的**每帧平均接触对数**"
+                     f"（判据 distance < {cutoff:g} Å）。原子数太多时按序号分块，"
+                     "块内取平均，所以格值不是整数。"),
+        })
+        res.summary["接触矩阵最大格值"] = float(z.max())
+        res.add_notes(
+            f"「接触矩阵」按原子序号把 A 组分成 {n_ba} 段、B 组分成 {n_bb} 段，"
+            "每格是该段之间的**每帧平均接触对数**。它是静态模式下判断"
+            "「哪一段贴着哪一段」的主图（曲线表达不了二维关系）。")
     res.add_notes(f"A 组 {na} 个原子，B 组 {nb} 个原子，统计 {n} 帧。")
     res.add_notes(
         "「平均接触数」= 该原子在每一帧接触到的 B 原子数，对帧取平均；"

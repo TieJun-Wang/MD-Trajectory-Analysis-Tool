@@ -29,6 +29,10 @@ class Panel:
     xscale: str = "linear"
     yscale: str = "linear"
     legend: bool = True
+    #: **极坐标图**（角度分布）：前端用 polar + angleAxis 画
+    polar: bool = False
+    #: 这张面板是**二维热力图**（数据在 ``AnalysisResult.heatmaps`` 里）
+    heatmap: bool = False
 
 
 @dataclass
@@ -44,6 +48,9 @@ class Curve:
     #: 空串 = 该面板只有一个系列；非空且同面板出现多个 group 时，前端默认只显示
     #: 第一个对象，其余靠图例勾选（用户要求：别把两个对象全堆在一张图上）。
     group: str = ""
+    #: 自适应可视化引擎的判定：``{type, chart, stats, note, bins, xrange}``。
+    #: 由 :func:`mdta.autoviz.annotate_curves` 在分析结束后填，前端据此选图型。
+    viz: dict | None = None
 
     def __post_init__(self) -> None:
         self.x = np.asarray(self.x, dtype=float)
@@ -79,6 +86,10 @@ class AnalysisResult:
     #: 结束时按 summary/notes 自动导出（分析内部也可用 :meth:`add_check` 直接登记）。
     #: 它把原本散落在 50 多处判据里的"这个数还能不能用"变成**可展示、可导出**的结论。
     checks: list[dict] = field(default_factory=list)
+    #: **二维热力图**数据：``[{"panel", "title", "xlabel", "ylabel",
+    #: "x", "y", "z", "note"}]``。``z`` 是 ``len(y) × len(x)`` 的二维表。
+    #: 走单独一条通道而不是硬塞进 Curve（曲线是 (x,y) 对，表达不了矩阵）。
+    heatmaps: list[dict] = field(default_factory=list)
 
     # ---------------------------------------------------------------- 构造
     def add_curve(

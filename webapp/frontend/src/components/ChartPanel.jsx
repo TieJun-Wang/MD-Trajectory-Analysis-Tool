@@ -169,44 +169,41 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
           <>
             <div className="charthead">
               <div>
-                <div className="charttitle">{current.title}</div>
-                <div className="chartsub">
-                  第 {panelIndex + 1} / {current.panels.length} 张
-                  {/* 坐标轴尺度：原来只写「对数轴」。现在只在单条曲线被单独选中时
-                      才由 chartOption 自适应（见下），所以这里把两种情形都写清楚。 */}
-                  {(() => {
-                    const pn = current.panels[panelIndex] || {}
-                    const lx = pn.xscale === 'log'
-                    const ly = pn.yscale === 'log'
-                    if (lx && ly) return ' · 对数轴'
-                    if (lx) return ' · 对数轴（仅横轴）'
-                    if (ly) return ' · 对数轴（仅纵轴）'
-                    return ''
-                  })()}
-                  {solo
-                    ? ` · 单曲线自适应（横轴${solo.xscale === 'log' ? '对数' : '线性'}、`
-                      + `纵轴${solo.yscale === 'log' ? '对数' : '线性'}）`
-                    : ''}
-
-                  {/* 点数与抽稀状态：让"图上有多少点"一眼可见（后端默认不抽稀） */}
-                  {(() => {
-                    const cs = current.curves.filter((c) => c.panel === panelIndex)
-                    if (!cs.length) return null
-                    const nmax = Math.max(...cs.map((c) => (c.x ? c.x.length : 0)))
-                    const ds = cs.some((c) => c.downsampled)
-                    return ` · ${nmax.toLocaleString()} 点${ds ? '（已抽稀）' : '（未抽稀）'}`
-                  })()}
-                  {/* 一张图里有多个对象（多个组分 / 集合）时，图表默认只显示
-                      第一个，其余在图例里点开 —— 这里把这件事说出来，
-                      否则用户会以为"第二个组分没算"。 */}
-                  {(() => {
-                    const cs = current.curves.filter((c) => c.panel === panelIndex)
-                    const gs = [...new Set(cs.map((c) => c.group).filter(Boolean))]
-                    return gs.length > 1
-                      ? ` · ${gs.length} 个对象（默认只画「${gs[0]}」，其余点图例打开）`
-                      : ''
-                  })()}
-                  {isFs ? ' · 全屏中（Esc 退出）' : ''}
+                {/* 用户要求：标题下方不再有小字。原来那串「第 k/n 张 · 对数轴 ·
+                    N 点 · 多个对象 · 单帧…」全部挪进标题的悬浮提示，需要时悬停即见。 */}
+                <div className="charttitle"
+                     title={(() => {
+                       const parts = [`第 ${panelIndex + 1} / ${current.panels.length} 张`]
+                       const pn = current.panels[panelIndex] || {}
+                       const lx = pn.xscale === 'log'
+                       const ly = pn.yscale === 'log'
+                       if (lx && ly) parts.push('对数轴')
+                       else if (lx) parts.push('对数轴（仅横轴）')
+                       else if (ly) parts.push('对数轴（仅纵轴）')
+                       if (solo) {
+                         parts.push(`单曲线自适应（横轴${solo.xscale === 'log'
+                           ? '对数' : '线性'}、纵轴${solo.yscale === 'log'
+                           ? '对数' : '线性'}）`)
+                       }
+                       const cs = current.curves.filter((c) => c.panel === panelIndex)
+                       if (cs.length) {
+                         const nmax = Math.max(...cs.map((c) => (c.x ? c.x.length : 0)))
+                         parts.push(`${nmax.toLocaleString()} 点`
+                           + (cs.some((c) => c.downsampled) ? '（已抽稀）' : '（未抽稀）'))
+                         const gs = [...new Set(cs.map((c) => c.group).filter(Boolean))]
+                         if (gs.length > 1) {
+                           parts.push(`${gs.length} 个对象（默认只画「${gs[0]}」，`
+                             + '其余点图例打开）')
+                         }
+                       }
+                       if (current.meta && current.meta.single_frame) {
+                         parts.push(`单帧（${current.meta.n_frames ?? 1} 帧）：`
+                           + '只出静态分布图，随时间变化的面板已省略')
+                       }
+                       if (isFs) parts.push('全屏中（Esc 退出）')
+                       return parts.join(' · ')
+                     })()}>
+                  {current.title}
                 </div>
               </div>
               <div className="charttools">

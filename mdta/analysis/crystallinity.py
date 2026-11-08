@@ -364,8 +364,6 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
     mean_dir = np.nanmean(dirs, axis=0)
     if np.linalg.norm(mean_dir) > 0:
         mean_dir = mean_dir / np.linalg.norm(mean_dir)
-    # 取向矢方向可差一个正负号，统一到与平均方向同向
-    dirs_aligned = dirs * np.sign(dirs @ mean_dir)[:, None]
 
     tx, tlabel = time_axis(times)
     res = AnalysisResult(
@@ -378,10 +376,9 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
     )
     res.panels = [
         Panel(xlabel=tlabel, ylabel="取向参数", title="取向参数随时间变化"),
+        # 角度分布：**普通直角坐标**（用户后续要求删掉极坐标图）
         Panel(xlabel="链段与平均取向矢的夹角 θ (°)", ylabel="概率密度 P(θ)",
               title="链段取向分布"),
-        Panel(xlabel=tlabel, ylabel="取向矢分量",
-              title="取向矢 (director) 随时间变化"),
     ]
     res.add_curve("S (二阶取向张量最大本征值)", tx, S_t, panel=0)
     res.add_curve("二阶序参数 P2 (相对参考轴)", tx, p2_t, panel=0)
@@ -406,8 +403,9 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
             res.summary["完全无序参考值 <cos²θ>"] = 1.0 / 3.0
             res.summary["实测 <cos²θ>"] = float(np.mean(cos_all ** 2))
 
-    for i, comp in enumerate("xyz"):
-        res.add_curve(f"director {comp}", tx, dirs_aligned[:, i], panel=2)
+    # 「取向矢 (director) 随时间变化」那张图**已删**（用户要求，1.0.4）：
+    # 三条 x/y/z 分量曲线挤在一起、还带符号跳变（本征矢方向不定），看不出物理量；
+    # 趋势已由 S(t)/P2(t) 表达，时间平均的取向矢仍在摘要里（见下）。
 
     res.summary.update(describe_array(S_t, prefix="S "))
     _bm, sem = block_average(S_t, n_blocks=min(5, max(2, n_f // 2)))

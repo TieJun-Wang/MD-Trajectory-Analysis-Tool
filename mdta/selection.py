@@ -260,12 +260,36 @@ def _fragments(universe) -> list:
     注意：不能用 ``list(u.atoms.residues)`` 兜底 —— 那返回的是
     :class:`MDAnalysis.core.groups.Residue`，没有 ``n_atoms`` / ``positions``，
     会让下游分析全部报 ``Residue has no attribute n_atoms``。
+
+    ⚠️ **不用** ``u.atoms.fragments``：它第一次调用要建整张 ``_fragdict``，
+    AdK（47 681 原子）实测 ~2 s，而打开体系时 `largest_chains` 和
+    `list_chains` 各要调一次。改成自己按键表并查集（0.29 s）并把结果缓存
+    在 Universe 上，两个调用只算一遍。实测单读 .tpr 从 4.6 s 降到 ~3 s。
     """
     u = universe
+    cached = getattr(u, "_mdta_fragments_cache", None)
+    if cached is not None:
+        return cached
     try:
         if len(u.bonds) > 0:               # NoDataError 表示没有 bonds 属性
-            frags = list(u.atoms.fragments)
+            import numpy as _np
+
+            from .topology import bond_components
+
+            n = int(u.atoms.n_atoms)
+            comp = bond_components(
+                n, _np.asarray(u.bonds.indices, dtype=_np.int64))
+            order = _np.argsort(comp, kind="stable")
+            cs = comp[order]
+            starts = _np.flatnonzero(_np.r_[True, cs[1:] != cs[:-1]])
+            ends = _np.r_[starts[1:], n]
+            frags = [u.atoms[order[s:e]]
+                     for s, e in zip(starts.tolist(), ends.tolist())]
             if frags:
+                try:
+                    u._mdta_fragments_cache = frags
+                except Exception:                            # noqa: BLE001
+                    pass
                 return frags
     except Exception:  # noqa: BLE001
         pass

@@ -110,7 +110,8 @@ export default function OpenPanel({ onOpened, log }) {
       stopStream = () => {}                     // 订阅失败也不该阻断打开
     }
     try {
-      const data = await api.open(topology, trajectory, token, false, keepVel)
+      const data = await api.open(topology, trajectory, token, false,
+                                  keepVel, false)
       log?.(`体系已打开: sid=${data.sid}, ${data.info?.n_atoms ?? '?'} 原子, `
         + `${data.info?.n_frames ?? '?'} 帧（用时 ${((Date.now() - t0) / 1000).toFixed(1)} s）`)
       const notes = data.load_notes || []
@@ -253,6 +254,9 @@ function fmtElapsed(sec) {
           同时保留速度数据（.trj → TRR，文件约 6 倍大）
         </label>
       )}
+
+      {/* 「自动配对同名轨迹」开关已按用户要求删掉：固定为**只按选中的文件**读。
+          要跑动力学就把轨迹放进「轨迹」槽。 */}
 
       <button className="primary mt6" onClick={open} disabled={busy || !topology}>
         {busy ? '正在读取…' : '读取体系'}

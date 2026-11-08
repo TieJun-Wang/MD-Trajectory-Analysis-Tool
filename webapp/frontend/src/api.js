@@ -83,17 +83,24 @@ export const api = {
 
   /** 打开体系（读取拓扑/轨迹），返回 sid 与体系信息（含 load_notes 加载诊断） */
   open: (topology, trajectory, progressToken, guessBonds = false,
-         velocities = false) =>
+         velocities = false, autodetect = false) =>
     request('/session', {
       method: 'POST',
       // progress_token 走**请求体**（后端从 payload 取）；前端在 POST 进行中
       // 并发轮询 /session/open/progress?token= 显示文件读取进度
       // guess_bonds=true：忽略拓扑里已有键、按坐标重猜（CONECT 不完整的 PDB）
+      // ⚠️ 未勾选时发 **null**（= 用加载器的默认策略），不是 false：
+      //    false 会让后端去做"键表残缺"体检（数碎片），.tpr 这类力场拓扑本来
+      //    键表就是权威的，体检既慢（AdK 光这一步 2 s）又会在几十万原子的
+      //    体系上吃光内存（用户实测卡在「读取」），还会把力场键表误判成残缺。
       // velocities=true：MS 的 .trj 转 TRR 时把速度一起存下来（XTC 装不下速度）
+      // autodetect=true：**自动配对同名轨迹**（.xsd↔.xtc/.trj、.tpr↔.xtc…）。
+      //   默认 false —— 只选了结构文件时按单帧结构打开，不偷偷带上轨迹
       body: JSON.stringify({ topology, trajectory: trajectory || null,
         progress_token: progressToken || null,
-        guess_bonds: guessBonds === true,
-        velocities: velocities === true }),
+        guess_bonds: guessBonds === true ? true : null,
+        velocities: velocities === true,
+        autodetect: autodetect === true }),
     }),
 
   info: (sid) => request(`/session/${sid}/info`),
@@ -145,6 +152,11 @@ export const api = {
     request(`/session/${sid}/selection`, {
       method: 'POST', body: JSON.stringify({ name, indices, from }),
     }),
+
+  /** 数据能力检测：坐标 / 多帧轨迹 / 键连接 / 质量 / 电荷 / 分子归属 / 周期盒
+   *  （外加 mode：static / dynamic）。不靠文件后缀，直接看体系里有什么。 */
+  capabilities: (sid, refresh = false) =>
+    request(`/session/${sid}/capabilities?refresh=${refresh ? 1 : 0}`),
 
   /** 分析项可行性预判（界面据此把跑不了的项置灰 + 说明原因）。
    *  必须带上当前**帧选择** —— 把最大帧数设成 1 或时间窗收窄后，MSD 就跑不了。 */

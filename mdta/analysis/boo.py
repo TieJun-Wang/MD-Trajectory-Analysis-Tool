@@ -451,8 +451,7 @@ def analyze_crystal_regions(mdt, ag, selection: FrameSelection, *,
               "cutoff_Å": round(float(cut), 3), "n_frames": n_f},
     )
     res.panels = [Panel(xlabel=tlabel, ylabel="结晶分数 φ_c", title="晶区原子占比随时间"),
-                  Panel(xlabel=tlabel, ylabel="最大晶簇原子数", title="最大晶簇尺寸随时间"),
-                  Panel(xlabel="ln t", ylabel="ln(−ln(1−X))", title="Avrami 图")]
+                  Panel(xlabel=tlabel, ylabel="最大晶簇原子数", title="最大晶簇尺寸随时间")]
     if note_sub:
         res.add_notes(note_sub)
     res.add_curve("结晶分数 φ_c", tx, phi, kind="line", panel=0)
@@ -479,11 +478,9 @@ def analyze_crystal_regions(mdt, ag, selection: FrameSelection, *,
         for k2, v2 in av.items():
             res.summary[f"Avrami {k2}" if k2 != "可拟合" else "Avrami 是否可拟合"] = v2
         if av.get("可拟合"):
-            xs = (phi - fin[0]) / max(fin[-1] - fin[0], 1e-9)
-            xs = np.clip(xs, 1e-6, 1 - 1e-6)
-            tt = np.where(times > 0, times, np.nan)
-            res.add_curve("Avrami 线性化", np.log(tt), np.log(-np.log(1 - xs)),
-                          kind="scatter", panel=2)
+            # 「Avrami 图」（ln t vs ln(−ln(1−X))）**已删**（用户要求，1.0.4）：
+            # 这张线性化图只有当体系真的处在结晶生长期、且 X 覆盖足够区间时才有意义，
+            # 其余情况是一堆散点，属于冷门图。n / k / R² 仍进摘要与说明。
             res.add_notes(
                 f"Avrami 拟合：n = {av['Avrami 指数 n']}，k = "
                 f"{av['速率常数 k (1/ns^n)']:.3g} 1/ns^n，R² = {av['R²']}"

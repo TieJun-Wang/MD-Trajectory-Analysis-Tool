@@ -976,6 +976,43 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
             res.add_notes(
                 "分子间 Rg 的相对离散度超过 30%，说明体系里各分子的链尺寸差别很大"
                 "（存在不同聚合度/构象亚群），只报一个平均值会掩盖这种多分散性。")
+        # ---- **谁把逐分子平均拉上去了**（用户实测踩过）：集合里只要混进少数
+        #      超大分子（石墨片、整块材料、交联网络…），逐分子平均就会被它们主导 ——
+        #      例如"元素 C"集合同时选中 50 条 C10H22（Rg≈2.94 Å）与 2 个 800 原子
+        #      石墨片（Rg≈20 Å）时，平均值是 3.60 Å 而不是 2.94 Å。Forcite 那边如果
+        #      没选石墨，比出来的差就是**选择不同**，不是算错。这里直接把元凶点名。
+        try:
+            _msizes = np.asarray([len(s) for s in slices], dtype=int) if slices \
+                else (np.bincount(groups.inv) if groups is not None else None)
+            _med = float(np.nanmedian(mol_mean[ok])) if ok.any() else float("nan")
+            res.summary["单分子 Rg 中位 (Å)"] = _med
+            if ok.any() and _med > 0:
+                _big = np.flatnonzero(ok & (mol_mean > 2.0 * _med))
+                if _big.size:
+                    res.summary["比单分子 Rg 中位大 2 倍以上的分子数"] = int(_big.size)
+                    _names = []
+                    for _k in _big[:6]:
+                        _nm = ""
+                        try:
+                            _ia = int(np.flatnonzero(groups.inv == _k)[0])
+                            _ri = int(np.asarray(u.atoms.resindices)[_ia])
+                            _nm = str(np.asarray(u.residues.resnames)[_ri])
+                        except Exception:                        # noqa: BLE001
+                            _nm = ""
+                        _na = int(_msizes[_k]) if _msizes is not None and _k < _msizes.size else 0
+                        _names.append(f"{_nm or '分子'} #{int(_k) + 1}"
+                                      f"（{_na:,} 原子，Rg {mol_mean[_k]:.2f} Å）")
+                    res.add_notes(
+                        f"⚠️ 这个集合里有 **{_big.size} 个分子明显比其它大**"
+                        f"（Rg 超过单分子中位数 {_med:.2f} Å 的 2 倍）："
+                        + "；".join(_names)
+                        + "。逐分子平均是**等权平均**，这些大分子会把结果拉高"
+                        "（用户实测：C 元素集合里混进 2 片 800 原子石墨时，"
+                        "逐分子平均从 2.94 Å 变成 3.60 Å）。要和 Materials Studio "
+                        "Forcite 的结果对比，请确认**两边选中的分子一致** —— "
+                        "例如把石墨/刚性片层排除，只留聚合物链。")
+        except Exception:                                    # noqa: BLE001
+            pass          # 诊断信息失败不影响 Rg 结果本身
     elif want_mol:
         res.summary["统计口径"] = "分子 / 链（该组即 1 个分子，逐分子 Rg = 该分子的 Rg）"
         res.add_notes(
@@ -1165,13 +1202,9 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
         okm = np.isfinite(per_mol)
         res.summary["单链 R_ee 平均 (Å)"] = float(np.mean(per_mol[okm])) if okm.any() else float("nan")
         res.summary["单链 R_ee 标准差 (Å)"] = float(np.std(per_mol[okm])) if okm.any() else float("nan")
-        order = np.argsort(np.where(okm, per_mol, np.inf))
-        n_draw = min(int(max_molecules_drawn), n_pair)
-        res.panels.append(Panel(xlabel="链序号（按平均 R_ee 升序）", ylabel="平均 R_ee (Å)",
-                                title="各链的平均端到端距离"))
-        res.add_curve("各链平均 R_ee", np.arange(1, n_draw + 1),
-                      np.where(okm, per_mol, np.nan)[order[:n_draw]],
-                      kind="bar", panel=2)
+        # 「各链的平均端到端距离」逐链柱状图**已删**（用户要求，1.0.4）：
+        # 单条链的 R_ee 涨落远大于差别，按序排开的柱图只是噪声，冷门且占版面；
+        # 有意义的"单链 R_ee 平均/标准差"仍在摘要里。
 
     for nt in notes:
         res.add_notes(nt)
@@ -1289,7 +1322,6 @@ def analyze_dihedrals(mdt, ag, selection: FrameSelection, *,
     res.panels = [
         Panel(xlabel="二面角 φ (°)", ylabel="概率密度 P(φ)", title="二面角分布"),
         Panel(xlabel=tlabel, ylabel="构象比例", title="trans / gauche 构象比例随时间变化"),
-        Panel(xlabel=tlabel, ylabel="二面角 φ (°)", title="部分二面角随时间变化"),
     ]
 
     # ---- 2. 分布
@@ -1325,12 +1357,10 @@ def analyze_dihedrals(mdt, ag, selection: FrameSelection, *,
         res.summary["trans 比例（时间平均）"] = float(np.nanmean(trans_t))
         res.summary["trans 比例标准差"] = float(np.nanstd(trans_t, ddof=1)) if times.size > 1 else 0.0
 
-    # ---- 4. 部分二面角随时间
+    # ---- 4. 部分二面角随时间：**已删**（用户要求，1.0.4）
+    # 原来画 max_series 根"按序号均匀挑出来的"二面角曲线 —— 挑哪几根没有物理含义，
+    # 曲线又挤在一起，属于冷门图。二面角总数/帧数仍进摘要。
     if series.shape[1]:
-        nshow = int(min(max_series, series.shape[1]))
-        show = np.linspace(0, series.shape[1] - 1, nshow).round().astype(int)
-        for j in show:
-            res.add_curve(f"二面角 #{j + 1}", tx, series[:, j], panel=2)
         res.summary["二面角总数"] = int(series.shape[1])
         res.summary["二面角帧数"] = int(times.size)
 

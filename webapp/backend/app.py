@@ -175,10 +175,16 @@ def open_session(payload: Mapping[str, Any] = Body(...)) -> dict:
     # `velocities=True`：读 Materials Studio 的 .trj 时**连带保留速度**
     # （转成 TRR；XTC 格式装不下速度，文件约为 XTC 的 5~6 倍）
     vel = payload.get("velocities")
+    # `autodetect`：是否**自动配对同名轨迹**。Web 端默认 **关**：用户只选了
+    # 一个结构文件时不该悄悄把同目录的轨迹也读进来（那样"只看结构"会变成
+    # 几千帧的轨迹分析）。想要自动配对就在界面上勾「自动配对同名轨迹」。
+    auto = payload.get("autodetect")
+    autodetect = bool(auto) if auto is not None else False
     velocities = bool(vel) if vel is not None else None
     try:
         sess = registry.open(top, traj, progress_token=token,
-                             guess_bonds=guess_bonds, velocities=velocities)
+                             guess_bonds=guess_bonds, velocities=velocities,
+                             autodetect=autodetect)
     except SessionError as exc:
         raise _fail(exc) from exc
     return {
@@ -341,6 +347,21 @@ def session_query(sid: str, expr: str = "", limit: int = 400000) -> dict:
 
 
 # ------------------------------------------- 分子 / 聚合物链识别（结构层级）
+@app.get("/api/session/{sid}/capabilities")
+def session_capabilities(sid: str, refresh: bool = False) -> dict:
+    """数据能力检测：坐标 / 多帧轨迹 / 键连接 / 质量 / 电荷 / 分子归属 / 周期盒。
+
+    另外给出 `mode`：`static`（只单帧结构，只能做结构/空间分布/构象统计）或
+    `dynamic`（有轨迹，可做时间演化与动力学）。
+    """
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.capabilities(refresh=bool(refresh))
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
 @app.get("/api/session/{sid}/feasible")
 def session_feasible(sid: str) -> dict:
     """分析项可行性预判：`{项: {ok, level, reason}}`（界面据此置灰 + 提示）。"""

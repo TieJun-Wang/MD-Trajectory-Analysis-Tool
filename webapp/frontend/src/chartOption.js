@@ -72,6 +72,19 @@ export function pickScaleByData(values, preferLog) {
 }
 
 /** 轴范围：线性留 2% 余量、对数按比例扩一点，保证首末点都在画布内。 */
+/** 坐标刻度：把 3.27e-9 这种"一串零"压成 3.27×10⁻⁹，短而清楚。 */
+const SUP = { '-': '⁻', 0: '⁰', 1: '¹', 2: '²', 3: '³', 4: '⁴',
+  5: '⁵', 6: '⁶', 7: '⁷', 8: '⁸', 9: '⁹' }
+export function fmtSci(v) {
+  const n = Number(v)
+  if (!Number.isFinite(n)) return String(v)
+  const a = Math.abs(n)
+  if (a === 0 || (a >= 0.01 && a < 10000)) return String(Number(n.toPrecision(4)))
+  const [m, e] = n.toExponential(2).split('e')
+  const exp = String(Number(e)).split('').map((ch) => SUP[ch] || ch).join('')
+  return `${Number(m)}×10${exp}`
+}
+
 function axisBounds(r, scale) {
   if (!r) return {}
   if (scale === 'log') {
@@ -94,10 +107,153 @@ function axisBounds(r, scale) {
  * @param {string[]|null} visible 图例里当前可见的曲线名；只留下 1 条时
  *        按那条曲线自适应坐标（轴型），传 null/undefined = 全部可见
  */
+/**
+ * **二维热力图**：接触矩阵 / 空间热力图。
+ *
+ * 数据来自 `result.heatmaps`（后端单独一条通道）：`x` / `y` 是格中心，
+ * `z[j][i]` 是第 j 行第 i 列的值。曲线表达不了"矩阵"，所以不硬塞进 series.data。
+ */
+function buildHeatmapOption(result, panel, heat) {
+  const xs = (heat.x || []).map(Number)
+  const ys = (heat.y || []).map(Number)
+  const z = heat.z || []
+  const data = []
+  for (let j = 0; j < ys.length; j += 1) {
+    for (let i = 0; i < xs.length; i += 1) {
+      const v = Number((z[j] || [])[i])
+      if (Number.isFinite(v)) data.push([i, j, v])
+    }
+  }
+  const vmax = Number.isFinite(Number(heat.vmax)) ? Number(heat.vmax) : undefined
+  return {
+    title: {
+      text: panel.title || heat.title || result.title,
+      left: 'center', top: 6,
+      textStyle: { fontSize: 15, fontWeight: 600, color: '#1f2733' },
+    },
+    tooltip: {
+      confine: true,
+      formatter: (p) => {
+        const [i, j] = p.data
+        return `${heat.xlabel || 'x'} ≈ ${xs[i]?.toPrecision(4)}\n`
+          + `${heat.ylabel || 'y'} ≈ ${ys[j]?.toPrecision(4)}\n`
+          + `值 = ${Number(p.data[2]).toPrecision(4)}`
+      },
+    },
+    grid: { left: 18, right: 58, top: 66, bottom: 84, containLabel: true },
+    xAxis: {
+      type: 'category', name: heat.xlabel || panel.xlabel || '',
+      nameLocation: 'middle', nameGap: 32,
+      nameTextStyle: { fontSize: 12, color: '#374151' },
+      data: xs.map((v) => Number(v).toPrecision(3)),
+      axisLabel: { fontSize: 10, hideOverlap: true },
+      splitArea: { show: false },
+    },
+    yAxis: {
+      type: 'category', name: heat.ylabel || panel.ylabel || '',
+      // 与折线图一致：纵轴名称水平放在轴顶端，避免被推到画布外
+      nameLocation: 'end', nameGap: 12, nameRotate: 0,
+      nameTextStyle: { fontSize: 12, color: '#374151', align: 'left',
+        verticalAlign: 'bottom' },
+      data: ys.map((v) => Number(v).toPrecision(3)),
+      axisLabel: { fontSize: 10, hideOverlap: true },
+    },
+    visualMap: {
+      min: 0, max: vmax || undefined, calculable: true,
+      orient: 'vertical', right: 4, top: 'middle',
+      itemHeight: 120, textStyle: { fontSize: 10 },
+      inRange: { color: ['#eef2ff', '#93c5fd', '#3b82f6', '#1e3a8a'] },
+    },
+    toolbox: {
+      right: 14, top: 8, itemSize: 14,
+      feature: {
+        saveAsImage: { title: '保存图片', pixelRatio: 2,
+          name: `${result.name}_${Number(panel && panel.index) + 1 || 1}_matrix` },
+        restore: { title: '重置' },
+      },
+    },
+    series: [{
+      name: heat.title || '矩阵', type: 'heatmap', data,
+      emphasis: { itemStyle: { borderColor: '#111', borderWidth: 1 } },
+      progressive: 4000,
+    }],
+  }
+}
+
+/** **极坐标图**（角度分布）：x 是角度、y 是密度。 */
+function buildPolarOption(result, panel, panelIndex, visible) {
+  const curves = result.curves.filter((c) => c.panel === panelIndex)
+  const labels = (Array.isArray(visible) && visible.length)
+    ? visible : curves.map((c) => c.label)
+  const shown = curves.filter((c) => labels.includes(c.label))
+  const list = shown.length ? shown : curves
+  const series = list.map((c, ci) => {
+    const pts = buildPoints(c, false, false)
+    return {
+      name: c.label,
+      type: 'line',
+      coordinateSystem: 'polar',
+      smooth: true,
+      showSymbol: pts.length <= 120,
+      symbolSize: 3,
+      lineStyle: { width: 1.8 },
+      areaStyle: list.length === 1 ? { opacity: 0.18 } : undefined,
+      color: PALETTE[ci % PALETTE.length],
+      data: pts,
+    }
+  })
+  const rmax = Math.max(1e-12, ...series.flatMap((s) => s.data.map((p) => p[1])))
+  return {
+    title: {
+      text: panel.title || result.title,
+      left: 'center', top: 6,
+      textStyle: { fontSize: 15, fontWeight: 600, color: '#1f2733' },
+    },
+    tooltip: {
+      trigger: 'item', confine: true,
+      valueFormatter: (v) => (typeof v === 'number' ? v.toPrecision(6) : v),
+    },
+    legend: series.length > 1
+      ? { top: 34, type: 'scroll', textStyle: { fontSize: 11 },
+        itemWidth: 16, itemHeight: 9 }
+      : { show: false },
+    polar: { center: ['50%', '58%'], radius: ['12%', '72%'] },
+    // 角度轴：0–360°，刻度每 30°
+    angleAxis: {
+      type: 'value', min: 0, max: 360, startAngle: 90,
+      name: panel.xlabel || '角度 (°)',
+      nameLocation: 'middle', nameGap: 26,
+      nameTextStyle: { fontSize: 12, color: '#374151' },
+      axisLabel: { fontSize: 10 },
+      splitLine: { show: true, lineStyle: { color: '#eef1f5' } },
+    },
+    radiusAxis: {
+      type: 'value', min: 0, max: rmax * 1.05,
+      name: panel.ylabel || '',
+      nameTextStyle: { fontSize: 11, color: '#374151' },
+      axisLabel: { fontSize: 10 },
+      splitLine: { show: true, lineStyle: { color: '#eef1f5' } },
+    },
+    toolbox: {
+      right: 14, top: 8, itemSize: 14,
+      feature: {
+        saveAsImage: { title: '保存图片', pixelRatio: 2, name: `${result.name}_polar` },
+        restore: { title: '重置' },
+      },
+    },
+    series,
+  }
+}
+
 export function buildOption(result, panelIndex, visible = null) {
   const panel = result.panels[panelIndex] || {
     title: result.title, xlabel: '', ylabel: '', xscale: 'linear', yscale: 'linear',
   }
+  // ---- 二维热力图（接触矩阵 / 空间热力图）：走单独一条通道
+  const heat = (result.heatmaps || []).find((h) => Number(h.panel) === Number(panelIndex))
+  if (panel.heatmap && heat) return buildHeatmapOption(result, panel, heat)
+  // ---- 极坐标（角度分布）
+  if (panel.polar) return buildPolarOption(result, panel, panelIndex, visible)
   const curves = result.curves.filter((c) => c.panel === panelIndex)
 
   // ---- 只留一条曲线时：轴型按它自己的数据选（含 0/负数 → 线性）
@@ -166,13 +322,27 @@ export function buildOption(result, panelIndex, visible = null) {
       data,
       color,
       animation: data.length < 2000,
-      // 点不太密时画出数据点标记，方便确认"每一帧都在图上"
+      // 点不太密时画出数据点标记，方便确认"每一帧都在图上"；
+      // **只有 1 个点**时（单帧快照）把标记画大一点，否则看着像"图上什么都没有"
       showSymbol: data.length <= 1200,
-      symbolSize: 4,
+      symbolSize: data.length <= 3 ? 9 : 4,
     }
     if (c.kind === 'bar') {
-      return { ...common, type: 'bar', barMaxWidth: 26, itemStyle: { opacity: 0.85 } }
+      return { ...common, type: 'bar', barMaxWidth: 26,
+        // 「一个对象一根柱」（扩散系数 D 那种：每个对象一条曲线、各自一个图例）
+        // 的点落在 value 轴上时默认宽度会算出接近 0，必须给固定像素，
+        // 否则柱子细得看不见。
+        ...(data.length === 1 ? { barWidth: 22 } : null),
+        itemStyle: { opacity: 0.85 } }
     }
+    // 自适应可视化引擎的判定优先：离散型 → 柱状图；恒定/单点 → 散点大标记
+    const vz = c.viz && c.viz.chart
+    if (c.kind === 'bar' || (vz === 'bar' && c.kind === 'line')) {
+      return { ...common, type: 'bar', barMaxWidth: 26,
+        itemStyle: { opacity: 0.85 } }
+    }
+    // ⚠️「恒定值 / 单点」**不要**退化成散点：用户要求点线图（带标记点的折线）。
+    //    "平均 Rg" 这类水平线如果画成散点，看着就像一组孤立点而不是一条线。
     if (c.kind === 'scatter') {
       return { ...common, type: 'scatter', symbolSize: 6, itemStyle: { opacity: 0.85 } }
     }
@@ -214,11 +384,16 @@ export function buildOption(result, panelIndex, visible = null) {
         }
       : { show: false },
     // 绘图区：containLabel=true 保证坐标轴标签不越界
+    // ⚠️ containLabel 只把**刻度数字**算进去，**轴名称**不算 —— 所以名称的空间
+    //    必须由 grid 边距自己留出来。以前纵轴名称用 nameGap 64（还按名称长度再加
+    //    18px）横着推开，刻度数字窄的面板里它直接被推到画布外 → 标题看不见
+    //    （用户实测）。现在纵向名称改成**水平的、放在轴顶端**（见 yAxis），
+    //    横向名称固定 34px、底部留够"数字 + 名称 + 缩放条"。
     grid: {
       left: 18,
       right: 28,
-      top: hasLegend ? 84 : 56,
-      bottom: 62,
+      top: hasLegend ? 78 : 54,
+      bottom: hasLegend ? 92 : 84,
       containLabel: true,
     },
     toolbox: {
@@ -240,9 +415,14 @@ export function buildOption(result, panelIndex, visible = null) {
       type: logX ? 'log' : 'value',
       name: panel.xlabel,
       nameLocation: 'middle',
+      // 横轴名称与刻度数字的距离：刻度字号 11 + margin 10 已经吃掉约 24px，
+      // 34 留出 10px 空气。**不再按名称长度加大**（那会一路把名称推到缩放条上）。
       nameGap: 34,
       nameTextStyle: { fontSize: 12, color: '#374151' },
-      axisLabel: { hideOverlap: true, fontSize: 11 },
+      axisLabel: {
+        hideOverlap: true, fontSize: 11, margin: 10,
+        formatter: (v) => (logX ? v : fmtSci(v)),
+      },
       splitLine: { show: true, lineStyle: { color: '#eef1f5' } },
       minorTick: { show: logX },
       ...xBounds,
@@ -250,10 +430,19 @@ export function buildOption(result, panelIndex, visible = null) {
     yAxis: {
       type: logY ? 'log' : 'value',
       name: panel.ylabel,
-      nameLocation: 'middle',
-      nameGap: 56,
-      nameTextStyle: { fontSize: 12, color: '#374151' },
-      axisLabel: { hideOverlap: true, fontSize: 11 },
+      // 纵轴名称**水平放在轴顶端**（像论文里的轴标题）：
+      //   · 旋转 90° + 固定 nameGap 的老做法，刻度数字一窄（"0"/"5"）名称就顶到
+      //     画布外被裁掉；数字一宽（"3.27×10⁻⁹"）又会压住名称 —— 两头不讨好；
+      //   · 放到轴顶端后，它只跟 grid.top 的空白打交道，横竖都不会被裁。
+      nameLocation: 'end',
+      nameGap: 12,
+      nameRotate: 0,
+      nameTextStyle: { fontSize: 12, color: '#374151', align: 'left',
+        verticalAlign: 'bottom' },
+      axisLabel: {
+        hideOverlap: true, fontSize: 11, margin: 10,
+        formatter: (v) => (logY ? v : fmtSci(v)),
+      },
       splitLine: { show: true, lineStyle: { color: '#eef1f5' } },
       minorTick: { show: logY },
       ...yBounds,
