@@ -932,7 +932,8 @@ export default function App() {
                                          estimates={live?.estimates} />
                           <ParamBlock params={params} setParams={setParams}
                                       which={which}
-                                      primaryMolecules={primaryMolecules} />
+                                      primaryMolecules={primaryMolecules}
+                                      nAtoms={Number(sess?.info?.n_atoms) || 0} />
                           <RunBlock busy={busy} progress={progress} onRun={doRun}
                                     onCancel={cancelRun} live={live}
                                     which={which} titles={titles} run={run}

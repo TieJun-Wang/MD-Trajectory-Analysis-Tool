@@ -561,7 +561,8 @@ export function FrameBlock({ frames, setFrames }) {
 }
 
 /** 分析参数：按分析项分组，**只显示已选分析项的参数**（which=null → 全显示）。 */
-export function ParamBlock({ params, setParams, which = null, primaryMolecules = null }) {
+export function ParamBlock({ params, setParams, which = null, primaryMolecules = null,
+                            nAtoms = 0 }) {
   const p = (key) => ({
     value: params[key] ?? '',
     onChange: (e) => setParams({ ...params, [key]: e.target.value }),
@@ -609,6 +610,10 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
 
   //: 主链只有一个分子时，「逐分子统计」在数学上没有作用（整组 Rg == 该分子 Rg）
   const singleMol = primaryMolecules === 1
+  //: R_ee 手动指定原子：提示里给「体系共几个原子」和「当前填了什么」
+  const reeScope = Number(nAtoms) || 0
+  const reeEcho = String(params.ree_atoms ?? '').trim().split(/[\s,，]+/)
+    .filter(Boolean).slice(0, 4).join('、')
 
   const GROUPS = [
     ['面内 RDF (2D) / 两组分质心距', ['rdf2d', 'comdist'], [
@@ -660,14 +665,16 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
           { disabled: singleMol }), '按分子分别算'),
       F('ree_ends', 'R_ee 链端来源', 'select', sel('ree_ends', [
         ['bond_graph', '键图端（自动，推荐）'],
-        ['residue', '逐残基首末（对照 mda_test.py）'],
+        ['residue', '逐残基首末'],
         ['custom', '手动指定两原子'],
       ])),
       F('ree_atoms', 'R_ee 指定原子', 'text',
-        <input type="text" placeholder="如 0,3034（留空自动）"
-               style={{ minWidth: inputMinWidth('如 0,3034（留空自动）') }}
+        <input type="text"
+               placeholder={reeScope > 1 ? `如 1,${reeScope}（1–${reeScope}）` : '如 0,3034（留空自动）'}
+               style={{ minWidth: inputMinWidth('如 1,99999（1–99999）') }}
                value={params.ree_atoms ?? ''}
-               title="手工指定两个原子当链端，逗号或空格分隔；留空则按上面的来源自动判断"
+               title={`体系共 ${reeScope} 个原子：填两个原子序号（从 1 起，逗号或空格分隔），如 1,10`
+                 + (reeEcho ? `。当前填写：${reeEcho}` : '。留空则按上面选的来源自动判断')}
                onChange={(e) => setParams({ ...params, ree_atoms: e.target.value })} />,
         '如 0,3034（留空自动）'),
     ]],
