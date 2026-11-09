@@ -380,7 +380,7 @@ MDT/
 │       ├── conformation.py        链构象：Rg、端到端距离、二面角
 │       ├── interface.py           界面相容性：密度分布、RDF、接触、界面宽度
 │       ├── crystallinity.py       结晶行为：链段取向、结构有序度
-│       ├── dynamics.py            辅助分析：MSD、扩散系数
+│       ├── dynamics.py            辅助分析：MSD（含线性区拟合并给出 D）、VACF
 │       └── base.py                分析注册表与公共工具
 ├── mdta_cli.py                    命令行入口
 ├── mdta_gui.py                    桌面操作台（Tkinter，固定布局 + 数据表浏览）

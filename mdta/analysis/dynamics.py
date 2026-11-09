@@ -1009,6 +1009,9 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)",
               title="各轴分解与各向异性（x/y/z 及 ∥、⊥）",
               xscale="linear", yscale="linear"),
+        Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)",
+              title="MSD 幂律（log–log，α=1 参考线）",
+              xscale="log", yscale="log"),
     ]
 
     fail_by_group: dict[str, float] = {}
@@ -1044,6 +1047,23 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                                          block_curves=bl.get("perp"))
         fail_by_group[name] = float(diag.get("失效比例", 0.0) or 0.0)
 
+        # 「MSD 线性区拟合」图上的覆盖层（拟合区间 / 斜率 / R² / D）由前端画，
+        # 数值以这里算的为准；前端只有在用户**自定义区间**时才自己重算（最小二乘）。
+        # ⚠️ 放 summary（序列化会保留标量），不要放 meta —— meta 里的 dict 会被
+        #    序列化层过滤掉（dict/list/tuple 一律丢）。
+        _tf = np.asarray(lag_t, dtype=float)
+        _tok = _tf[np.isfinite(_tf) & (_tf > 0)]
+        _tmax = float(_tok[-1]) if _tok.size else float("nan")
+        try:
+            _slope_a2ps = float(fit.get("D (Å²/ps)", np.nan)) * 2.0 * float(dim)
+        except Exception:                                    # noqa: BLE001
+            _slope_a2ps = float("nan")
+        res.summary[f"{name} 拟合起点 (ps)"] = float(fit_fraction[0] * _tmax)
+        res.summary[f"{name} 拟合终点 (ps)"] = float(fit_fraction[1] * _tmax)
+        res.summary[f"{name} τ 上限 (ps)"] = _tmax
+        res.summary[f"{name} 拟合斜率 (Å²/ps)"] = _slope_a2ps
+        res.summary[f"{name} 拟合方法"] = str(fit_method)
+
         obj_label = "分子质心" if diag.get("对象") == "molecule" else "原子"
         res.add_curve(f"{name} ({obj_label}, {diag.get('粒子数', 0):,} 个)",
                       lag_t, msd["total"], panel=0, group=name)
@@ -1068,6 +1088,11 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                             ("z", f"{name} MSD_z"), ("para", f"{name} MSD∥ (x+y)"),
                             ("perp", f"{name} MSD⊥ (z)")):
             res.add_curve(clabel, lag_t, msd[key], panel=2, group=name)
+
+        # log–log：幂律指数 α 的判据（原来在「扩散系数 D」那一项里，现并入 MSD）
+        _pos = np.isfinite(t) & np.isfinite(y_tot) & (t > 0) & (y_tot > 0)
+        if _pos.sum() >= 3:
+            res.add_curve(f"{name}", t[_pos], y_tot[_pos], panel=3, group=name)
 
         for k, v in fit.items():
             res.summary[f"{name} {k}"] = v
@@ -1136,6 +1161,16 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                     f"只报总 D 会把这个信息平均掉。")
 
     bad_fail = [n for n, f in fail_by_group.items() if f > 0.20]
+    # α=1 参考线（与旧「扩散系数 D」里那条同口径：过第一个点、斜率 1）
+    try:
+        _ref = res.curves_of(3)[0]
+        _rx = np.asarray(_ref.x, dtype=float)
+        _ry = np.asarray(_ref.y, dtype=float)
+        if _rx.size >= 2 and _ry.size >= 2 and _ry[0] > 0:
+            res.add_curve("参考斜率 α=1", _rx, _ry[0] * (_rx / _rx[0]),
+                          kind="step", panel=3)
+    except Exception:                                        # noqa: BLE001
+        pass
     res.add_notes("MSD = <|r(t+τ) − r(t)|²>，对全部时间起点与全部粒子求平均。")
     if tau_note:
         res.add_notes(tau_note + "。这样做是为了让横轴范围合理：τ 接近整条轨迹长度时"
@@ -1290,119 +1325,4 @@ def analyze_vacf(mdt, groups: Mapping[str, object], selection: FrameSelection, *
         "归一化曲线 C(τ)/C(0) 的积分是速度弛豫时间 τ_c；"
         "由 VACF 积分直接估的 D = (1/3)∫C dτ 与 MSD 斜率应大致相当"
         "（长轨迹上两者渐近一致，短轨迹上 VACF 估计受截断影响）。")
-    return res
-
-
-@register("diffusion", "扩散系数 D")
-def analyze_diffusion(mdt, groups, selection: FrameSelection, *,
-                      verbose: bool = False, **msd_kwargs) -> AnalysisResult:
-    """**扩散系数 D**（独立分析项，由 MSD 的线性区拟合得到）。
-
-    为什么单独做一项（用户要求）：MSD 那张图里同时塞了 MSD(t)、各轴分解、
-    D 的数值，信息太密；"我就想知道 D 是多少" 时要翻摘要。
-    这里把 D 拎出来成一张独立的图：
-      · 面板 0：**各组分 D 的柱状图**（带标准误误差棒的数据表在摘要里）；
-      · 面板 1：**log–log MSD 图**（斜率 α 直接反映"是不是扩散"）＋ α=1 参考线。
-
-    数学与 MSD 完全相同（直接复用 :func:`analyze_msd`，不另写一份拟合），
-    只重新组织输出；不会改变任何数值口径。
-    """
-    msd = analyze_msd(mdt, groups, selection, verbose=verbose, **msd_kwargs)
-    res = AnalysisResult(
-        name="diffusion",
-        title="扩散系数 D（由 MSD 线性区拟合）",
-        meta=dict(getattr(msd, "meta", {}) or {}),
-    )
-
-    names = [str(n) for n in groups]
-    ds = []
-    errs = []
-    for n in names:
-        d = float(msd.summary.get(f"{n} D (m²/s)", float("nan")))
-        e = float(msd.summary.get(f"{n} D 标准误 (m²/s)", float("nan")))
-        ds.append(d)
-        errs.append(e)
-    ok = [i for i, d in enumerate(ds) if np.isfinite(d)]
-
-    res.panels = [
-        # 坐标轴用 **×10⁻⁹ m²/s** 作单位：D 常常是 3.3e-9 这种"一串零"的数，
-        # 直接把 SI 值画到轴上会让刻度标签挤成一团、还压住轴名（用户实测）。
-        # 摘要里仍保留完整 SI 值（m²/s），只是图上换成带单位的短数字。
-        Panel(xlabel="分析对象（组分 / 集合）",
-              ylabel="扩散系数 D (×10⁻⁹ m²/s)",
-              title="各对象的扩散系数 D（柱高为 D，图例里可逐个开关；摘要里带标准误）"),
-        Panel(xlabel="时间间隔 τ (ps)", ylabel="MSD (Å²)",
-              title="log–log MSD（斜率 α≈1 表示正常扩散）", xscale="log",
-              yscale="log"),
-    ]
-
-    # ---- 面板 0：D 柱状图（只画有效的，nan 的单独在摘要里说明）
-    # ⚠️ **每个对象一条曲线**（而不是"一个柱序列 + 数字横轴"）：用户要求
-    #    "不同对象应该是不同图例" —— 一条曲线对应一个图例项，才能各自开关、
-    #    各自的颜色也对得上。柱宽由前端按"单点柱"给固定像素（见 chartOption）。
-    if ok:
-        for k, i in enumerate(ok, start=1):
-            res.add_curve(str(names[i]), np.array([float(k)]),
-                          np.array([ds[i] * 1e9], dtype=float),
-                          kind="bar", panel=0)
-            res.summary[f"D #{k}（{names[i]}）(m²/s)"] = ds[i]
-            if np.isfinite(errs[i]):
-                res.summary[f"D 标准误 #{k}（{names[i]}）(m²/s)"] = errs[i]
-    bad = [names[i] for i, d in enumerate(ds) if not np.isfinite(d)]
-    if bad:
-        res.summary["无法给出 D 的对象"] = "、".join(bad)
-
-    # ---- 面板 1：log–log MSD + α=1 参考线（用 MSD 结果的原始曲线）
-    alpha_txt = []
-    for c in msd.curves:
-        if int(getattr(c, "panel", -1)) != 0:
-            continue
-        t = np.asarray(c.x, dtype=float)
-        y = np.asarray(c.y, dtype=float)
-        m = np.isfinite(t) & np.isfinite(y) & (t > 0) & (y > 0)
-        if m.sum() < 3:
-            continue
-        res.add_curve(str(c.label), t[m], y[m], panel=1,
-                      group=str(getattr(c, "group", "") or ""))
-        # 幂律指数 α（log–log 斜率），只用于说明"是不是扩散"
-        try:
-            a = float(np.polyfit(np.log(t[m]), np.log(y[m]), 1)[0])
-            alpha_txt.append(f"{c.label}：α = {a:.2f}")
-            res.summary[f"{c.label} 幂律指数 α"] = a
-        except Exception:                                    # noqa: BLE001
-            pass
-
-    # 参考线：与最大 MSD 同量级的 α=1 直线（只为目视对比斜率）
-    try:
-        first = res.curves_of(1)[0]
-        t = np.asarray(first.x, dtype=float)
-        y = np.asarray(first.y, dtype=float)
-        if t.size >= 2:
-            res.add_curve("参考斜率 α=1", t, y[0] * (t / t[0]), kind="step", panel=1)
-    except Exception:                                        # noqa: BLE001
-        pass
-
-    # ---- 摘要与说明
-    for k, v in msd.summary.items():
-        if str(k).endswith("D (m²/s)") or str(k).endswith("D 标准误 (m²/s)") \
-                or "各向异性" in str(k) or str(k).endswith("幂律") is False:
-            if str(k).endswith("D (m²/s)") or str(k).endswith("D 标准误 (m²/s)") \
-                    or "各向异性" in str(k):
-                res.summary[str(k)] = v
-    if ok:
-        res.summary["扩散系数个数"] = len(ok)
-        res.summary["扩散系数中位数 (m²/s)"] = float(np.median([ds[i] for i in ok]))
-    if alpha_txt:
-        res.summary["幂律指数"] = "；".join(alpha_txt)
-    if bad:
-        res.summary["无扩散的对象原因"] = ("MSD 曲线平坦或下降 → 该对象处于玻璃态/被约束/"
-                                    "结晶相，或帧间隔太大")
-
-    res.add_notes("D 由 MSD = 2·dim·D·t 的线性区斜率拟合（与「均方位移 MSD」同一套计算）。")
-    if alpha_txt:
-        res.add_notes("幂律指数 α 来自 log–log MSD 斜率：" + "；".join(alpha_txt)
-                      + "。α ≈ 1 = 正常扩散；α < 1 = 次扩散（受限）；"
-                        "α > 1 = 超扩散/弹道。")
-    for nt in getattr(msd, "notes", []) or []:
-        res.add_notes(str(nt))
     return res

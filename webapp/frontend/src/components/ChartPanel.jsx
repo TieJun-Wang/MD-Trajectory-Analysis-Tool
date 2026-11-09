@@ -71,6 +71,115 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
     }
   }
 
+  // ---------------------------------------------------------------- MSD 拟合覆盖层
+  // 用户要求：MSD「线性区拟合」那张图上，左上角写拟合区间（可自定义），
+  // 右上角一行一个数据给斜率 / R² / D；改区间后**立刻重算**（纯前端最小二乘）。
+  // 默认区间来自后端 meta.msd_fit（= fit_fraction × τ_max，与摘要里的 D 同窗口）。
+  const isMsdFit = current?.name === 'msd' && panelIndex === 1
+  // 拟合窗口/统计量来自结果 summary（meta 里的 dict 后端会过滤掉）
+  const fitSum = (current?.summary) || {}
+  const fitOf = (g) => ({
+    'τ 起 (ps)': Number(fitSum[`${g} 拟合起点 (ps)`]),
+    'τ 止 (ps)': Number(fitSum[`${g} 拟合终点 (ps)`]),
+    'R²': Number(fitSum[`${g} R²`]),
+    'D (m²/s)': Number(fitSum[`${g} D (m²/s)`]),
+  })
+  const dimOf = Number(fitSum['dim']) || 3
+  const [fitWin, setFitWin] = useState({ a: '', b: '' })
+  useEffect(() => { setFitWin({ a: '', b: '' }) }, [chart.name, panelIndex])
+
+  const fitGroups = useMemo(() => {
+    if (!isMsdFit) return []
+    const gs = []
+    for (const c of current.curves || []) {
+      if (c.panel !== 1) continue
+      if (/拟合/.test(String(c.label))) continue
+      const g = String(c.group || c.label)
+      if (!gs.includes(g)) gs.push(g)
+    }
+    return gs
+  }, [isMsdFit, current])
+
+  const fitInfo = useMemo(() => {
+    if (!isMsdFit || !fitGroups.length) return null
+    const dim = dimOf
+    const rows = []
+    const extra = []
+    for (const g of fitGroups) {
+      const base = (current.curves || []).find(
+        (c) => c.panel === 1 && !/拟合/.test(String(c.label))
+          && String(c.group || c.label) === g)
+      if (!base) continue
+      const meta = fitOf(g)
+      let t1 = Number(fitWin.a)
+      let t2 = Number(fitWin.b)
+      const custom = Number.isFinite(t1) && Number.isFinite(t2) && t2 > t1
+      if (!custom) {
+        t1 = Number(meta['τ 起 (ps)'])
+        t2 = Number(meta['τ 止 (ps)'])
+      }
+      const x = base.x || []
+      const y = base.y || []
+      const px = []
+      const py = []
+      for (let i = 0; i < x.length; i += 1) {
+        const xi = Number(x[i])
+        const yi = Number(y[i])
+        if (!Number.isFinite(xi) || !Number.isFinite(yi)) continue
+        if (xi < t1 || xi > t2) continue
+        px.push(xi)
+        py.push(yi)
+      }
+      let slope = NaN
+      let inter = NaN
+      let r2 = NaN
+      if (px.length >= 3) {
+        const n = px.length
+        let mx = 0
+        let my = 0
+        for (let i = 0; i < n; i += 1) { mx += px[i]; my += py[i] }
+        mx /= n
+        my /= n
+        let sxy = 0
+        let sxx = 0
+        let syy = 0
+        for (let i = 0; i < n; i += 1) {
+          sxy += (px[i] - mx) * (py[i] - my)
+          sxx += (px[i] - mx) ** 2
+          syy += (py[i] - my) ** 2
+        }
+        slope = sxx > 0 ? sxy / sxx : NaN
+        inter = my - slope * mx
+        r2 = (sxx > 0 && syy > 0) ? (sxy * sxy) / (sxx * syy) : NaN
+        if (custom && Number.isFinite(slope)) {
+          extra.push({
+            label: `${g} 拟合（自定义）`, kind: 'line', panel: 1, group: g,
+            x: [t1, t2], y: [slope * t1 + inter, slope * t2 + inter],
+          })
+        }
+      }
+      rows.push({
+        g, t1, t2, slope, r2, n: px.length, custom,
+        d: Number.isFinite(slope) ? (slope / (2 * dim)) * 1e-8 : NaN,
+      })
+    }
+    if (!rows.length) return null
+    return { rows, extra, custom: rows.some((r) => r.custom) }
+  }, [isMsdFit, current, fitGroups, fitSum, fitWin])
+
+  // 自定义区间时：用前端算的拟合线替掉后端那条（默认区间的线）
+  const viewResult = useMemo(() => {
+    if (!current || !fitInfo || !fitInfo.custom) return current
+    const curves = (current.curves || [])
+      .filter((c) => !(c.panel === 1 && /拟合/.test(String(c.label))))
+      .concat(fitInfo.extra || [])
+    return { ...current, curves }
+  }, [current, fitInfo])
+
+  const fmtNum = (v, digits = 4) => (
+    Number.isFinite(v) ? Number(v.toPrecision(digits)).toString() : '—')
+  const fmtD = (v) => (Number.isFinite(v) ? v.toExponential(3) : '—')
+
   if (!order.length) {
     // 实时运行时，第一项还没算完就到这里——不能说"还没有结果"
     if (running) {
@@ -223,9 +332,47 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
               </div>
             </div>
 
-            <ChartView result={current} panelIndex={panelIndex}
-                       visible={visible}
-                       onVisibleChange={handleVisible} />
+            <div className="chartwrap">
+              <ChartView result={viewResult} panelIndex={panelIndex}
+                         visible={visible}
+                         onVisibleChange={handleVisible} />
+              {isMsdFit && fitInfo && (
+                <>
+                  <div className="fitov l">
+                    <span>拟合区间 </span>
+                    <b>{fmtNum(fitInfo.rows[0].t1)} – {fmtNum(fitInfo.rows[0].t2)} ps</b>
+                    <span className="dim">{fitInfo.custom ? '（自定义）' : '（默认）'}</span>
+                    <span className="fitov-in">
+                      <input value={fitWin.a} placeholder="起 ps" size={6}
+                             onChange={(e) => setFitWin({ ...fitWin, a: e.target.value })} />
+                      <input value={fitWin.b} placeholder="止 ps" size={6}
+                             onChange={(e) => setFitWin({ ...fitWin, b: e.target.value })} />
+                      {(fitWin.a || fitWin.b) && (
+                        <button className="mini" onClick={() => setFitWin({ a: '', b: '' })}>
+                          恢复默认
+                        </button>
+                      )}
+                    </span>
+                  </div>
+                  <div className="fitov r">
+                    {fitInfo.rows.map((r) => (
+                      <div key={r.g} className="fitov-row">
+                        {fitInfo.rows.length > 1 && <div className="fitov-name">{r.g}</div>}
+                        {r.n < 3 ? (
+                          <div className="dim">区间内只有 {r.n} 个点，无法拟合</div>
+                        ) : (
+                          <>
+                            <div>斜率 {fmtNum(r.slope)} Å²/ps</div>
+                            <div>R² {fmtNum(r.r2)}</div>
+                            <div>D {fmtD(r.d)} m²/s</div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           </>
         )}
       </section>

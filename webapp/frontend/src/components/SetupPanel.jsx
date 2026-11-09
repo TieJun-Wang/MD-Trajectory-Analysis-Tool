@@ -734,7 +734,7 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       F('g_ref', '局部结构 g_ref', 'input', numInput('留空不计入', { step: 1, ...p('g_ref') }),
         '留空不计入'),
     ]],
-    ['均方位移 MSD', ['msd', 'diffusion'], [
+    ['均方位移 MSD', ['msd'], [
       F('msd_object', 'MSD 追踪对象', 'select', sel('msd_object', [
         ['atom', '原子（默认，= Forcite / EinsteinMSD 口径）'],
         ['molecule', '分子质心（比 Forcite 大一圈）'],

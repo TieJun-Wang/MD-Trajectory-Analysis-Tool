@@ -89,8 +89,6 @@ ANALYSIS_TITLES = {
     "boo": "键取向序参数 BOO",
     "crystal": "晶体/非晶区域识别",
     "msd": "均方位移 MSD",
-    # 扩散系数：由 MSD 线性区拟合的独立分析项（静态模式不支持）
-    "diffusion": "扩散系数 D",
     "vacf": "速度自相关函数 VACF",
 }
 
@@ -101,7 +99,7 @@ ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("链构象", ("rg", "ree", "dihedral")),
     ("空间结构", ("density", "rdf", "rdf2d", "comdist", "contact", "interface")),
     ("取向与结晶", ("orientation", "order", "boo", "crystal")),
-    ("动力学与输运", ("msd", "diffusion", "vacf")),
+    ("动力学与输运", ("msd", "vacf")),
 ]
 
 #: 分组在**快捷按钮行**上用的 2 字缩写。
@@ -522,15 +520,6 @@ class Analyzer:
             ag, lab = self._orientation_target()
             return boo_mod.analyze_crystal_regions(self.trajectory, ag, sel,
                                                    label=lab, verbose=verbose, **p)
-        if name == "diffusion":
-            # 扩散系数 = MSD 线性区拟合（同一套计算，只重新组织输出）
-            groups = self._msd_groups()
-            if not groups:
-                self.skip_reason = "没有勾选任何组分（扩散系数至少需要一个组分）"
-                return None
-            p = dict(p)
-            return dyn.analyze_diffusion(self.trajectory, groups, sel,
-                                         verbose=verbose, **p)
         if name == "msd":
             groups = self._msd_groups()
             if not groups:

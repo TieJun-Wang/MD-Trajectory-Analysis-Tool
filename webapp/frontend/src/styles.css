@@ -954,6 +954,26 @@ table.inforows tr:first-child td { padding-top: 3px; }
   border-radius: var(--radius);
 }
 
+/* 图表 + 覆盖层容器（MSD 拟合区间 / 斜率 R² D 直接压在图上） */
+.chartwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
+.chartwrap > .chart-box { flex: 1 1 auto; }
+.fitov {
+  position: absolute; top: 8px; z-index: 3;
+  font-size: 11px; line-height: 1.5; color: #334155;
+  background: rgba(255, 255, 255, 0.86);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 7px; pointer-events: auto;
+}
+.fitov.l { left: 10px; }
+.fitov.r { right: 10px; text-align: right; }
+.fitov-row + .fitov-row { margin-top: 6px; border-top: 1px dashed var(--line); padding-top: 4px; }
+.fitov-name { font-weight: 650; }
+.fitov-in { display: inline-flex; gap: 4px; align-items: center; margin-left: 6px; }
+.fitov-in input {
+  width: 52px; font-size: 11px; padding: 1px 3px;
+  border: 1px solid var(--line); border-radius: 4px;
+}
+
 /* ---------------------------------------------------------- 全屏显示 */
 /* 原生 Fullscreen API 生效时由浏览器接管尺寸；这里额外给一点内边距，
    并让标题栏在全屏下更醒目。 */

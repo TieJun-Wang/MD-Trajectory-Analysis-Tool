@@ -21,7 +21,7 @@ _MIN_DIHEDRAL_ATOMS = 4
 #: 逐项核对过实现：comdist（质心距随时间 + 沿 z 的符号距离随时间）、
 #: order（各有序度分量随时间）、crystal（晶区占比 / 最大晶簇随时间）、
 #: msd（MSD 随时间 / MSD(τ)）。其余分析都至少有一张静态分布图。
-_ALL_TIME_PANELS = ("msd", "diffusion", "vacf", "comdist", "order", "crystal")
+_ALL_TIME_PANELS = ("msd", "vacf", "comdist", "order", "crystal")
 
 _OK = {"ok": True, "level": "ok", "reason": ""}
 
@@ -163,19 +163,15 @@ def preflight(az, *, n_frames: int | None = None,
     # ---- 动力学：要组分，且至少 2 帧
     if n_comp < 1:
         out["msd"] = _blocked(no_comp.replace("（在", "（MSD 至少需要一个组分；在"))
-        out["diffusion"] = _blocked(
-            no_comp.replace("（在", "（扩散系数至少需要一个组分；在"))
     elif n_frames < 2:
         # 两种情况要分开说：体系本身只有 1 帧（没配轨迹），还是**帧选择**把它压到 1 帧
         _why = ("当前帧选择只剩 1 帧：检查「帧」里的起始/结束时间、抽帧间隔、最大帧数"
                 if total >= 2 else
                 f"体系只有 {total} 帧（没配轨迹文件？）：位移无从谈起，至少要 2 帧")
         out["msd"] = _blocked(_why)
-        out["diffusion"] = _blocked(_why)
         out["vacf"] = _blocked(_why)
     else:
         out["msd"] = _OK
-        out["diffusion"] = _OK
         out["vacf"] = _OK
 
     # ---- VACF：除了帧数，还要轨迹里**有速度**（XTC/DCD 不存速度）
@@ -207,6 +203,6 @@ def preflight(az, *, n_frames: int | None = None,
     # 补齐没有单独判定的项（默认放行）
     for name in ("rg", "ree", "dihedral", "density", "rdf", "rdf2d", "comdist",
                  "contact", "interface", "orientation", "order", "boo",
-                 "crystal", "msd", "diffusion"):
+                 "crystal", "msd"):
         out.setdefault(name, _OK)
     return out
