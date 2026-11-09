@@ -70,7 +70,16 @@ export default function App() {
   const [log, setLog] = useState([])
 
   // 折叠面板：一次只展开一块
-  const [open, setOpen] = useState(SEC_FILE)
+  // 哪个小块展开也要跨刷新保持（用户在「分析设置」里刷新，不该跳回体系信息）
+  const [open, setOpen] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem('mdta.open')
+      return saved || SEC_FILE
+    } catch { return SEC_FILE }
+  })
+  useEffect(() => {
+    try { window.localStorage.setItem('mdta.open', open || '') } catch { /* 忽略 */ }
+  }, [open])
   const toggle = (id) => setOpen((cur) => (cur === id ? '' : id))
 
   const [frames, setFrames] = useState({
@@ -114,7 +123,25 @@ export default function App() {
   const [caps, setCaps] = useState(null)
 
   const [run, setRun] = useState(null)
-  const [chart, setChart] = useState({ name: '', index: 0 })
+  const [chart, setChart] = useState(() => {
+    try {
+      const raw = window.localStorage.getItem('mdta.chart')
+      if (raw) {
+        const v = JSON.parse(raw)
+        if (v && typeof v.name === 'string') {
+          return { name: v.name, index: Number(v.index) || 0 }
+        }
+      }
+    } catch { /* 忽略 */ }
+    return { name: '', index: 0 }
+  })
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('mdta.chart', JSON.stringify({
+        name: chart?.name || '', index: Number(chart?.index) || 0,
+      }))
+    } catch { /* 忽略 */ }
+  }, [chart?.name, chart?.index])
   const [busy, setBusy] = useState(false)
   const [progress, setProgress] = useState(0)
   //: 开跑前先预估各项用时（每项先跑几帧实测），再按短→长排序
@@ -333,13 +360,20 @@ export default function App() {
     })
     const names = Object.keys(results)
     if (names.length) {
-      setChart({ name: names[0], index: 0 })
-      setTab('charts')
+      // 只有"存档里没有选过图"时才退回第一项；否则保持刷新前那张
+      let savedChart = null
+      try {
+        const raw = window.localStorage.getItem('mdta.chart')
+        savedChart = raw ? JSON.parse(raw) : null
+      } catch { savedChart = null; }
+      if (!(savedChart && results[savedChart.name])) {
+        setChart({ name: names[0], index: 0 })
+      }
       pushLog(`已恢复上次的会话：${names.length} 项结果（${st.sid}）`)
     } else {
       pushLog(`已恢复上次打开的体系（还没有分析结果）`)
     }
-    setOpen(SEC_INFO)
+    // 刷新要停在原来展开的那一块，不再强制 setOpen(SEC_INFO)
 
     // 后端还在跑 → 接着轮询；只有「取消」才会让它停
     const job = st.job || {}
