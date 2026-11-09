@@ -6,11 +6,34 @@
  * `analysisGroups` 定义，所以两边的分法不会不一致。
  */
 import { useMemo, useState } from 'react'
-import { formatCell } from '../chartOption'
+import { buildOption, formatCell } from '../chartOption'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
 
-function buildTable(result, panelIndex) {
+/**
+ * 这张图**当前应该显示**的曲线：
+ * 1) 用户在图例里点过（visible 非空）→ 用那批；
+ * 2) 没点过 → 用图表的默认图例（`legend.selected`，例如 MSD 各轴分解只勾第一条）；
+ * 3) 没有图例（单曲线）→ 全显示。
+ * 数据表与图表必须同口径，否则会看到"图上没有、表里还有"的曲线。
+ */
+function shownCurves(result, panelIndex, visible) {
   const curves = result.curves.filter((c) => c.panel === panelIndex)
+  if (Array.isArray(visible) && visible.length) {
+    const set = new Set(visible)
+    const hit = curves.filter((c) => set.has(c.label))
+    return hit.length ? hit : curves
+  }
+  const opt = buildOption(result, panelIndex)
+  const sel = opt && opt.legend && opt.legend.selected
+  if (sel) {
+    const hit = curves.filter((c) => sel[c.label] !== false)
+    if (hit.length) return hit
+  }
+  return curves
+}
+
+function buildTable(result, panelIndex, visible) {
+  const curves = shownCurves(result, panelIndex, visible)
   if (!curves.length) return { columns: [], rows: [] }
   const panel = result.panels[panelIndex] || {}
   const xlabel = panel.xlabel || 'x'
@@ -23,7 +46,8 @@ function buildTable(result, panelIndex) {
   return { columns, rows }
 }
 
-export default function DataPanel({ run, groups, chart = null, setChart = null }) {
+export default function DataPanel({ run, groups, chart = null, setChart = null,
+                                   visible = null }) {
   const results = run?.results || {}
   const order = useMemo(() => Object.keys(results), [results])
   // 选中的「分析项 + 第几张图」：与图表页**共用同一个状态**（切页不丢），
@@ -37,8 +61,9 @@ export default function DataPanel({ run, groups, chart = null, setChart = null }
   const active = sel && results[sel.name] ? sel : (order.length ? { name: order[0], index: 0 } : null)
   const result = active ? results[active.name] : null
   const { columns, rows } = useMemo(
-    () => (result ? buildTable(result, active.index) : { columns: [], rows: [] }),
-    [result, active],
+    () => (result ? buildTable(result, active.index, visible)
+      : { columns: [], rows: [] }),
+    [result, active, visible],
   )
 
   if (!order.length) {

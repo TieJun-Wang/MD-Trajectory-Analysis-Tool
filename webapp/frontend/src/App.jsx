@@ -1038,8 +1038,11 @@ export default function App() {
             {/* 数据表 / 统计量 / 科研 QC 都跟着「图表里当前这张」走：
                 在图表页选到 msd 的第 1 张图，切到数据表就是 msd 那一页的数据，
                 统计量与科研 QC 会自动滚到对应分析项（用户要求）。 */}
+            {/* 数据表跟随图表页：不仅同一张图，还要**同一批可见曲线**
+                （图例里没勾的组不出现，用户要求） */}
             {tab === 'data' && <DataPanel run={run} groups={groups}
-                                          chart={chart} setChart={setChart} />}
+                                          chart={chart} setChart={setChart}
+                                          visible={visibleCurves} />}
             {/* 统计量：只显示指标 */}
             {tab === 'stats' && <StatsPanel run={run} groups={groups}
                                             focus={chart?.name || ''} />}
