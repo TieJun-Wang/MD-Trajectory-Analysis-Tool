@@ -482,8 +482,8 @@ function buildRings(st, data) {
   const xyz = data.xyz
   const posOf = st.posOf
   const SEG = 36             // 一圈的段数（够圆滑）
-  const RAD_FRAC = 0.54      // 圆半径 = 环外接半径 × 0.54（在环内）
-  const THIN = 1 / 3         // 线宽 = 该环球棍半径 × 1/3（用户要求）
+  const RAD_FRAC = 0.42      // 圆半径 = 环外接半径 × 0.42（更小，留在环中央）
+  const THIN_FRAC = 0.15     // 线宽 = 该环球棍半径 × 0.15（细线，不加粗）
 
   const segs = []            // [p0, p1, radius]
   const c = new THREE.Vector3()
@@ -517,7 +517,7 @@ function buildRings(st, data) {
       const i = posOf.get(orig)
       if (i !== undefined) thick += stickRad(st, data, i)
     }
-    thick = (thick / ring.length) * THIN
+    thick = (thick / ring.length) * THIN_FRAC
     const at = (th) => c.clone()
       .addScaledVector(uA, Math.cos(th) * r)
       .addScaledVector(vA, Math.sin(th) * r)
