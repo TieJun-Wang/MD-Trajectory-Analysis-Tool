@@ -32,8 +32,12 @@ function shownCurves(result, panelIndex, visible) {
   return curves
 }
 
-function buildTable(result, panelIndex, visible) {
-  const curves = shownCurves(result, panelIndex, visible)
+function buildTable(result, panelIndex, onlyShown, visible) {
+  // 默认把该面板**全部图例**的数据都列出来（用户要求）；
+  // 勾上「只看当前图例」才按图上实际显示的曲线过滤。
+  const curves = onlyShown
+    ? shownCurves(result, panelIndex, visible)
+    : result.curves.filter((c) => c.panel === panelIndex)
   if (!curves.length) return { columns: [], rows: [] }
   const panel = result.panels[panelIndex] || {}
   const xlabel = panel.xlabel || 'x'
@@ -58,12 +62,15 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
   // 折叠起来的模块（默认全展开；记"关掉的"，新模块默认展开）
   const [closedModules, setClosedModules] = useState(() => new Set())
 
+  // 「只看当前图例」：默认关（数据表列出所有曲线的数据，用户要求）
+  const [onlyShown, setOnlyShown] = useState(false)
+
   const active = sel && results[sel.name] ? sel : (order.length ? { name: order[0], index: 0 } : null)
   const result = active ? results[active.name] : null
   const { columns, rows } = useMemo(
-    () => (result ? buildTable(result, active.index, visible)
+    () => (result ? buildTable(result, active.index, onlyShown, visible)
       : { columns: [], rows: [] }),
-    [result, active, visible],
+    [result, active, onlyShown, visible],
   )
 
   if (!order.length) {
@@ -147,6 +154,14 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
             </div>
           </div>
           <div className="charttools">
+            <label className="mini"
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                   title={'勾上后只列「图表页图例里当前显示」的曲线；'
+                     + '不勾则列出这个面板全部曲线的数据'}>
+              <input type="checkbox" checked={onlyShown}
+                     onChange={(e) => setOnlyShown(e.target.checked)} />
+              只看当前图例
+            </label>
             <button className="mini" onClick={() => {
               const text = [columns.join('\t'), ...rows.map((r) => r.join('\t'))].join('\n')
               navigator.clipboard?.writeText(text)
