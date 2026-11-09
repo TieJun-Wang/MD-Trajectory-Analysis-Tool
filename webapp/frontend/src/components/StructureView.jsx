@@ -193,6 +193,18 @@ export default function StructureView({ st }) {
             {loading ? '读取中…' : '重新载入'}
           </button>
           <button className="mini" onClick={st.resetView}>重置视角</button>
+          {(data?.rings?.length || 0) > 0 && (
+            <label className="mini"
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                   title="芳香六元环用环心虚线圆标出（苯环判定：6 元碳环 + 环内键长 ≤1.50 Å）">
+              <input type="checkbox" defaultChecked
+                     onChange={(e) => {
+                       st.showRings = e.target.checked
+                       if (st.ringGroup) st.ringGroup.visible = st.showRings
+                     }} />
+              芳香环 {data.rings.length}
+            </label>
+          )}
           <button className="mini fsbtn" onClick={() => setFs((v) => !v)}
                   title={fs ? '退出全屏（Esc）' : '全屏查看结构'}>
             {fs ? '⤡ 退出全屏' : '⤢ 全屏'}
@@ -267,6 +279,12 @@ export function buildGeometry(st, data) {
     }
     st.boxInfo = null
     if (st.labelGroup) { scene.remove(st.labelGroup); st.labelGroup = null }
+    if (st.ringGroup) {
+      scene.remove(st.ringGroup)
+      st.ringGroup.geometry.dispose()
+      st.ringGroup.material.dispose()
+      st.ringGroup = null
+    }
 
     const n = data.n_displayed
     const xyz = data.xyz
@@ -323,6 +341,7 @@ export function buildGeometry(st, data) {
     baseMat.dispose()
 
     buildBonds(st, data)
+    buildRings(st, data)
     buildBox(st, data)
     // 先用"没有选择"的状态把棍/盒的矩阵写一遍：buildGeometry 单独被调用时
     // （自检、或 React 两个 effect 之间）也必须是一个画得出来的有效状态。
@@ -459,6 +478,74 @@ function applyBoxState(st) {
 }
 
 /* --------------------------------------------------------------- 棍（化学键） */
+/* -------------------------------------------------- 芳香环（虚线圆，MS 风格） */
+/**
+ * 把后端给的**芳香六元环**（`data.rings`，原始原子编号）画成环心的虚线圈，
+ * 与 Materials Studio 里苯环中间那个虚线圆一致。
+ *
+ * 全部环合成**一个** LineSegments（一个 draw call）：每个环在其所在平面内画 48 段
+ * 圆周（平面由环上三个原子决定）；虚线由 LineDashedMaterial + computeLineDistances
+ * 实现。只画**当前显示**的原子都齐的环（抽稀/截断时自动跳过）。
+ */
+function buildRings(st, data) {
+  const rings = data.rings || []
+  if (!rings.length) return
+  const [ox, oy, oz] = st.offset
+  const xyz = data.xyz
+  const posOf = st.posOf
+  const SEG = 48
+  const verts = []
+  const c = new THREE.Vector3()
+  const uA = new THREE.Vector3()
+  const vA = new THREE.Vector3()
+  const nA = new THREE.Vector3()
+  const tmp = new THREE.Vector3()
+  for (const ring of rings) {
+    if (ring.length < 3) continue
+    const pts = []
+    let ok = true
+    for (const orig of ring) {
+      const i = posOf.get(orig)
+      if (i === undefined) { ok = false; break }
+      pts.push(new THREE.Vector3(xyz[i][0] - ox, xyz[i][1] - oy, xyz[i][2] - oz))
+    }
+    if (!ok) continue
+    c.set(0, 0, 0)
+    pts.forEach((p) => c.add(p))
+    c.multiplyScalar(1 / pts.length)
+    uA.copy(pts[0]).sub(c)
+    nA.copy(pts[1]).sub(pts[0]).cross(tmp.copy(pts[2]).sub(pts[0]))
+    if (nA.lengthSq() < 1e-10 || uA.lengthSq() < 1e-10) continue
+    nA.normalize()
+    uA.addScaledVector(nA, -uA.dot(nA)).normalize()
+    vA.crossVectors(nA, uA).normalize()
+    const r = pts.reduce((acc, p) => acc + p.distanceTo(c), 0) / pts.length
+    let prev = null
+    for (let k = 0; k <= SEG; k += 1) {
+      const th = (k / SEG) * Math.PI * 2
+      const p = c.clone()
+        .addScaledVector(uA, Math.cos(th) * r)
+        .addScaledVector(vA, Math.sin(th) * r)
+      if (prev) verts.push(prev.x, prev.y, prev.z, p.x, p.y, p.z)
+      prev = p
+    }
+  }
+  if (!verts.length) return
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+  const mat = new THREE.LineDashedMaterial({
+    color: 0x1f2937, dashSize: 0.22, gapSize: 0.16,
+    transparent: true, opacity: 0.9, depthWrite: false,
+  })
+  const seg = new THREE.LineSegments(geo, mat)
+  seg.computeLineDistances()
+  seg.renderOrder = 2
+  seg.visible = st.showRings !== false
+  seg.frustumCulled = false
+  st.ringGroup = seg
+  st.scene.add(seg)
+}
+
 /**
  * 把 `data.bonds` 画成圆柱。后端给的是**显示位置**成对数组（`[a0,b0,a1,b1,…]`），
  * 直接用即可 —— 前端不做任何编号换算（上一版就因为把原始编号当显示下标用而白屏）。

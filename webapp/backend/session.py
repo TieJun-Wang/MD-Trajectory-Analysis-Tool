@@ -1185,6 +1185,34 @@ class Session:
         return {"box": [float(x) for x in dims[:6]],
                 "box_frac_inside": pct, "box_wrapped": inside}
 
+    def visual_rings(self, limit_atoms: int = 30000) -> list:
+        """芳香六元环的**原始原子编号**列表（给三维视图画虚线圈）。
+
+        判定见 ``mdta.rings``：6 元碳环 + 环内 6 根键长 ≤1.50 Å。按「原子数 +
+        键数」缓存；体系太大（>limit_atoms）或没有键表时返回空。
+        """
+        u = self.az.universe
+        try:
+            nb = len(u.bonds)
+        except Exception:                                        # noqa: BLE001
+            nb = 0
+        key = (int(u.atoms.n_atoms), int(nb))
+        if getattr(self, "_rings_key", None) == key:
+            return list(getattr(self, "_rings_cache", []))
+        rings: list = []
+        if nb and u.atoms.n_atoms <= int(limit_atoms):
+            try:
+                from mdta.rings import analyze_rings
+
+                st = analyze_rings(u)
+                rings = [[int(x) for x in cyc]
+                         for cyc, is_benz in st["rings"] if is_benz]
+            except Exception:                                    # noqa: BLE001
+                rings = []
+        self._rings_key = key
+        self._rings_cache = rings
+        return list(rings)
+
     def structure(self, frame: int = 0, max_atoms: int = 20000,
                   max_bonds: int = 0) -> dict:
         """给三维视图**拓扑（首帧）坐标** + 元素 + 层级信息。
@@ -1270,7 +1298,7 @@ class Session:
         radii = [float(COVALENT_RADII.get(e, 1.5)) for e in el]
 
         mol_in_view = mol[idx] if idx.size else np.zeros(0, int)
-        return {
+        out = {
             "frame": k,
             "time_ps": float(getattr(u.trajectory.ts, "time", 0.0) or 0.0),
             "n_atoms": n,
@@ -1300,6 +1328,12 @@ class Session:
             "has_bonds": bond_kind == "topology",
             "n_molecules": int(mol_in_view.max()) + 1 if mol_in_view.size else 0,
         }
+        # 芳香六元环（苯环）的原子编号：三维视图画环心虚线圆用（按拓扑缓存）
+        try:
+            out["rings"] = self.visual_rings()
+        except Exception:                                        # noqa: BLE001
+            out["rings"] = []
+        return out
 
     # --------------------------------------------------- 分子 / 聚合物链识别
     def recognition(self, *, refresh: bool = False) -> dict:
