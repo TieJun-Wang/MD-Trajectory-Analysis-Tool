@@ -748,6 +748,9 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
           + '全体原子的共同平移会把 MSD 抬出一条额外抛物线上翘，勾上先减掉'
           + '「全体平均位移」再看单分子扩散；盒子固定、质心不动的体系不用勾。\n'
           + '勾上后 MSD 一般小 0.01%~0.2%（实测 PE50）。'), '减去整体漂移', 3),
+      F('vacf_max_lag', 'VACF τ 上限 (帧)', 'input',
+        numInput('留空 = 全段', { step: 1, min: 1, ...p('vacf_max_lag') }),
+        '留空 = 全段'),
       F('tau_intervals', 'τ 分段数', 'input',
         numInput('5', { step: 1, min: 1, ...p('tau_intervals') }), '留空不限'),
     ]],

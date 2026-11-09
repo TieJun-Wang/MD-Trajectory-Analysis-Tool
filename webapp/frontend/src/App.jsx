@@ -72,6 +72,8 @@ export default function App() {
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
     // 「分子质心」会大一圈（分子内振动/转动被去掉），两边不能直接比。
     rdf_mode: 'inter', rdf_nbins: 120, msd_object: 'atom',
+    // VACF 的 τ 上限（帧）；留空 = 全段（与 Forcite 一样逐 lag 全给）
+    vacf_max_lag: '',
     gauche_edge: 120,
     // 「减去整体漂移」默认**关**：Materials Studio Forcite 的 MSD 不去漂移，
     // 默认关掉才能与它逐点对齐（实测 PE50：关掉差 0.000%，开着差 −0.01…−0.19%）。
@@ -497,6 +499,8 @@ export default function App() {
         msd: { object: params.msd_object,
                remove_drift: params.msd_drift === true,
                unwrap: !/\.trj$/i.test(String(sess?.info?.trajectory || '')) },
+        // VACF：max_lag 留空（null）= 用满整条轨迹
+        vacf: { max_lag: optNum(params.vacf_max_lag) },
         contact: { cutoff: Number(params.cutoff), mode: params.contact_mode },
         dihedral: { mode: params.dihedral_mode,
                     gauche_edge: Number(params.gauche_edge) || 120 },

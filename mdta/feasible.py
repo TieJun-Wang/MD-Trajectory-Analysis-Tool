@@ -21,7 +21,7 @@ _MIN_DIHEDRAL_ATOMS = 4
 #: 逐项核对过实现：comdist（质心距随时间 + 沿 z 的符号距离随时间）、
 #: order（各有序度分量随时间）、crystal（晶区占比 / 最大晶簇随时间）、
 #: msd（MSD 随时间 / MSD(τ)）。其余分析都至少有一张静态分布图。
-_ALL_TIME_PANELS = ("msd", "diffusion", "comdist", "order", "crystal")
+_ALL_TIME_PANELS = ("msd", "diffusion", "vacf", "comdist", "order", "crystal")
 
 _OK = {"ok": True, "level": "ok", "reason": ""}
 
@@ -172,9 +172,22 @@ def preflight(az, *, n_frames: int | None = None,
                 f"体系只有 {total} 帧（没配轨迹文件？）：位移无从谈起，至少要 2 帧")
         out["msd"] = _blocked(_why)
         out["diffusion"] = _blocked(_why)
+        out["vacf"] = _blocked(_why)
     else:
         out["msd"] = _OK
         out["diffusion"] = _OK
+        out["vacf"] = _OK
+
+    # ---- VACF：除了帧数，还要轨迹里**有速度**（XTC/DCD 不存速度）
+    try:
+        _has_vel = bool(getattr(getattr(az, "trajectory", None),
+                                 "has_velocities", False))
+    except Exception:                                        # noqa: BLE001
+        _has_vel = False
+    if not _has_vel and (out.get("vacf") or {}).get("level") == "ok":
+        out["vacf"] = _blocked(
+            "这条轨迹没有速度数据：VACF 需要带速度的轨迹"
+            "（MS 的 .trj 读取时会转成 TRR、自带速度；XTC/DCD 不含速度）")
 
     # ---- 单帧：其它项能跑，但只是"一张快照"，标 warn 提醒
     if n_frames < 2:

@@ -59,6 +59,8 @@ DEFAULT_PARAMS: dict = {
     #    结果默认阈值被吃掉，只有显式传参才生效）。
     "order": {"gauche_edge": 120.0},
     "msd": {"object": "molecule", "max_particles": None, "workers": 0},
+    # VACF：max_lag 留空 = 用满整条轨迹（与 Forcite 一样逐 lag 全给）
+    "vacf": {"max_lag": None},
     # τ 轴默认**用满整条轨迹**；想收缩就传 {"tau_intervals": 5}（= 总时长/5）
     # 键取向序参数 / 晶体-非晶识别（1.0.2）：默认用 Lechner–Dellago 平均版 q̄6，
     # 邻域半径留空 = 自动按最近邻距离中位数推定
@@ -68,7 +70,8 @@ DEFAULT_PARAMS: dict = {
 
 #: 默认执行顺序（按设计大纲第 25–27 章）
 DEFAULT_ORDER = ["rg", "ree", "dihedral", "density", "rdf", "contact",
-                 "interface", "orientation", "order", "boo", "crystal", "msd"]
+                 "interface", "orientation", "order", "boo", "crystal", "msd",
+                 "vacf"]
 
 #: 中文标题
 ANALYSIS_TITLES = {
@@ -88,6 +91,7 @@ ANALYSIS_TITLES = {
     "msd": "均方位移 MSD",
     # 扩散系数：由 MSD 线性区拟合的独立分析项（静态模式不支持）
     "diffusion": "扩散系数 D",
+    "vacf": "速度自相关函数 VACF",
 }
 
 #: 按设计大纲的**模块**给分析项分组：``[(模块名, (分析项, ...)), ...]``。
@@ -97,7 +101,7 @@ ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("链构象", ("rg", "ree", "dihedral")),
     ("空间结构", ("density", "rdf", "rdf2d", "comdist", "contact", "interface")),
     ("取向与结晶", ("orientation", "order", "boo", "crystal")),
-    ("动力学与输运", ("msd", "diffusion")),
+    ("动力学与输运", ("msd", "diffusion", "vacf")),
 ]
 
 #: 分组在**快捷按钮行**上用的 2 字缩写。
@@ -537,6 +541,13 @@ class Analyzer:
             if self.msd_group_objects and "object_by_group" not in p:
                 p["object_by_group"] = dict(self.msd_group_objects)
             return dyn.analyze_msd(self.trajectory, groups, sel, verbose=verbose, **p)
+        if name == "vacf":
+            groups = self._msd_groups()
+            if not groups:
+                self.skip_reason = "没有勾选任何组分（VACF 至少需要一个组分）"
+                return None
+            return dyn.analyze_vacf(self.trajectory, groups, sel,
+                                    verbose=verbose, **p)
         raise KeyError(f"未知分析项: {name!r}")
 
     #: 预估用时：探测帧数（先测 2 帧、再测 k 帧，用来分离固定开销与每帧代价）
