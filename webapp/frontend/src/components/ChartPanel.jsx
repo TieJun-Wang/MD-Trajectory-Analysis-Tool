@@ -332,46 +332,51 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
               </div>
             </div>
 
+            {/* MSD 线性区拟合：信息条放在**图外**（图上浮层会盖住标题和 ECharts 的
+                放大/缩放工具栏，用户实测反馈）。左边写拟合区间（可改），右边是
+                左对齐的一列统计量，文字与数据用冒号分隔。 */}
+            {isMsdFit && fitInfo && (
+              <div className="fitbar">
+                <div className="fitbar-l">
+                  <span>拟合区间：</span>
+                  <b>{fmtNum(fitInfo.rows[0].t1)} – {fmtNum(fitInfo.rows[0].t2)} ps</b>
+                  <span className="dim">{fitInfo.custom ? '（自定义）' : '（默认）'}</span>
+                  <input value={fitWin.a} placeholder="起 ps" size={5}
+                         title="拟合区间起点（ps），留空 = 默认 = 0.3 × τ 上限"
+                         onChange={(e) => setFitWin({ ...fitWin, a: e.target.value })} />
+                  <input value={fitWin.b} placeholder="止 ps" size={5}
+                         title="拟合区间终点（ps），留空 = 默认 = τ 上限"
+                         onChange={(e) => setFitWin({ ...fitWin, b: e.target.value })} />
+                  {(fitWin.a || fitWin.b) && (
+                    <button className="mini" onClick={() => setFitWin({ a: '', b: '' })}>
+                      恢复默认
+                    </button>
+                  )}
+                  <span className="dim">（改区间立刻重算，不用重跑）</span>
+                </div>
+                <div className="fitbar-r">
+                  {fitInfo.rows.map((r) => (
+                    <div key={r.g} className="fitbar-row">
+                      {fitInfo.rows.length > 1 && <div className="fitbar-name">{r.g}</div>}
+                      {r.n < 3 ? (
+                        <div className="dim">区间内只有 {r.n} 个点，无法拟合</div>
+                      ) : (
+                        <>
+                          <div>斜率：{fmtNum(r.slope)} Å²/ps</div>
+                          <div>R²：{fmtNum(r.r2)}</div>
+                          <div>D：{fmtD(r.d)} m²/s</div>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div className="chartwrap">
               <ChartView result={viewResult} panelIndex={panelIndex}
                          visible={visible}
                          onVisibleChange={handleVisible} />
-              {isMsdFit && fitInfo && (
-                <>
-                  <div className="fitov l">
-                    <span>拟合区间 </span>
-                    <b>{fmtNum(fitInfo.rows[0].t1)} – {fmtNum(fitInfo.rows[0].t2)} ps</b>
-                    <span className="dim">{fitInfo.custom ? '（自定义）' : '（默认）'}</span>
-                    <span className="fitov-in">
-                      <input value={fitWin.a} placeholder="起 ps" size={6}
-                             onChange={(e) => setFitWin({ ...fitWin, a: e.target.value })} />
-                      <input value={fitWin.b} placeholder="止 ps" size={6}
-                             onChange={(e) => setFitWin({ ...fitWin, b: e.target.value })} />
-                      {(fitWin.a || fitWin.b) && (
-                        <button className="mini" onClick={() => setFitWin({ a: '', b: '' })}>
-                          恢复默认
-                        </button>
-                      )}
-                    </span>
-                  </div>
-                  <div className="fitov r">
-                    {fitInfo.rows.map((r) => (
-                      <div key={r.g} className="fitov-row">
-                        {fitInfo.rows.length > 1 && <div className="fitov-name">{r.g}</div>}
-                        {r.n < 3 ? (
-                          <div className="dim">区间内只有 {r.n} 个点，无法拟合</div>
-                        ) : (
-                          <>
-                            <div>斜率 {fmtNum(r.slope)} Å²/ps</div>
-                            <div>R² {fmtNum(r.r2)}</div>
-                            <div>D {fmtD(r.d)} m²/s</div>
-                          </>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
             </div>
           </>
         )}

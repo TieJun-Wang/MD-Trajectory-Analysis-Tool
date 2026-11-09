@@ -954,25 +954,33 @@ table.inforows tr:first-child td { padding-top: 3px; }
   border-radius: var(--radius);
 }
 
-/* 图表 + 覆盖层容器（MSD 拟合区间 / 斜率 R² D 直接压在图上） */
+/* 图表容器（MSD 拟合信息条在图外，不再盖住标题 / ECharts 工具条） */
 .chartwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 .chartwrap > .chart-box { flex: 1 1 auto; }
-.fitov {
-  position: absolute; top: 8px; z-index: 3;
-  font-size: 11px; line-height: 1.5; color: #334155;
-  background: rgba(255, 255, 255, 0.86);
-  border: 1px solid var(--line); border-radius: 6px;
-  padding: 3px 7px; pointer-events: auto;
+
+/* MSD 线性区拟合：图上方一条信息栏 —— 左边拟合区间（可改），右边统计量（左对齐） */
+.fitbar {
+  flex: 0 0 auto;
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 12px; margin-bottom: 6px;
+  font-size: 11px; line-height: 1.45; color: #334155;
 }
-.fitov.l { left: 10px; }
-.fitov.r { right: 10px; text-align: right; }
-.fitov-row + .fitov-row { margin-top: 6px; border-top: 1px dashed var(--line); padding-top: 4px; }
-.fitov-name { font-weight: 650; }
-.fitov-in { display: inline-flex; gap: 4px; align-items: center; margin-left: 6px; }
-.fitov-in input {
-  width: 52px; font-size: 11px; padding: 1px 3px;
+.fitbar-l {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  min-width: 0;
+}
+.fitbar-l input {
+  width: 50px; font-size: 11px; padding: 1px 3px;
   border: 1px solid var(--line); border-radius: 4px;
 }
+.fitbar-r {
+  flex: 0 0 auto;
+  border: 1px solid var(--line); border-radius: 6px;
+  background: #fff; padding: 3px 9px;
+  text-align: left;
+}
+.fitbar-row + .fitbar-row { margin-top: 5px; border-top: 1px dashed var(--line); padding-top: 4px; }
+.fitbar-name { font-weight: 650; }
 
 /* ---------------------------------------------------------- 全屏显示 */
 /* 原生 Fullscreen API 生效时由浏览器接管尺寸；这里额外给一点内边距，
