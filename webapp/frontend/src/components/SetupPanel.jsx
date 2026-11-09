@@ -673,7 +673,7 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
                placeholder={reeScope > 1 ? `如 1,${reeScope}（1–${reeScope}）` : '如 0,3034（留空自动）'}
                style={{ minWidth: inputMinWidth('如 1,99999（1–99999）') }}
                value={params.ree_atoms ?? ''}
-               title={`体系共 ${reeScope} 个原子：填两个原子序号（从 1 起，逗号或空格分隔），如 1,10`
+               title={`分析对象（主链）共 ${reeScope} 个原子：填两个原子序号（从 1 起，逗号或空格分隔），如 1,10`
                  + (reeEcho ? `。当前填写：${reeEcho}` : '。留空则按上面选的来源自动判断')}
                onChange={(e) => setParams({ ...params, ree_atoms: e.target.value })} />,
         '如 0,3034（留空自动）'),

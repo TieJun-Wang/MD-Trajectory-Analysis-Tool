@@ -1209,11 +1209,24 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
     end_method = "键连接图端原子"
     if atom_indices is not None:
         if len(atom_indices) < 2:
-            raise ValueError("atom_indices 需要两个绝对原子编号")
-        pairs = [("用户指定", int(atom_indices[0]), int(atom_indices[1]))]
+            raise ValueError("atom_indices 需要两个原子编号")
+        n_ag = int(len(ag.indices))
+        sel_abs = [int(x) for x in np.asarray(ag.indices)]
+        pos = []
+        for x in atom_indices[:2]:
+            xi = int(x)
+            if 1 <= xi <= n_ag:
+                pos.append(sel_abs[xi - 1])            # 1 起：本组（主链）第 xi 个原子
+            elif 0 <= xi < n_ag:
+                pos.append(sel_abs[xi])                # 兼容 0 起写法
+            else:
+                pos.append(xi)                         # 兜底：当作绝对编号
+        pairs = [("用户指定", pos[0], pos[1])]
         end_method = "用户指定"
-        notes.append(f"使用 atom_indices 显式指定的两个原子作为链端："
-                     f"{_atom_label(u, pairs[0][1])} – {_atom_label(u, pairs[0][2])}。")
+        notes.append(f"按「本组（主链）原子顺序」取第 {int(atom_indices[0])} / "
+                     f"第 {int(atom_indices[1])} 个原子作为链端："
+                     f"{_atom_label(u, pairs[0][1])} – {_atom_label(u, pairs[0][2])}"
+                     f"（本组共 {n_ag} 个原子）。")
     elif str(ends) == "selection":
         pairs = [(label, int(ag.indices[0]), int(ag.indices[-1]))]
         end_method = "旧口径（所选原子组首尾原子）"
