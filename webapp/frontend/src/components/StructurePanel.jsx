@@ -415,7 +415,10 @@ function RecogTree({ st, recog }) {
                                       title={[
                                         `${o.type_label} · ${o.chain_type_label}`,
                                         `原子 ${o.n_atoms}，键 ${o.n_bonds}，`
-                                          + `重原子 ${o.n_heavy}，环秩 ${o.n_rings}`,
+                                          + `重原子 ${o.n_heavy}，环秩 ${o.n_rings}`
+                                          + (o.n_ring6
+                                            ? `，6 元环 ${o.n_ring6}（苯环 ${o.n_benzene}）`
+                                            : ""),
                                         o.status_label,
                                       ].join('\n')}>
                                   {o.name}

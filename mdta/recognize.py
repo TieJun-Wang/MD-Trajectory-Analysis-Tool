@@ -98,6 +98,10 @@ class Recognition:
     heavy_of_mol: np.ndarray
     rings_of_mol: np.ndarray
     branch_of_mol: np.ndarray
+    #: 6 元环数 / 苯环数（6 元碳环、环内键长 ≤1.50 Å）/ 环大小分布
+    ring6_of_mol: np.ndarray
+    benz_of_mol: np.ndarray
+    ring_sizes_of_mol: list
     #: 每个分子的元素组成 ``{元素: 个数}``（只在需要时用，分子级别很小）
     comp_of_mol: list[dict]
     #: 每个分子的代表残基名（拓扑里的 resname，可能为空串）
@@ -256,6 +260,13 @@ class Recognition:
             "n_bonds": int(self.bonds_of_mol[m]),
             "n_heavy": int(self.heavy_of_mol[m]),
             "n_rings": int(self.rings_of_mol[m]),
+            # 6 元环 / 苯环（石墨烯那种带虚线圈的芳香六元环）
+            "n_ring6": (int(self.ring6_of_mol[m])
+                        if self.ring6_of_mol is not None else 0),
+            "n_benzene": (int(self.benz_of_mol[m])
+                          if self.benz_of_mol is not None else 0),
+            "ring_sizes": (dict(self.ring_sizes_of_mol[m])
+                           if self.ring_sizes_of_mol else {}),
             "n_branch": int(self.branch_of_mol[m]),
             "composition": dict(self.comp_of_mol[m]),
             "resname": self.resname_of_mol[m],
@@ -421,6 +432,23 @@ def recognize(universe, *, timeout_hint: float | None = None) -> Recognition:
     # 环秩（连通分量内）：E − V + 1，重原子骨架同理
     rings = np.maximum(0, he - hv + 1)
 
+    # 6 元环 / 苯环：只给**有环**的分子算（无环分子一次都不跑，不影响大体系速度）
+    ring6 = np.zeros(n_c, dtype=np.int64)
+    benz = np.zeros(n_c, dtype=np.int64)
+    ring_sizes: list[dict] = [dict() for _ in range(n_c)]
+    try:
+        from .rings import analyze_rings
+        cand = np.flatnonzero(rings > 0)
+        if 0 < cand.size <= 20000:                    # 防御：超多分子不逐个枚举
+            for c in cand:
+                idxs = np.flatnonzero(comp == c)
+                st = analyze_rings(u, idxs)
+                ring6[c] = int(st["n_ring6"])
+                benz[c] = int(st["n_benzene"])
+                ring_sizes[c] = dict(st["sizes"])
+    except Exception:                                 # noqa: BLE001
+        pass
+
     # ---- 元素组成 / 残基名（每个分子一份，分子通常很小）
     comp_of = [dict() for _ in range(n_c)]
     for i in range(n):
@@ -585,6 +613,9 @@ def recognize(universe, *, timeout_hint: float | None = None) -> Recognition:
         bonds_of_mol=e,
         heavy_of_mol=hv,
         rings_of_mol=rings,
+        ring6_of_mol=ring6,
+        benz_of_mol=benz,
+        ring_sizes_of_mol=ring_sizes,
         branch_of_mol=branch,
         comp_of_mol=comp_of,
         resname_of_mol=resname_of,
