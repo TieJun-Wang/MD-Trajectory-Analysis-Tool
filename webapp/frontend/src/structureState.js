@@ -148,6 +148,8 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
       try {
         const view = viewerRef.current && viewerRef.current.getView
           ? viewerRef.current.getView() : null
+        // 把"上次看到的相机"留在内存里：切标签页 / 重建几何时也能恢复视角
+        if (view) pendingViewRef.current = view
         const payload = {
           scope: [...scope], filters, onlySelected, mode, view,
         }

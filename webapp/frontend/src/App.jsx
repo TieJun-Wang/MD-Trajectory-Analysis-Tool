@@ -57,7 +57,16 @@ const SEC_SETUP = 'setup'
 export default function App() {
   const [health, setHealth] = useState(null)
   const [sess, setSess] = useState(null)
-  const [tab, setTab] = useState('charts')
+  // 当前标签页：F5 之后**回到原来那一页**（用户实测：一刷新就跳到「图表」）
+  const [tab, setTab] = useState(() => {
+    try {
+      const saved = window.localStorage.getItem('mdta.tab')
+      return TABS.some(([k]) => k === saved) ? saved : 'charts'
+    } catch { return 'charts' }
+  })
+  useEffect(() => {
+    try { window.localStorage.setItem('mdta.tab', tab) } catch { /* 忽略 */ }
+  }, [tab])
   const [log, setLog] = useState([])
 
   // 折叠面板：一次只展开一块
