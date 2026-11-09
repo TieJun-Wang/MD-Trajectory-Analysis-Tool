@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ChartView from './ChartView'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
-import { soloAxisInfo } from '../chartOption'
+import { buildOption, soloAxisInfo } from '../chartOption'
 
 export default function ChartPanel({ run, chart, setChart, live, titles = {},
                                     current = null, panelIndex = 0, groups,
@@ -88,17 +88,34 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
   const [fitWin, setFitWin] = useState({ a: '', b: '' })
   useEffect(() => { setFitWin({ a: '', b: '' }) }, [chart.name, panelIndex])
 
+  // 图例里**当前可见**的曲线标签：用户点过图例就用点的，否则用图表默认图例
+  // （legend.selected —— 多组分默认只勾第一组）。图上没画的组分，统计量也不该出现。
+  const legendVisible = useMemo(() => {
+    if (!current) return null
+    // 用户点过图例就完全按他点的来（全关也照办：图上没画，统计量也不给）
+    if (Array.isArray(visible)) return new Set(visible)
+    try {
+      const opt = buildOption(current, panelIndex)
+      const sel = opt && opt.legend && opt.legend.selected
+      if (sel) {
+        return new Set(Object.keys(sel).filter((k) => sel[k]))
+      }
+    } catch { /* 构造不出选项就退回全显示 */ }
+    return null
+  }, [current, panelIndex, visible])
+
   const fitGroups = useMemo(() => {
     if (!isMsdFit) return []
     const gs = []
     for (const c of current.curves || []) {
       if (c.panel !== 1) continue
       if (/拟合/.test(String(c.label))) continue
+      if (legendVisible && !legendVisible.has(String(c.label))) continue
       const g = String(c.group || c.label)
       if (!gs.includes(g)) gs.push(g)
     }
     return gs
-  }, [isMsdFit, current])
+  }, [isMsdFit, current, legendVisible])
 
   const fitInfo = useMemo(() => {
     if (!isMsdFit || !fitGroups.length) return null
