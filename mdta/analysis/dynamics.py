@@ -562,7 +562,8 @@ def _box_heights_from_dims(dims) -> np.ndarray:
 
 
 def compute_msd_axes(mdt, ag, selection: FrameSelection, *, object: str = "molecule",
-                     remove_drift: bool = False, max_particles: int | None = None,
+                     remove_drift: bool = False, unwrap: bool = False,
+                     max_particles: int | None = None,
                      max_lag: int | None = None, n_error_blocks: int = 5,
                      memory_budget: float | None = DEFAULT_MEMORY_BUDGET,
                      stream: bool | None = None, dtype=None, workers: int = 0,
@@ -598,7 +599,19 @@ def compute_msd_axes(mdt, ag, selection: FrameSelection, *, object: str = "molec
                                           stream=stream, dtype=dtype,
                                           workers=workers, verbose=verbose)
     on_disk = isinstance(series, np.memmap)
-    unwrapped, diag = _unwrap_series(series, boxes, verbose=verbose, inplace=on_disk)
+    # ---- 跨帧追踪：两种口径（用户实测：Materials Studio 的 .trj 坐标**已经是解包的**，
+    #      再"补"一次最小镜像反而会把 >L/2 的位移改错 → 与 Forcite 差一截）。
+    #      · ``unwrap=False``（**默认**，= MDAnalysis ``analysis.msd.EinsteinMSD`` 口径）：
+    #        直接用文件里的坐标做差，不做任何 PBC 修正。Forcite 也是这个口径；
+    #      · ``unwrap=True``：对相邻帧做最小镜像累加，给"坐标被折回盒内"的轨迹用。
+    #        判据是 diag 里的"最小镜像近似失效比例"：≈0 说明折与不折一样（无副作用），
+    #        明显偏离 0 却仍要折，就可能把已经解包的轨迹改坏。
+    if unwrap:
+        unwrapped, diag = _unwrap_series(series, boxes, verbose=verbose,
+                                         inplace=on_disk)
+    else:
+        unwrapped = series
+        diag = {"最小镜像近似失效粒子数": 0, "检查的粒子-帧数": 0, "失效比例": 0.0}
     drift_removed = False
     if remove_drift and unwrapped.shape[1] >= 4:
         if on_disk:
@@ -730,6 +743,7 @@ def compute_msd_axes(mdt, ag, selection: FrameSelection, *, object: str = "molec
 
 def compute_msd(mdt, ag, selection: FrameSelection, *, max_lag: int | None = None,
                 object: str = "atom", remove_drift: bool = False,
+                unwrap: bool = False,
                 max_particles: int | None = None,
                 memory_budget: float | None = DEFAULT_MEMORY_BUDGET,
                 stream: bool | None = None, dtype=None, workers: int = 0,
@@ -740,7 +754,7 @@ def compute_msd(mdt, ag, selection: FrameSelection, *, max_lag: int | None = Non
     **分子质心**追踪，那才是"分子扩散"的正确对象。
     """
     lag_t, msd, diag = compute_msd_axes(mdt, ag, selection, object=object,
-                                        remove_drift=remove_drift,
+                                        remove_drift=remove_drift, unwrap=unwrap,
                                         max_particles=max_particles,
                                         max_lag=max_lag,
                                         memory_budget=memory_budget,
@@ -883,8 +897,8 @@ def diffusion_coefficient(lag_t: np.ndarray, msd: np.ndarray,
 @register("msd", "均方位移 MSD")
 def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 fit_fraction: tuple[float, float] = (0.3, 1.0),
-                dim: int = 3, object: str = "molecule",
-                remove_drift: bool = False,
+                dim: int = 3, object: str = "atom",
+                remove_drift: bool = False, unwrap: bool = False,
                 max_particles: int | None = None,
                 fit_method: str = "gls",
                 n_error_blocks: int = 5,
@@ -896,17 +910,22 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 max_lag_frames: int | None = None,
                 block_frames: int | None = None,
                 verbose: bool = False) -> AnalysisResult:
-    """均方位移 MSD（默认追踪对象：**分子质心**）。
+    """均方位移 MSD（默认追踪对象：**原子**；跨帧用文件坐标，不额外展开）。
 
     参数
     ----
     groups
         ``{组分名: AtomGroup}``，可一次比较多个组分（例如界面区 vs 体相区）。
     object
-        ``"molecule"``（默认）→ 每个分子取其**质心**作为一个被追踪粒子，
-        得到的是"分子的平动扩散"（质量加权，跨周期边界先聚拢再求质心）；
-        ``"atom"`` → 每个原子各算一个粒子，MSD 里会混进分子内部振动/转动。
-        组分没有分子信息时自动退化为原子并注明。
+        ``"atom"``（**默认**）→ 每个原子各算一个粒子 —— 这是 Materials Studio
+        Forcite 以及 MDAnalysis ``analysis.msd.EinsteinMSD`` 的口径；
+        ``"molecule"`` → 每个分子取**质心**作为一个被追踪粒子（"分子的平动扩散"，
+        数值会比原子口径大，且与 Forcite 的 MSD 不可直接对比）。
+    unwrap
+        ``False``（**默认**）→ 直接用文件里的坐标做差。MS 的 ``.trj`` 坐标通常
+        **已经是解包的**，再补一次最小镜像反而会把 >L/2 的位移改错（用户实测：
+        graphite 27 与 Forcite 对不上就是这个）。``True`` → 对相邻帧做最小镜像
+        累加，给"坐标被折回盒内"的轨迹用（判据看诊断里的"最小镜像近似失效比例"）。
     max_particles
         ``None``（默认）= **全部粒子参与**。1.0.2 起不再按内存预算自动抽稀；
         序列过大时改用磁盘内存映射（见 ``memory_budget`` / ``stream``）。
@@ -999,7 +1018,7 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             continue
         g_object = str(per_group_obj.get(name) or object)
         lag_t, msd, diag = compute_msd_axes(mdt, ag, selection, object=g_object,
-                                            remove_drift=remove_drift,
+                                            remove_drift=remove_drift, unwrap=unwrap,
                                             max_particles=max_particles,
                                             n_error_blocks=n_error_blocks,
                                             memory_budget=memory_budget,
@@ -1065,6 +1084,9 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         res.summary[f"{name} 是否抽稀过粒子"] = "是" if diag.get("已抽稀") else "否（全部参与）"
         res.summary[f"{name} 序列存储"] = str(diag.get("存储") or "")
         res.summary[f"{name} 去漂移"] = "是" if diag.get("去漂移") else "否"
+        res.summary[f"{name} 跨帧追踪"] = (
+            "最小镜像累加（适合坐标被折回盒内的轨迹）" if unwrap
+            else "文件坐标（不展开；Forcite / EinsteinMSD 口径）")
         res.summary[f"{name} 算法"] = str(diag.get("算法", ""))
         res.summary[f"{name} τ 上限 (ps)"] = float(lag_t[-1]) if lag_t.size else float("nan")
         res.summary[f"{name} τ 轴点数"] = int(lag_t.size)

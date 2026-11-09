@@ -1045,6 +1045,114 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
     return res
 
 
+def _ends_of_element(ag, el: str) -> dict:
+    """只用**某一种元素**的原子重做一次链端判定。
+
+    键图端偶尔会给出「一端 C、一端 H」这种元素不同的组合（末基氢成了度为 1 的原子），
+    这时按同元素子图（碳骨架）重找一次，得到化学意义上的 C…C 链端。
+    """
+    from collections import deque
+
+    idx = np.asarray(ag.indices)
+    n = idx.size
+    out = {"ok": False, "ends": None, "reason": "", "n_components": 0,
+           "n_degree1": 0, "branched": False, "element": el}
+    bonds = _bonds_of(ag)
+    if bonds is None or n < 3:
+        out["reason"] = "无法按单元素键图判定链端"
+        return out
+    try:
+        els = np.asarray(ag.elements, dtype=str)
+    except Exception:  # noqa: BLE001
+        return out
+    pos_of = {int(a): i for i, a in enumerate(idx)}
+    keep = {i for i in range(n) if els[i] == el}
+    if len(keep) < 3:
+        out["reason"] = f"{el} 原子不足 3 个"
+        return out
+    adj: list[list[int]] = [[] for _ in range(n)]
+    for b in bonds:
+        i, j = int(b[0].index), int(b[1].index)
+        if i in pos_of and j in pos_of:
+            a, c = pos_of[i], pos_of[j]
+            if a in keep and c in keep:
+                adj[a].append(c)
+                adj[c].append(a)
+    seen = np.zeros(n, dtype=bool)
+    comps: list[list[int]] = []
+    for s in sorted(keep):
+        if seen[s] or not adj[s]:
+            continue
+        q = deque([s])
+        seen[s] = True
+        comp = [s]
+        while q:
+            u = q.popleft()
+            for v in adj[u]:
+                if not seen[v]:
+                    seen[v] = True
+                    comp.append(v)
+                    q.append(v)
+        comps.append(comp)
+    if len(comps) != 1:
+        out["reason"] = f"{el} 键图有 {len(comps)} 个连通分量"
+        return out
+    comp = comps[0]
+    deg1 = [v for v in comp if len(adj[v]) == 1]
+    if not deg1:
+        out["reason"] = f"{el} 键图没有端原子（环状/网络）"
+        return out
+    if len(deg1) == 2:
+        i1, i2 = deg1[0], deg1[1]
+    else:
+        def bfs(src):
+            d = {src: 0}
+            qq = deque([src])
+            while qq:
+                u = qq.popleft()
+                for v in adj[u]:
+                    if v not in d:
+                        d[v] = d[u] + 1
+                        qq.append(v)
+            far = max(d, key=lambda x: d[x])
+            return far, d[far]
+        a0, _d0 = bfs(deg1[0])
+        a1, _d1 = bfs(a0)
+        i1, i2 = a0, a1
+    out.update(ok=True, ends=(int(idx[i1]), int(idx[i2])),
+               n_components=1, n_degree1=len(deg1), branched=len(deg1) > 2,
+               method=f"同元素键图端点（{el}…{el}）")
+    return out
+
+
+def _finish_ends(ag, info: dict) -> dict:
+    """键图端给出后：若两端**不是同一种元素**，改用同元素子图重新配对。"""
+    if not info.get("ok") or info.get("ends") is None:
+        return info
+    try:
+        els = np.asarray(ag.elements, dtype=str)
+    except Exception:  # noqa: BLE001
+        return info
+    idx = np.asarray(ag.indices)
+    pos_of = {int(a): i for i, a in enumerate(idx)}
+    try:
+        e1 = str(els[pos_of[int(info["ends"][0])]])
+        e2 = str(els[pos_of[int(info["ends"][1])]])
+    except Exception:  # noqa: BLE001
+        return info
+    info["elements"] = f"{e1}…{e2}"
+    if not e1 or not e2 or e1 == e2:
+        return info
+    cand = [e for e in (e1, e2) if e != "H"] or [e1, e2]
+    for el in cand:
+        alt = _ends_of_element(ag, el)
+        if alt.get("ok"):
+            alt["elements"] = f"{el}…{el}"
+            alt["method"] = str(alt.get("method")) +                 f"（原图两端元素不同：{e1}/{e2}）"
+            return alt
+    return info
+
+
 @register("ree", "端到端距离 R_ee")
 
 def _bond_graph_ends_prefer_heavy(ag) -> dict:
@@ -1058,8 +1166,8 @@ def _bond_graph_ends_prefer_heavy(ag) -> dict:
     info = bond_graph_ends(ag, heavy_only=True)
     if info.get("ok"):
         info["method"] = (info.get("method") or "") + "（重原子键图）"
-        return info
-    return bond_graph_ends(ag, heavy_only=False)
+        return _finish_ends(ag, info)
+    return _finish_ends(ag, bond_graph_ends(ag, heavy_only=False))
 
 
 def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
@@ -1077,7 +1185,10 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
         显式指定两个端原子的绝对编号，优先级最高（用于复现旧口径或特殊对象）。
     ends
         ``"bond_graph"``（默认）→ 由键图找端原子；``"selection"`` → 沿用 1.0.0 的
-        旧口径（所选原子组的第一个与最后一个原子），仅用于对照。
+        旧口径（所选原子组的第一个与最后一个原子），仅用于对照；
+        ``"residue"`` → 逐**残基**取 ``res.atoms[0]`` / ``res.atoms[-1]``，并用
+        **原始坐标**（不解包、不做最小镜像）—— 与 ``test/mda_test.py`` 的
+        ``test_ree`` 完全同口径，用于逐帧对账。
     per_molecule
         组内含多个分子时逐分子各算自己的 R_ee（各自找端原子）。
 
@@ -1092,6 +1203,7 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
     notes: list[str] = []
 
     # ------------------------------------------------ 端原子集合的确定
+    raw_mode = False          # True = 用原始坐标（不解包、不最小镜像）
     ms = molecule_slices(ag) if (per_molecule and atom_indices is None) else None
     pairs: list[tuple[str, int, int]] = []          # (标签, 端原子1, 端原子2)
     end_method = "键连接图端原子"
@@ -1107,6 +1219,22 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
         end_method = "旧口径（所选原子组首尾原子）"
         notes.append("⚠️ 使用旧口径（所选原子组的首尾原子）作为链端——"
                      "这通常**不是**真实链端，仅用于与 1.0.0 对照。")
+    elif str(ends) == "residue":
+        # 逐残基的首/末原子（= mda_test.py 的 test_ree 口径）。注意它量的是
+        # **残基**的首末原子，不是化学意义上的链端；且用原始坐标，所以跨盒子时
+        # 数值会跳（这正是那份导出的特征）。
+        raw_mode = True
+        for ri in range(ag.residues.n_residues):
+            atoms = ag.residues[ri].atoms
+            if atoms.n_atoms < 2:
+                continue
+            nm = f"{atoms.resnames[0]}{atoms.resids[0]}"
+            pairs.append((nm, int(atoms.indices[0]), int(atoms.indices[-1])))
+        end_method = "逐残基首/末原子（原始坐标，mda_test.py 口径）"
+        notes.append(f"该组分含 {ag.residues.n_residues} 个残基，逐残基用"
+                     f"`res.atoms[0]` 与 `res.atoms[-1]` 计算，帧内对残基平均。")
+        notes.append("⚠️ 这是**残基**首末原子、且**不做**跨周期解包/最小镜像，"
+                     "所以数值会随周期性跳变；要看化学链端请用默认的「键图端原子」。")
     elif ms is not None and len(ms[1]) > 1:
         _m, slices, mol_labels = ms
         skipped = 0
@@ -1143,6 +1271,8 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
             return res
         pairs = [(label, int(info["ends"][0]), int(info["ends"][1]))]
         end_method = str(info.get("method", "键连接图端原子"))
+        if info.get("elements"):
+            notes.append(f"链端元素：{info['elements']}")
         notes.append(f"链端来源：{end_method}。选中的两个原子是 "
                      f"{_atom_label(u, pairs[0][1])} – {_atom_label(u, pairs[0][2])}"
                      f"（1.0.0 取的是「所选原子组首尾原子」，通常并不是链端）。")
@@ -1157,11 +1287,12 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
     for p, (name, i1, i2) in enumerate(pairs):
         pair_ag = u.atoms[[i1, i2]]
         for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
-            pp = positions_for(pair_ag, unwrap=unwrap)
+            pp = positions_for(pair_ag, unwrap=bool(unwrap and not raw_mode))
             if pp.shape[0] < 2:
                 continue
-            ree[k, p] = compute_end_to_end(pp[0], pp[-1],
-                                           box=None if unwrap else u.dimensions)
+            ree[k, p] = compute_end_to_end(
+                pp[0], pp[-1],
+                box=None if (unwrap or raw_mode) else u.dimensions)
 
     main = np.nanmean(ree, axis=1) if n_pair > 1 else ree[:, 0]
     tx, tlabel = time_axis(times)
@@ -1181,6 +1312,11 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
     res.add_curve(curve_label, tx, main, kind="line", panel=0)
     stat = describe_array(main)
     res.add_curve("平均 R_ee", tx, np.full_like(tx, stat["mean"]), kind="line", panel=0)
+    try:
+        if info.get("elements"):
+            res.summary["链端元素"] = str(info["elements"])
+    except NameError:
+        pass
 
     finite = main[np.isfinite(main)]
     if finite.size:

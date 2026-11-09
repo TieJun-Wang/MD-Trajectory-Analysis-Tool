@@ -69,7 +69,10 @@ export default function App() {
   })
   const [params, setParams] = useState({
     cutoff: 5.0, axis: 2, nbins: 100, rmax: 12, dihedral_mode: 'auto',
-    rdf_mode: 'inter', msd_object: 'molecule', gauche_edge: 120,
+    // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
+    // 「分子质心」会大一圈（分子内振动/转动被去掉），两边不能直接比。
+    rdf_mode: 'inter', rdf_nbins: 120, msd_object: 'atom', msd_unwrap: false,
+    gauche_edge: 120,
     // 「减去整体漂移」默认**关**：Materials Studio Forcite 的 MSD 不去漂移，
     // 默认关掉才能与它逐点对齐（实测 PE50：关掉差 0.000%，开着差 −0.01…−0.19%）。
     // NPT 体系里整盒缓慢平移会污染 MSD，那时再勾上。
@@ -481,11 +484,17 @@ export default function App() {
       params: {
         density: { axis: Number(params.axis), nbins: Number(params.nbins) },
         interface: { axis: Number(params.axis), nbins: Math.max(Number(params.nbins), 60) },
-        rdf: { rmax: Number(params.rmax), nbins: 120, mode: params.rdf_mode },
+        // RDF 分箱数以前写死 120 —— Forcite 是按「间隔(Å)」给的（如 20 Å / 0.02 Å
+        // = 1000 箱），界面能设分箱数，两边才能逐 bin 对比。
+        rdf: { rmax: Number(params.rmax),
+               nbins: Math.max(2, Number(params.rdf_nbins) || 120),
+               mode: params.rdf_mode },
         // `remove_drift`：默认**关**（= Materials Studio Forcite 的口径，实测逐点一致）。
         // NPT 体系里整盒平移会把 MSD 抬起来，那时把「减去整体漂移」勾上。
+        // `unwrap`：默认**关**（= 直接用文件坐标，EinsteinMSD/Forcite 口径）。
         msd: { object: params.msd_object,
-               remove_drift: params.msd_drift === true },
+               remove_drift: params.msd_drift === true,
+               unwrap: params.msd_unwrap === true },
         contact: { cutoff: Number(params.cutoff), mode: params.contact_mode },
         dihedral: { mode: params.dihedral_mode,
                     gauche_edge: Number(params.gauche_edge) || 120 },
@@ -500,7 +509,8 @@ export default function App() {
         // object="system" 整组算 Rg。后端只算选中的那种。
         rg: { mass_weighted: params.mass_weighted !== false,
               object: params.rg_object === 'system' ? 'system' : 'molecule' },
-        ree: { ends: params.ree_ends || 'bond_graph',
+        // 链端来源三选一：bond_graph / residue / custom（custom 由 atom_indices 生效）
+        ree: { ends: (params.ree_ends === 'residue' ? 'residue' : 'bond_graph'),
                per_molecule: params.per_molecule !== false,
                // 手工指定两个成键原子作为链端（留空 = None，按 ends 自动判定）
                atom_indices: reeAtoms },

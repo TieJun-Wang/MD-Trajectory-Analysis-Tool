@@ -659,8 +659,9 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
             : '只管 R_ee：每个分子各算自己的端到端距离',
           { disabled: singleMol }), '按分子分别算'),
       F('ree_ends', 'R_ee 链端来源', 'select', sel('ree_ends', [
-        ['bond_graph', '键连图端基（默认）'],
-        ['selection', '所选原子组首尾'],
+        ['bond_graph', '键图端（自动，推荐）'],
+        ['residue', '逐残基首末（对照 mda_test.py）'],
+        ['custom', '手动指定两原子'],
       ])),
       F('ree_atoms', 'R_ee 指定原子', 'text',
         <input type="text" placeholder="如 0,3034（留空自动）"
@@ -684,6 +685,8 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     ]],
     ['径向分布函数 RDF', ['rdf'], [
       F('rmax', 'RDF 最大 r (Å)', 'input', numInput('', { step: 1, ...p('rmax') })),
+      F('rdf_nbins', 'RDF 分箱数', 'input',
+        numInput('120', { step: 1, min: 1, ...p('rdf_nbins') }), '步长 = rmax/分箱数'),
       F('rdf_mode', 'RDF 配对模式', 'select', sel('rdf_mode', [
         ['inter', '分子间（默认）'],
         ['intra', '分子内'],
@@ -715,9 +718,14 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     ]],
     ['均方位移 MSD', ['msd', 'diffusion'], [
       F('msd_object', 'MSD 追踪对象', 'select', sel('msd_object', [
-        ['molecule', '分子质心（默认）'],
-        ['atom', '原子'],
+        ['atom', '原子（默认，= Forcite / EinsteinMSD 口径）'],
+        ['molecule', '分子质心（比 Forcite 大一圈）'],
       ])),
+      F('msd_unwrap', 'PBC 展开', 'check',
+        chk('msd_unwrap', '跨帧补最小镜像',
+          '默认不勾：直接用文件里的坐标做差 —— MS 的 .trj 坐标通常**已经是解包的**，'
+          + '\n再补一次最小镜像会把 >L/2 的位移改错（graphite 27 与 Forcite 对不上就是这个）。'
+          + '\n只有当轨迹坐标被折回盒内（例如 GROMACS 的 xtc 默认折回）时勾上。'), '跨帧补最小镜像', 3),
       F('msd_drift', '去漂移', 'check',
         chk('msd_drift', '减去整体漂移',
           '默认不勾（= Materials Studio Forcite 的口径，可逐点对齐）。\n'

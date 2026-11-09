@@ -1912,7 +1912,10 @@ class Session:
 
             # ---- 阶段一：先跑几帧，实测每项用时并外推；按短→长排好序 -----
             estimates: dict[str, float | None] = {}
-            if prep.get("estimate", True) and len(prep["which"]) > 1:
+            # ⚠️ 以前写成 `len(which) > 1`：只勾**一项**时完全不预估，
+            #    界面上就看不到"预计约 X"，用户实测反馈过（"只测一项也要给预计用时"）。
+            #    现在哪怕只勾一项也预估 —— 排序对单项没意义，但"要跑多久"照样有用。
+            if prep.get("estimate", True) and len(prep["which"]) >= 1:
                 with self._lock:
                     job.phase = "estimate"
                     job.message = "正在预估各分析项用时（每项先跑几帧实测）…"

@@ -460,10 +460,48 @@ def _molnums_for_filter(ag) -> np.ndarray | None:
     为什么：``-1`` 表示该残基没被归入任何分子。若原样参与比较，所有 ``-1``
     原子会被判成"同一个分子"，于是分子间 RDF 会把它们整体丢掉。给它们各自
     独立编号后，它们之间的配对按"分子间"处理（更保守，也不会凭空消失）。
+
+    ⚠️ **只在 RDF / 接触 / 界面 / 密度这条链上使用**（``conformation.py`` 与
+    ``dynamics.py`` 用的是 :func:`_atom_molnums`，不受这里的修正影响 —— Rg/MSD
+    已经与 Forcite 对齐，不能再动）。
+
+    退化判据（用户实测 PE50）：残基级 ``molnums`` 可能把**同一个键连通块切成几份**
+    （该体系每个分子 32 原子 = 16 个 4 原子残基，于是"相邻残基"被当成两个分子，
+    跨残基的键会算出 0.01–0.28 Å 的假距离，分子间 g(r) 在 r<2 Å 冒出 8~9，
+    而 Forcite 那边严格为 0）。检测到"一个连通块横跨多个 molnum"时改用
+    **键连通分量**作为原子级分子编号。
     """
     m = _atom_molnums(ag)
     if m is None:
         return None
+    # ---- 连通块 vs molnum 交叉检查（只有这种退化才切换，正常体系完全不变）
+    try:
+        from ..topology import bond_components
+
+        u = ag.universe
+        sel = np.asarray(ag.indices, dtype=np.int64)
+        pos_of = np.full(int(u.atoms.n_atoms), -1, dtype=np.int64)
+        pos_of[sel] = np.arange(sel.size)
+        edges = np.asarray(u.bonds.indices, dtype=np.int64).reshape(-1, 2)
+        e = pos_of[edges]
+        e = e[(e[:, 0] >= 0) & (e[:, 1] >= 0)]
+        if e.size:
+            comp = bond_components(int(ag.n_atoms), e)
+            n_comp = int(np.unique(comp).size)
+            fine = False
+            if n_comp > 1:
+                order = np.argsort(comp, kind="stable")
+                cs = comp[order]
+                starts = np.flatnonzero(np.r_[True, cs[1:] != cs[:-1]])
+                ends = np.r_[starts[1:], order.size]
+                for s, t in zip(starts.tolist(), ends.tolist()):
+                    if np.unique(m[order[s:t]]).size > 1:
+                        fine = True
+                        break
+            if fine:
+                m = comp.astype(np.int64)
+    except Exception:                                        # noqa: BLE001
+        pass
     neg = m < 0
     if neg.any():
         m = m.copy()
@@ -531,6 +569,82 @@ def _subsample_group(ag, max_atoms: int):
             f"按分子整取（每 {step} 个分子取 1 个，共 {kept.size:,} 个分子）")
 
 
+#: 小于这个距离的原子对一律当异常（数值重叠 / 周期镜像残留），不参与 g(r)。
+_RDF_MIN_DIST = 0.3
+
+
+def _wrap_by_molecule(pa, pb, box, ma, mb):
+    """把每个**分子**作为刚体平移进盒（分子内构象不变）。
+
+    ``ma`` / ``mb`` 是原子级分子编号（与 ``pa`` / ``pb`` 的行一一对应）。
+    做法：分数坐标下把该分子中心减去 ``floor(中心)``（即整格平移），
+    于是分子重心落进 [0,1)³，而分子内部的相对位置一个数都不变。
+    """
+    from MDAnalysis.lib.mdamath import triclinic_vectors
+
+    dims = np.asarray(box, dtype=float)
+    M = np.asarray(triclinic_vectors(dims.astype(np.float32)), dtype=float)
+    Minv = np.linalg.inv(M)
+
+    def _one(p, comp):
+        if comp is None or p is None or not len(p):
+            return p
+        frac = np.asarray(p, dtype=float) @ Minv.T
+        out = np.array(p, dtype=float, copy=True)
+        for k in np.unique(comp):
+            idx = comp == k
+            if idx.sum() == 0:
+                continue
+            center = frac[idx].mean(axis=0)
+            shift = np.floor(center)
+            if np.any(shift != 0.0):
+                out[idx] -= shift @ M.T
+        return out
+
+    pa2 = _one(pa, ma)
+    pb2 = None if pb is None else _one(pb, mb)
+    return pa2, pb2
+
+
+def _pairs_bruteforce(pa, pb, rmax: float, box, same: bool):
+    """**大 cutoff 兜底**：MDAnalysis 的网格搜索（FastNS）要求
+    ``cutoff < 半个最短盒边``，超过就抛
+    ``ValueError: Cutoff 20.0 too large for box (max 15.68…)``；而 Materials Studio
+    Forcite 的 RDF 允许把 cutoff 设到更大（用户实测设 20 Å，两边就对不上）。
+    这里退化成**分块暴力距离**：内存按块控制，结果与网格法逐点一致。
+    ``same=True`` 只返回 ``i<j``（不含自配对），与 ``self_capped_distance`` 同约定。
+    """
+    from MDAnalysis.lib.distances import distance_array
+
+    other = pa if same else pb
+    n = int(pa.shape[0])
+    if not n or other is None or not len(other):
+        return np.zeros((0, 2), dtype=np.int64), np.zeros(0, dtype=float)
+    chunk = max(32, min(1024, int(4_000_000 // max(int(other.shape[0]), 1))))
+    I, J, D = [], [], []
+    for s in range(0, n, chunk):
+        d = np.asarray(distance_array(pa[s:s + chunk], other, box=box))
+        if same:
+            for r in range(d.shape[0]):
+                gi = s + r
+                row = d[r]
+                idx = np.flatnonzero(row[gi + 1:] <= rmax) + (gi + 1)
+                if idx.size:
+                    I.append(np.full(idx.size, gi, dtype=np.int64))
+                    J.append(idx.astype(np.int64))
+                    D.append(row[idx])
+        else:
+            flat = np.flatnonzero(d <= rmax)
+            if flat.size:
+                r_idx, c_idx = np.divmod(flat, d.shape[1])
+                I.append(s + r_idx.astype(np.int64))
+                J.append(c_idx.astype(np.int64))
+                D.append(d.ravel()[flat])
+    if not I:
+        return np.zeros((0, 2), dtype=np.int64), np.zeros(0, dtype=float)
+    return np.column_stack([np.concatenate(I), np.concatenate(J)]), np.concatenate(D)
+
+
 def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
                     exclude_bonded: bool = False, mode: str = "total",
                     verbose: bool = False):
@@ -577,6 +691,12 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
         pa = np.asarray(ref.positions, dtype=float)
         pb = None if same else np.asarray(conf.positions, dtype=float)
         box = u.dimensions
+        # 距离一律用**周期最小镜像**（与 MDAnalysis InterRDF / Forcite 同口径，
+        # selftest 有对账）。此前试过"坐标不在盒内就不用周期"的启发式：它能让
+        # PE50 的分子间短程归零，但会把"坐标恰好不在盒内、却本就该周期统计"的
+        # 体系（selftest 的水盒子、GROMACS 轨迹）算错，故不采用。
+        qc["坐标前处理"] = "周期最小镜像"
+        box_d = box
         if box is not None:
             try:
                 vol = box_volume_from_dims(box)
@@ -603,12 +723,25 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
                     qc["最小盒边长"] = min(float(qc["最小盒边长"]), float(ext.min()))
             qc["无盒帧"] = int(qc.get("无盒帧", 0)) + 1
         if same:
-            pairs, dist = self_capped_distance(pa, max_cutoff=rmax, box=box,
-                                               return_distances=True)
+            try:
+                pairs, dist = self_capped_distance(pa, max_cutoff=rmax, box=box_d,
+                                                   return_distances=True)
+            except Exception as exc:                          # noqa: BLE001
+                # 网格搜索要求 cutoff < 半盒边；Forcite 允许更大 cutoff（用户实测 20 Å）
+                if "too large for box" not in str(exc):
+                    raise
+                pairs, dist = _pairs_bruteforce(pa, pa, rmax, box_d, same=True)
+                qc["大cutoff兜底帧"] = int(qc.get("大cutoff兜底帧", 0)) + 1
             mc = ma
         else:
-            pairs, dist = capped_distance(pa, pb, max_cutoff=rmax, box=box,
-                                          return_distances=True)
+            try:
+                pairs, dist = capped_distance(pa, pb, max_cutoff=rmax, box=box_d,
+                                              return_distances=True)
+            except Exception as exc:                          # noqa: BLE001
+                if "too large for box" not in str(exc):
+                    raise
+                pairs, dist = _pairs_bruteforce(pa, pb, rmax, box_d, same=False)
+                qc["大cutoff兜底帧"] = int(qc.get("大cutoff兜底帧", 0)) + 1
             mc = mb
         if pairs.size:
             keep = np.ones(dist.size, dtype=bool)
@@ -630,8 +763,17 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
                 dist = dist[keep]
                 n_pairs += int(keep.sum())
         if dist.size:
-            h, _ = np.histogram(dist, bins=edges)
-            hist += h * (2.0 if same else 1.0)
+            # ⚠️ 极近距离对（严重重叠/镜像残留）必须剔除：它会把第 0 箱顶到几十上百，
+            # 相邻箱也被污染 —— 实测 PE50 的 RDF 前几箱出现过 g≈285 这种值，
+            # 而 Forcite 那边 r<2 Å 的分子间 g(r) 严格为 0。真实成键距离 ≥0.7 Å，
+            # 所以 < 0.3 Å 只可能是数值/镜像异常。
+            tiny = dist < _RDF_MIN_DIST
+            if tiny.any():
+                qc["异常近距离对数"] = int(qc.get("异常近距离对数", 0)) + int(tiny.sum())
+                dist = dist[~tiny]
+            if dist.size:
+                h, _ = np.histogram(dist, bins=edges)
+                hist += h * (2.0 if same else 1.0)
         n_used += 1
     qc["有效原子对数"] = n_pairs
     qc["统计帧数"] = n_used
@@ -820,11 +962,29 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         # 曲线再除以某个固定体积）。NPT 盒波动时这才是可复现且物理正确的做法。
         sum_inv_vol = float(qc.get("体积倒数和", 0.0) or 0.0)
         if sum_inv_vol > 0:
-            ideal = neff * shell * sum_inv_vol
             vbox_eff = float(n_used) / sum_inv_vol
         else:
-            ideal = n_used * neff * shell / vbox_fallback
             vbox_eff = vbox_fallback
+        if eff_mode == "intra":
+            # **分子内 g(r) 再除以分子数**：Materials Studio Forcite 是把"每个分子的
+            # 分子内配对分布"做**等权平均**（每个分子先各自归一），所以整体还要再除
+            # N_mol。实测 PE50：不加这一步时形状完全一致（相关 0.99982），但幅度
+            # 恒定高约 N_mol 倍（50 倍）；除以分子数后与 Forcite 逐点吻合。
+            n_mol_set = 1
+            try:
+                mm = _molnums_for_filter(ga)
+                if mm is not None:
+                    n_mol_set = max(1, int(np.unique(mm).size))
+            except Exception:                                 # noqa: BLE001
+                pass
+            _den = (sum_inv_vol if sum_inv_vol > 0
+                    else float(n_used) / vbox_fallback)
+            ideal = neff * shell * n_mol_set * _den
+            res.summary[f"{a}-{b} 分子内按分子数归一"] = n_mol_set
+        elif sum_inv_vol > 0:
+            ideal = neff * shell * sum_inv_vol
+        else:
+            ideal = n_used * neff * shell / vbox_fallback
         min_blen_seen = min(min_blen_seen, float(qc.get("最小盒边长", float("inf"))))
         vbox_last = vbox_eff
         g = np.divide(hist, ideal, out=np.zeros_like(hist), where=ideal > 0)
