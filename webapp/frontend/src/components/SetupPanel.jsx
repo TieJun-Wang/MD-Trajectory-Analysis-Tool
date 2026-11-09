@@ -562,7 +562,7 @@ export function FrameBlock({ frames, setFrames }) {
 
 /** 分析参数：按分析项分组，**只显示已选分析项的参数**（which=null → 全显示）。 */
 export function ParamBlock({ params, setParams, which = null, primaryMolecules = null,
-                            nAtoms = 0 }) {
+                            nAtoms = 0, primaryAtomInfo = null }) {
   const p = (key) => ({
     value: params[key] ?? '',
     onChange: (e) => setParams({ ...params, [key]: e.target.value }),
@@ -610,10 +610,21 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
 
   //: 主链只有一个分子时，「逐分子统计」在数学上没有作用（整组 Rg == 该分子 Rg）
   const singleMol = primaryMolecules === 1
-  //: R_ee 手动指定原子：提示里给「体系共几个原子」和「当前填了什么」
-  const reeScope = Number(nAtoms) || 0
-  const reeEcho = String(params.ree_atoms ?? '').trim().split(/[\s,，]+/)
-    .filter(Boolean).slice(0, 4).join('、')
+  //: R_ee 手动指定原子：提示里给主链原子数，并把填的序号翻成「原子名（#全局编号）」
+  const reeScope = Number(nAtoms) || Number(primaryAtomInfo?.n_atoms) || 0
+  const reeNames = primaryAtomInfo?.names || []
+  const reeIds = primaryAtomInfo?.indices || []
+  const reeLookup = (x) => {
+    const xi = Number(x)
+    if (!Number.isFinite(xi) || !reeNames.length) return null
+    const n = reeNames.length
+    const i = (xi >= 1 && xi <= n) ? xi - 1 : ((xi >= 0 && xi < n) ? xi : -1)
+    if (i < 0) return null
+    const id = Number.isFinite(Number(reeIds[i])) ? Number(reeIds[i]) : i
+    return `${reeNames[i]}（#${id}）`
+  }
+  const reeParts = String(params.ree_atoms ?? '').trim().split(/[\s,，]+/).filter(Boolean)
+  const reePick = reeParts.slice(0, 2).map(reeLookup).filter(Boolean)
 
   const GROUPS = [
     ['面内 RDF (2D) / 两组分质心距', ['rdf2d', 'comdist'], [
@@ -674,7 +685,7 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
                style={{ minWidth: inputMinWidth('如 1,99999（1–99999）') }}
                value={params.ree_atoms ?? ''}
                title={`分析对象（主链）共 ${reeScope} 个原子：填两个原子序号（从 1 起，逗号或空格分隔），如 1,10`
-                 + (reeEcho ? `。当前填写：${reeEcho}` : '。留空则按上面选的来源自动判断')}
+                 + (reePick.length === 2 ? `。当前选的是 ${reePick[0]} 与 ${reePick[1]}` : '')}
                onChange={(e) => setParams({ ...params, ree_atoms: e.target.value })} />,
         '如 0,3034（留空自动）'),
     ]],

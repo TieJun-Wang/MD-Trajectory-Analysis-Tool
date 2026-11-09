@@ -279,6 +279,19 @@ def session_components(sid: str) -> dict:
     return {"components": sess.components(), "catalog": sess.catalog()}
 
 
+@app.get("/api/session/{sid}/primary-atoms")
+def session_primary_atoms(sid: str) -> dict:
+    """主链（分析对象）的原子名 / 元素 / 全局编号 —— R_ee 指定原子的悬浮提示用。"""
+    sess = _sess(sid)
+    try:
+        with sess.lock:
+            return sess.primary_atoms_info()
+    except SessionError as exc:
+        raise _fail(exc) from exc
+    except Exception as exc:                                     # noqa: BLE001
+        raise _fail(SessionError(f"取主链原子清单失败：{type(exc).__name__}: {exc}")) from exc
+
+
 @app.post("/api/session/{sid}/select")
 def session_select(sid: str, payload: Mapping[str, Any] = Body(default={})) -> dict:
     sess = _sess(sid)

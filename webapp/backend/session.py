@@ -500,6 +500,28 @@ class Session:
         except Exception:  # noqa: BLE001
             return 1
 
+    def primary_atoms_info(self) -> dict:
+        """主链（分析对象 = Rg/R_ee/二面角/取向/有序度/结晶用的那组）的原子清单。
+
+        给界面的「R_ee 指定原子」做悬浮提示用：用户填「第几个原子」时，能立刻看到
+        对应的**原子名与全局编号**。返回顺序就是主链内部顺序（1 起编号 = 下标+1）。
+        """
+        ag = self.az.primary
+        if ag is None or ag.n_atoms == 0:
+            return {"n_atoms": 0, "names": [], "elements": [], "indices": [],
+                    "label": str(getattr(self, "primary_label", "") or "")}
+        try:
+            names = [str(x) for x in ag.names]
+        except Exception:  # noqa: BLE001
+            names = [f"#{int(i)}" for i in ag.indices]
+        try:
+            elements = [str(x) for x in ag.elements]
+        except Exception:  # noqa: BLE001
+            elements = ["" for _ in names]
+        return {"n_atoms": int(ag.n_atoms), "names": names, "elements": elements,
+                "indices": [int(i) for i in ag.indices],
+                "label": str(getattr(self, "primary_label", "") or "")}
+
     # ----------------------------------------------------------------- 选择
     def apply_selection(self, req: Mapping[str, Any] | None) -> dict:
         """按前端请求设置主链与组分（含「分析集合（Set）」）。

@@ -753,6 +753,18 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sess?.sid, primary, components, sets])
 
+  // 主链（分析对象）原子清单：给「R_ee 指定原子」做悬浮提示（序号 → 原子名）
+  const [primaryAtoms, setPrimaryAtoms] = useState({ n_atoms: 0, names: [] })
+  useEffect(() => {
+    const sid = sess?.sid
+    if (!sid) { setPrimaryAtoms({ n_atoms: 0, names: [] }); return undefined }
+    let dead = false
+    api.primaryAtoms(sid)
+      .then((r) => { if (!dead && r) setPrimaryAtoms(r) })
+      .catch(() => { /* 拿不到就只显示原子数，不打断界面 */ })
+    return () => { dead = true }
+  }, [sess?.sid, sess?.primary_label, selSync])
+
   const feasibleKey = useMemo(() => JSON.stringify([
     sess?.sid || '', primary, components,
     (sets || []).map((x) => [x.name, x.on !== false]), frames, selSync,
@@ -933,7 +945,8 @@ export default function App() {
                           <ParamBlock params={params} setParams={setParams}
                                       which={which}
                                       primaryMolecules={primaryMolecules}
-                                      nAtoms={Number(sess?.primary_atoms) || 0} />
+                                      nAtoms={Number(sess?.primary_atoms) || 0}
+                                      primaryAtomInfo={primaryAtoms} />
                           <RunBlock busy={busy} progress={progress} onRun={doRun}
                                     onCancel={cancelRun} live={live}
                                     which={which} titles={titles} run={run}

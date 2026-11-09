@@ -106,6 +106,8 @@ export const api = {
   info: (sid) => request(`/session/${sid}/info`),
   chains: (sid) => request(`/session/${sid}/chains`),
   components: (sid) => request(`/session/${sid}/components`),
+  /** 主链（分析对象）的原子名/元素/编号 —— R_ee 手动指定原子的悬浮提示用 */
+  primaryAtoms: (sid) => request(`/session/${sid}/primary-atoms`),
 
   // ---------------------------------------------- 三维结构 / 交互式选择
   /**
