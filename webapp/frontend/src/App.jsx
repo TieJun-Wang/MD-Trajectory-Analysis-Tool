@@ -1005,7 +1005,8 @@ export default function App() {
                                       focus={chart?.name || ''} />}
             {/* 导出：只管导出 */}
             {tab === 'export' && (
-              <ExportPanel run={run} sid={sess?.sid} log={pushLog} groups={groups} />
+              <ExportPanel run={run} sid={sess?.sid} log={pushLog} groups={groups}
+                           focus={chart?.name || ''} />
             )}
             {tab === 'log' && (
               <LogPanel log={log} onClear={() => setLog([])} />

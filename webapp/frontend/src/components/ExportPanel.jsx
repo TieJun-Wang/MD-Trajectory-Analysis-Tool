@@ -4,7 +4,7 @@
  * 目标目录（内置目录浏览器）、导出模块、文件形式、开始导出、打开目标目录，
  * 以及导出完成后的「最近导出：目录 + 时间」。
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
 
@@ -103,7 +103,7 @@ export function DirPicker({ value, onPick, onClose }) {
   )
 }
 
-export default function ExportPanel({ run, sid, log, groups }) {
+export default function ExportPanel({ run, sid, log, groups, focus = '' }) {
   const results = run?.results || {}
   const order = Object.keys(results)
   const mods = groupPresent(order, normalizeGroups(groups))
@@ -119,6 +119,18 @@ export default function ExportPanel({ run, sid, log, groups }) {
   const [last, setLast] = useState(null)
   // 逐文件勾选：存"取消勾选的"，这样格式一变、新出现的文件默认是勾上的
   const [offFiles, setOffFiles] = useState(() => new Set())
+
+  // 图表页当前分析项落在哪个模块：切到导出页时自动勾上它并滚过去（用户要求）
+  const focusMod = (focus && (mods.find(([, ns]) => ns.includes(focus)) || [])[0]) || ''
+  const groupRefs = useRef({})
+  useEffect(() => {
+    if (!focusMod) return
+    setWhichMods((s) => (s[focusMod] === false ? { ...s, [focusMod]: true } : s))
+    const el = groupRefs.current[focusMod]
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+  }, [focusMod])
 
   // 模块勾选默认全开；新出现的模块也自动勾上
   const modOn = (label) => whichMods[label] !== false
@@ -298,9 +310,16 @@ export default function ExportPanel({ run, sid, log, groups }) {
               ? [['汇总表', excelFile]] : [])].map(([label, fs]) => {
               const onCount = fs.filter((f) => fileOn(f.file)).length
               return (
-                <section key={label} className="filegroup">
+                <section key={label}
+                         ref={(el) => { groupRefs.current[label] = el }}
+                         className={`filegroup ${label === focusMod ? 'focus' : ''}`}>
                   <div className="filegroup-head">
                     <strong>{label}</strong>
+                    {label === focusMod && focus && (
+                      <span className="expfocus" title="图表页当前停在这一项">
+                        当前图表：{results[focus]?.title || focus}
+                      </span>
+                    )}
                     <span className="dim">{onCount} / {fs.length}</span>
                     <button className="mini"
                             onClick={() => setModFiles(fs, true)}>全选</button>
