@@ -278,10 +278,18 @@ export function buildOption(result, panelIndex, visible = null) {
     if (g && !groupsInOrder.includes(g)) groupsInOrder.push(g)
   }
   const firstGroup = groupsInOrder.length > 1 ? groupsInOrder[0] : null
+  // MSD 的「各轴分解与各向异性」：同一个对象有 5 条曲线（x/y/z/∥/⊥），
+  // 一起画会互相压住 —— 默认只画第一条，其余由图例手动打开（用户要求）。
+  const onlyFirstOfPanel = String(result?.name || '') === 'msd'
+    && String(panel?.title || '').includes('各轴分解')
   const defaultSelected = {}
   for (const c of curves) {
     const g = String(c.group || '')
-    defaultSelected[c.label] = firstGroup ? g === firstGroup : true
+    if (onlyFirstOfPanel && !firstGroup) {
+      defaultSelected[c.label] = c.label === curves[0].label
+    } else {
+      defaultSelected[c.label] = firstGroup ? g === firstGroup : true
+    }
   }
 
   // ⚠️ 轴范围必须跟**实际画出来的曲线**一致：
@@ -376,8 +384,9 @@ export function buildOption(result, panelIndex, visible = null) {
           top: 34,
           type: 'scroll',
           data: legend,
-          // 多个对象时默认只勾第一个（其它曲线在图例里可点开）
-          ...(firstGroup ? { selected: defaultSelected } : null),
+          // 多个对象时默认只勾第一个（其它曲线在图例里可点开）；
+          // MSD 的「各轴分解」同组有 5 条曲线，也默认只勾第一条
+          ...(firstGroup || onlyFirstOfPanel ? { selected: defaultSelected } : null),
           itemWidth: 16,
           itemHeight: 9,
           textStyle: { fontSize: 11 },

@@ -11,7 +11,7 @@
  * 级别语义：``ok`` 可引用 / ``warn`` 数可用但需保留意见 / ``bad`` **不可引用**
  * （该量已被拒绝，或口径造成假象）。
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
 
 const LEVEL_TXT = { ok: '正常', warn: '注意', bad: '不可引用' }
@@ -22,11 +22,23 @@ const rankOf = (c) => RANK[c.级别] ?? 2
 /** 一项分析里最严重的级别（没有检查项时按"正常"处理） */
 const worst = (checks) => (checks.length ? Math.min(...checks.map(rankOf)) : 2)
 
-export default function QcPanel({ run, groups, defaultView }) {
+export default function QcPanel({ run, groups, defaultView, focus = '' }) {
   const results = run?.results || {}
   const order = Object.keys(results)
   const mods = groupPresent(order, normalizeGroups(groups))
-  const [view, setView] = useState(defaultView || mods[0]?.[0] || '')
+  // 图表页当前分析项在哪，就自动切到那个模块并滚到对应的一块（用户要求）
+  const focusMod = (focus && (mods.find(([, ns]) => ns.includes(focus)) || [])[0]) || ''
+  const [view, setView] = useState(focusMod || defaultView || mods[0]?.[0] || '')
+  const blockRefs = useRef({})
+  useEffect(() => {
+    if (focusMod) setView(focusMod)
+  }, [focusMod])
+  useEffect(() => {
+    const el = focus ? blockRefs.current[focus] : null
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+  }, [focus, view])
 
   if (!order.length) {
     return (
@@ -92,7 +104,8 @@ export default function QcPanel({ run, groups, defaultView }) {
           const checks = [...(res.checks || [])].sort((a, b) => rankOf(a) - rankOf(b))
           const d = res.checks_digest || {}
           return (
-            <details key={name} open className="statblock">
+            <details key={name} open className="statblock"
+                     ref={(el) => { blockRefs.current[name] = el }}>
               <summary>
                 {res.title}
                 <span className="dim">

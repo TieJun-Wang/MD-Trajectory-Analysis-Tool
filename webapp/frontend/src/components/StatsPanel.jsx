@@ -5,16 +5,27 @@
  * 一次只看一个板块，不必在长页面里翻。
  * 分组与图表导航、数据表导航共用同一份 analysisGroups。
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { formatCell } from '../chartOption'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
 
-export default function StatsPanel({ run, groups, defaultView }) {
+export default function StatsPanel({ run, groups, defaultView, focus = '' }) {
   const results = run?.results || {}
   const order = Object.keys(results)
   const mods = groupPresent(order, normalizeGroups(groups))
-  // 默认停在第一个有结果的模块
-  const [view, setView] = useState(defaultView || mods[0]?.[0] || '')
+  // 默认停在第一个有结果的模块；但图表页当前分析项在哪，就自动切到那个模块
+  const focusMod = (focus && (mods.find(([, ns]) => ns.includes(focus)) || [])[0]) || ''
+  const [view, setView] = useState(focusMod || defaultView || mods[0]?.[0] || '')
+  const blockRefs = useRef({})
+  useEffect(() => {
+    if (focusMod) setView(focusMod)
+  }, [focusMod])
+  useEffect(() => {
+    const el = focus ? blockRefs.current[focus] : null
+    if (el && el.scrollIntoView) {
+      el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+    }
+  }, [focus, view])
 
   if (!order.length) {
     return <div className="placeholder"><p>还没有结果。</p></div>
@@ -42,7 +53,8 @@ export default function StatsPanel({ run, groups, defaultView }) {
           const res = results[name]
           const entries = Object.entries(res.summary || {})
           return (
-            <details key={name} open className="statblock">
+            <details key={name} open className="statblock"
+                     ref={(el) => { blockRefs.current[name] = el }}>
               <summary>
                 {res.title}
                 <span className="dim">（{entries.length} 项）</span>

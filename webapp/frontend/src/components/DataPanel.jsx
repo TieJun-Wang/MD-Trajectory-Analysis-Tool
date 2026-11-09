@@ -23,10 +23,14 @@ function buildTable(result, panelIndex) {
   return { columns, rows }
 }
 
-export default function DataPanel({ run, groups }) {
+export default function DataPanel({ run, groups, chart = null, setChart = null }) {
   const results = run?.results || {}
   const order = useMemo(() => Object.keys(results), [results])
-  const [sel, setSel] = useState(null)
+  // 选中的「分析项 + 第几张图」：与图表页**共用同一个状态**（切页不丢），
+  // 没有外部状态时退回内部 state（单独渲染这个组件时也能用）。
+  const [selLocal, setSelLocal] = useState(null)
+  const sel = setChart ? chart : selLocal
+  const setSel = (v) => { if (setChart) setChart(v); else setSelLocal(v) }
   // 折叠起来的模块（默认全展开；记"关掉的"，新模块默认展开）
   const [closedModules, setClosedModules] = useState(() => new Set())
 

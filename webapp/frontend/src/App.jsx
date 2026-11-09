@@ -992,11 +992,17 @@ export default function App() {
                           live={live} titles={titles} groups={groups}
                           current={current?.result} panelIndex={current?.panelIndex ?? 0} />
             )}
-            {tab === 'data' && <DataPanel run={run} groups={groups} />}
+            {/* 数据表 / 统计量 / 科研 QC 都跟着「图表里当前这张」走：
+                在图表页选到 msd 的第 1 张图，切到数据表就是 msd 那一页的数据，
+                统计量与科研 QC 会自动滚到对应分析项（用户要求）。 */}
+            {tab === 'data' && <DataPanel run={run} groups={groups}
+                                          chart={chart} setChart={setChart} />}
             {/* 统计量：只显示指标 */}
-            {tab === 'stats' && <StatsPanel run={run} groups={groups} />}
+            {tab === 'stats' && <StatsPanel run={run} groups={groups}
+                                            focus={chart?.name || ''} />}
             {/* 科研 QC：每项分析导出的检查项（PBC/样本/误差/峰显著性…） */}
-            {tab === 'qc' && <QcPanel run={run} groups={groups} />}
+            {tab === 'qc' && <QcPanel run={run} groups={groups}
+                                      focus={chart?.name || ''} />}
             {/* 导出：只管导出 */}
             {tab === 'export' && (
               <ExportPanel run={run} sid={sess?.sid} log={pushLog} groups={groups} />
