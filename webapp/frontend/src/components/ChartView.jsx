@@ -13,7 +13,8 @@ import * as echarts from 'echarts'
 import { buildOption } from '../chartOption'
 
 export default function ChartView({ result, panelIndex, height = '100%',
-                                   onVisibleChange, visible = null }) {
+                                   onVisibleChange, visible = null,
+                                   onChart = null, onLayout = null }) {
   const boxRef = useRef(null)
   const chartRef = useRef(null)
   // 最近一次「可见曲线」：图例事件里直接读它，避免闭包拿到旧值
@@ -40,6 +41,7 @@ export default function ChartView({ result, panelIndex, height = '100%',
       }
     })
     chartRef.current = chart
+    onChart?.(chart)
 
     // 折叠操作台时容器会连续变化 ~240ms，ResizeObserver 每帧都会回调。
     // 直接每次都 resize() 会在动画期间反复重排（大曲线尤其卡），
@@ -49,7 +51,10 @@ export default function ChartView({ result, panelIndex, height = '100%',
       if (raf) return
       raf = requestAnimationFrame(() => {
         raf = 0
-        if (chartRef.current) chartRef.current.resize()
+        if (chartRef.current) {
+          chartRef.current.resize()
+          onLayout?.()
+        }
       })
     }
 
@@ -65,6 +70,7 @@ export default function ChartView({ result, panelIndex, height = '100%',
       if (ro) ro.disconnect()
       chart.dispose()
       chartRef.current = null
+      onChart?.(null)
     }
   }, [])
 
@@ -76,6 +82,7 @@ export default function ChartView({ result, panelIndex, height = '100%',
     chart.__mdta_panel = panelIndex
     chart.clear()
     chart.setOption(buildOption(result, panelIndex, null), true)
+    requestAnimationFrame(() => onLayout?.())
     visibleRef.current = null
     onVisibleChange?.(null)   // 换图/换面板时清掉上一次的图例筛选
   }, [result, panelIndex])

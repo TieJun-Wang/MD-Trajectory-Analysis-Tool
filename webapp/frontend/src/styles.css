@@ -958,29 +958,34 @@ table.inforows tr:first-child td { padding-top: 3px; }
 .chartwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
 .chartwrap > .chart-box { flex: 1 1 auto; }
 
-/* MSD 线性区拟合：图上方一条信息栏 —— 左边拟合区间（可改），右边统计量（左对齐） */
-.fitbar {
-  flex: 0 0 auto;
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 12px; margin-bottom: 6px;
+/* MSD 线性区拟合：区间写在标题行（点数字就能改），统计量贴在绘图区右上角 */
+.fitinline {
+  display: inline-flex; align-items: center; gap: 3px;
+  margin-left: 12px; font-size: 11.5px; font-weight: 400; color: #334155;
+}
+.fitinline input {
+  width: 64px; text-align: center;
+  font-size: 11.5px; padding: 0 2px;
+  border: 1px solid transparent; border-radius: 4px;
+  background: transparent; color: #1d4ed8;
+}
+.fitinline input:hover, .fitinline input:focus {
+  border-color: var(--line-strong, #94a3b8); background: #fff; outline: none;
+}
+
+/* 统计量浮层：贴在「坐标轴围成的绘图区」右上角（不是 canvas 角落） */
+.plotstats {
+  position: absolute; z-index: 3;
   font-size: 11px; line-height: 1.45; color: #334155;
-}
-.fitbar-l {
-  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
-  min-width: 0;
-}
-.fitbar-l input {
-  width: 50px; font-size: 11px; padding: 1px 3px;
-  border: 1px solid var(--line); border-radius: 4px;
-}
-.fitbar-r {
-  flex: 0 0 auto;
-  border: 1px solid var(--line); border-radius: 6px;
-  background: #fff; padding: 3px 9px;
   text-align: left;
+  background: rgba(255, 255, 255, 0.88);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 9px; pointer-events: none;
 }
-.fitbar-row + .fitbar-row { margin-top: 5px; border-top: 1px dashed var(--line); padding-top: 4px; }
-.fitbar-name { font-weight: 650; }
+.plotstats-row + .plotstats-row {
+  margin-top: 5px; border-top: 1px dashed var(--line); padding-top: 4px;
+}
+.plotstats-name { font-weight: 650; }
 
 /* ---------------------------------------------------------- 全屏显示 */
 /* 原生 Fullscreen API 生效时由浏览器接管尺寸；这里额外给一点内边距，

@@ -5,7 +5,7 @@
  * 图表的文字说明与统计量已移到整页右侧的 NotesPanel，
  * 这里只负责导航 + 画布 + 全屏，图表因此能占满整个高度。
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ChartView from './ChartView'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
 import { soloAxisInfo } from '../chartOption'
@@ -176,6 +176,36 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
     return { ...current, curves }
   }, [current, fitInfo])
 
+  // 绘图区（grid）矩形：统计量浮层贴在**坐标轴围成的区域**右上角，
+  // 而不是 canvas 右上角（那里是 ECharts 的 toolbox，会互相遮住）。
+  const [chartInst, setChartInst] = useState(null)
+  const [plotRect, setPlotRect] = useState(null)
+  const wrapRef = useRef(null)
+  const measurePlot = useCallback(() => {
+    if (!chartInst) return
+    try {
+      const grid = chartInst.getModel().getComponent('grid')
+      const r = grid && grid.coordinateSystem && grid.coordinateSystem.getRect()
+      if (!r || !r.width) return
+      const w = chartInst.getWidth()
+      setPlotRect({ top: r.y, right: Math.max(0, w - (r.x + r.width)) })
+    } catch { /* 视图还没建好就跳过 */ }
+  }, [chartInst])
+  // 自己监听尺寸：切图/折叠侧栏/全屏都会让 grid 矩形变，重测一次即可对齐坐标轴
+  useEffect(() => {
+    if (!isMsdFit || !chartInst) { setPlotRect(null); return undefined }
+    measurePlot()
+    const timer = setTimeout(measurePlot, 150)
+    const el = wrapRef.current
+    const ro = (typeof ResizeObserver !== 'undefined' && el)
+      ? new ResizeObserver(() => measurePlot()) : null
+    if (ro && el) ro.observe(el)
+    return () => {
+      clearTimeout(timer)
+      if (ro) ro.disconnect()
+    }
+  }, [isMsdFit, chartInst, measurePlot, panelIndex, viewResult])
+
   const fmtNum = (v, digits = 4) => (
     Number.isFinite(v) ? Number(v.toPrecision(digits)).toString() : '—')
   const fmtD = (v) => (Number.isFinite(v) ? v.toExponential(3) : '—')
@@ -313,6 +343,20 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
                        return parts.join(' · ')
                      })()}>
                   {current.title}
+                  {isMsdFit && fitInfo && (
+                    <span className="fitinline"
+                          title="拟合区间（ps）：直接改这两个数字，图上与统计量立刻重算">
+                      <span>拟合区间：</span>
+                      <input value={fitWin.a !== '' ? fitWin.a : fmtNum(fitInfo.rows[0].t1)}
+                             title="起点 (ps)"
+                             onChange={(e) => setFitWin({ ...fitWin, a: e.target.value })} />
+                      <span>–</span>
+                      <input value={fitWin.b !== '' ? fitWin.b : fmtNum(fitInfo.rows[0].t2)}
+                             title="终点 (ps)"
+                             onChange={(e) => setFitWin({ ...fitWin, b: e.target.value })} />
+                      <span>ps</span>
+                    </span>
+                  )}
                 </div>
               </div>
               <div className="charttools">
@@ -332,32 +376,18 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
               </div>
             </div>
 
-            {/* MSD 线性区拟合：信息条放在**图外**（图上浮层会盖住标题和 ECharts 的
-                放大/缩放工具栏，用户实测反馈）。左边写拟合区间（可改），右边是
-                左对齐的一列统计量，文字与数据用冒号分隔。 */}
-            {isMsdFit && fitInfo && (
-              <div className="fitbar">
-                <div className="fitbar-l">
-                  <span>拟合区间：</span>
-                  <b>{fmtNum(fitInfo.rows[0].t1)} – {fmtNum(fitInfo.rows[0].t2)} ps</b>
-                  <span className="dim">{fitInfo.custom ? '（自定义）' : '（默认）'}</span>
-                  <input value={fitWin.a} placeholder="起 ps" size={5}
-                         title="拟合区间起点（ps），留空 = 默认 = 0.3 × τ 上限"
-                         onChange={(e) => setFitWin({ ...fitWin, a: e.target.value })} />
-                  <input value={fitWin.b} placeholder="止 ps" size={5}
-                         title="拟合区间终点（ps），留空 = 默认 = τ 上限"
-                         onChange={(e) => setFitWin({ ...fitWin, b: e.target.value })} />
-                  {(fitWin.a || fitWin.b) && (
-                    <button className="mini" onClick={() => setFitWin({ a: '', b: '' })}>
-                      恢复默认
-                    </button>
-                  )}
-                  <span className="dim">（改区间立刻重算，不用重跑）</span>
-                </div>
-                <div className="fitbar-r">
+            <div className="chartwrap" ref={wrapRef}>
+              <ChartView result={viewResult} panelIndex={panelIndex}
+                         visible={visible}
+                         onVisibleChange={handleVisible}
+                         onChart={setChartInst} onLayout={measurePlot} />
+              {isMsdFit && fitInfo && plotRect && (
+                <div className="plotstats"
+                     style={{ top: plotRect.top + 6, right: plotRect.right + 8 }}>
                   {fitInfo.rows.map((r) => (
-                    <div key={r.g} className="fitbar-row">
-                      {fitInfo.rows.length > 1 && <div className="fitbar-name">{r.g}</div>}
+                    <div key={r.g} className="plotstats-row">
+                      {fitInfo.rows.length > 1
+                        && <div className="plotstats-name">{r.g}</div>}
                       {r.n < 3 ? (
                         <div className="dim">区间内只有 {r.n} 个点，无法拟合</div>
                       ) : (
@@ -370,13 +400,7 @@ export default function ChartPanel({ run, chart, setChart, live, titles = {},
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
-
-            <div className="chartwrap">
-              <ChartView result={viewResult} panelIndex={panelIndex}
-                         visible={visible}
-                         onVisibleChange={handleVisible} />
+              )}
             </div>
           </>
         )}
