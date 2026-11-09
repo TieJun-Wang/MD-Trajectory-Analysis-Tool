@@ -103,7 +103,8 @@ export function DirPicker({ value, onPick, onClose }) {
   )
 }
 
-export default function ExportPanel({ run, sid, log, groups, focus = '' }) {
+export default function ExportPanel({ run, sid, log, groups,
+                                     focus = '', focusIndex = 0 }) {
   const results = run?.results || {}
   const order = Object.keys(results)
   const mods = groupPresent(order, normalizeGroups(groups))
@@ -131,6 +132,27 @@ export default function ExportPanel({ run, sid, log, groups, focus = '' }) {
       el.scrollIntoView({ block: 'start', behavior: 'smooth' })
     }
   }, [focusMod])
+
+  // 勾选**只落在图表当前这张图**上：分析项 = focus、面板 = focusIndex 的文件，
+  // 其它模块与其它文件先取消勾选（用户要求；之后仍可手动勾回来）。
+  useEffect(() => {
+    const res = focus ? results[focus] : null
+    if (!res) return
+    const nPanels = (res.panels || []).length || 1
+    const multi = nPanels > 1
+    const keep = new Set([`${focus}.png`])
+    if (multi) keep.add(`${focus}__panel${Number(focusIndex) || 0}.csv`)
+    else keep.add(`${focus}.csv`)
+    keep.add(`${focus}__p${(Number(focusIndex) || 0) + 1}.png`)
+    // 模块只留焦点模块（其余关掉；用户可再勾回来）
+    setWhichMods(() => Object.fromEntries(
+      mods.map(([label]) => [label, label === focusMod])))
+    // 本模块里除"这张图"外的文件全部取消勾选
+    const mine = (mods.find(([label]) => label === focusMod)?.[1] || [])
+      .flatMap((n) => filesFor(results[n], n, formats, panelPngs).map((f) => f.file))
+    setOffFiles(new Set(['__excel', ...mine.filter((f) => !keep.has(f))]))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus, focusIndex])
 
   // 模块勾选默认全开；新出现的模块也自动勾上
   const modOn = (label) => whichMods[label] !== false
@@ -329,7 +351,7 @@ export default function ExportPanel({ run, sid, log, groups, focus = '' }) {
                   <table className="stats filetable">
                     <thead>
                       <tr>
-                        <th style={{ width: '46px' }}>选择</th>
+                        <th style={{ width: '58px' }} className="nowrap">选择</th>
                         <th>文件名</th>
                         <th style={{ width: '74px' }}>类型</th>
                         <th>内容</th>
