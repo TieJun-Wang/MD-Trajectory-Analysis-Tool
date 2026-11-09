@@ -285,7 +285,8 @@ export function buildOption(result, panelIndex, visible = null) {
   const defaultSelected = {}
   for (const c of curves) {
     const g = String(c.group || '')
-    if (onlyFirstOfPanel && !firstGroup) {
+    if (onlyFirstOfPanel) {
+      // 各轴分解：**不管有几个组分**都只默认勾第一条（其余图例手动打开）
       defaultSelected[c.label] = c.label === curves[0].label
     } else {
       defaultSelected[c.label] = firstGroup ? g === firstGroup : true
