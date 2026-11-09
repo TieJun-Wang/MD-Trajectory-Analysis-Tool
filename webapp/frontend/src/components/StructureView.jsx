@@ -212,6 +212,7 @@ export default function StructureView({ st }) {
         {data && (
           <Viewer data={data} selected={selected}
                   onlySelected={!!st.onlySelected}
+                  pendingView={st.pendingView}
                   onPick={st.pick} onHover={st.setHover} binding={st.viewerRef}
                   onError={st.setErr} />
         )}
@@ -286,8 +287,23 @@ export function buildGeometry(st, data) {
     st.center = new THREE.Vector3(cx, cy, cz)
     st.offset = [cx, cy, cz]
     st.home = { theta: 0.6, phi: 1.1, radius: rmax * 2.6, target: st.center.clone() }
-    st.sph = { theta: st.home.theta, phi: st.home.phi, radius: st.home.radius }
-    st.target = st.home.target.clone()
+    // 相机：优先"恢复存档"（F5 后接回来的），其次**保留当前视角**（同会话重载），
+    // 都没有才回默认视角。用户要求：刷新/重载后还是原来一样。
+    const savedView = st.pendingView
+    st.pendingView = null
+    if (savedView && savedView.sph && Number.isFinite(savedView.sph.radius)) {
+      st.sph = { theta: savedView.sph.theta, phi: savedView.sph.phi,
+        radius: savedView.sph.radius }
+      st.target = savedView.target
+        ? new THREE.Vector3(savedView.target.x, savedView.target.y, savedView.target.z)
+        : st.home.target.clone()
+    } else if (st.keepCam && st.sph && Number.isFinite(st.sph.radius)) {
+      if (!st.target) st.target = st.home.target.clone()
+    } else {
+      st.sph = { theta: st.home.theta, phi: st.home.phi, radius: st.home.radius }
+      st.target = st.home.target.clone()
+    }
+    st.keepCam = true
     st.posOf = new Map()
     for (let i = 0; i < n; i += 1) st.posOf.set(data.index[i], i)
     // 屏幕空间最小半径：大体系按真实共价半径画只有不到一个像素，看起来像"什么都没有"。
@@ -690,8 +706,8 @@ function applyBondState(st, data, selected, onlySelected) {
 }
 
 /* ==================================================================== 画布 */
-function Viewer({ data, selected, onlySelected, onPick, onHover,
-                  binding, onError }) {
+function Viewer({ data, selected, onlySelected, pendingView = null,
+                  onPick, onHover, binding, onError }) {
   const boxRef = useRef(null)
   const stRef = useRef(null)
   // 回调放 ref：切换"选择层级"会换掉 onPick 引用，放进依赖会让整个 WebGL 场景重建
@@ -954,6 +970,8 @@ function Viewer({ data, selected, onlySelected, onPick, onHover,
   useEffect(() => {
     const st = stRef.current
     if (!st || !data) return
+    // 恢复存档的视角（F5 后）：只在新数据建几何这次用一次，之后清空
+    if (pendingView) st.pendingView = pendingView
     try {
       buildGeometry(st, data)
       st.lastData = data          // 「双击聚焦」要用它换算原子坐标
@@ -989,6 +1007,24 @@ function Viewer({ data, selected, onlySelected, onPick, onHover,
   useEffect(() => {
     if (!binding) return
     binding.current = {
+      // 相机状态（视角 / 注视点）：structureState 定时存盘，F5 后原样恢复
+      getView: () => {
+        const st = stRef.current
+        if (!st || !st.sph) return null
+        return {
+          sph: { theta: st.sph.theta, phi: st.sph.phi, radius: st.sph.radius },
+          target: st.target
+            ? { x: st.target.x, y: st.target.y, z: st.target.z } : null,
+        }
+      },
+      setView: (v) => {
+        const st = stRef.current
+        if (!st || !v || !v.sph) return
+        st.sph = { theta: v.sph.theta, phi: v.sph.phi, radius: v.sph.radius }
+        if (v.target) st.target = new THREE.Vector3(v.target.x, v.target.y, v.target.z)
+        st.refresh?.()
+        st.kick()
+      },
       resetView: () => {
         const st = stRef.current
         if (!st || !st.home) return

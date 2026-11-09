@@ -95,14 +95,39 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     setRecogErr('')
   }, [sid])
 
+  /** 三维视图的本地存档键：F5 / 刷新后把**选择与视角**接回来（用户要求） */
+  const saveKey = (id) => `mdta.structstate:${id}`
+  const readSaved = (id) => {
+    try {
+      const raw = window.localStorage.getItem(saveKey(id))
+      return raw ? JSON.parse(raw) : null
+    } catch { return null }
+  }
+  const pendingViewRef = useRef(null)
+
   const load = useCallback(async () => {
     if (!sid) return
     setLoading(true); setErr('')
     try {
       const s = await api.structure(sid, 0, MAX_ATOMS)
       setData(s)
-      setScope(new Set())
-      setFilters([])
+      // 刷新（F5 / 重新载入）后保持原样：把上次的选择与视角接回来
+      const saved = readSaved(sid)
+      if (saved) {
+        if (Array.isArray(saved.scope) && saved.scope.length) {
+          setScope(new Set(saved.scope.filter((i) => i >= 0 && i < s.n_atoms)))
+        } else {
+          setScope(new Set())
+        }
+        setFilters(Array.isArray(saved.filters)
+          ? saved.filters.filter((f) => Array.isArray(f && f.atoms)) : [])
+        setOnlySelected(!!saved.onlySelected)
+        if (saved.mode) setMode(saved.mode)
+        if (saved.view) pendingViewRef.current = saved.view
+      } else {
+        setScope(new Set())
+        setFilters([])
+      }
       setHover(null)
       log?.(`三维结构：显示 ${s.n_displayed.toLocaleString()} / `
         + `${s.n_atoms.toLocaleString()} 原子（坐标取自拓扑 / 首帧，不逐帧读取）`
@@ -115,6 +140,32 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
       setLoading(false)
     }
   }, [sid, log])
+
+  // 定时存盘：选择/视角一变，最多 1.5 s 内落盘；刷新/关页面都能接回来
+  useEffect(() => {
+    if (!sid) return undefined
+    const save = () => {
+      try {
+        const view = viewerRef.current && viewerRef.current.getView
+          ? viewerRef.current.getView() : null
+        const payload = {
+          scope: [...scope], filters, onlySelected, mode, view,
+        }
+        if (payload.scope.length > 20000) payload.scope = []
+        const txt = JSON.stringify(payload)
+        if (txt.length < 400000) window.localStorage.setItem(saveKey(sid), txt)
+      } catch { /* 配额满 / 隐私模式：忽略 */ }
+    }
+    save()
+    const timer = setInterval(save, 1500)
+    window.addEventListener('pagehide', save)
+    return () => {
+      clearInterval(timer)
+      window.removeEventListener('pagehide', save)
+      save()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sid, scope, filters, onlySelected, mode])
 
   /** 选中一批原始原子编号（外部直接给定，例如集合载入） */
   const setIndices = useCallback((indices) => {
@@ -463,5 +514,7 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     recog, recogLoading, recogErr, recogSel,
     loadRecognition, selectRecognition,
     viewerRef,
+    //: 恢复的相机（load 从存档读出）；Viewer 重建几何时用一次后清空
+    get pendingView() { return pendingViewRef.current },
   }
 }
