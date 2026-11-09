@@ -11,9 +11,6 @@ export default function OpenPanel({ onOpened, log }) {
   const [trajectory, setTrajectory] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  //: Materials Studio `.trj` 里带速度：勾上就转成 TRR（坐标 + 速度）再读。
-  //: XTC 装不下速度，所以有速度需求时必须走这条；文件约为 XTC 的 5~6 倍。
-  const [keepVel, setKeepVel] = useState(false)
   //: 上一次读取的加载诊断（猜键/分子划分/缓存重建），读进来后显示给用户
   const [loadNotes, setLoadNotes] = useState([])
 
@@ -110,8 +107,8 @@ export default function OpenPanel({ onOpened, log }) {
       stopStream = () => {}                     // 订阅失败也不该阻断打开
     }
     try {
-      const data = await api.open(topology, trajectory, token, false,
-                                  keepVel, false)
+      // 用户要求：MS 的 .trj 一律转 TRR（坐标 + 速度），不再给复选框
+      const data = await api.open(topology, trajectory, token, false, true, false)
       log?.(`体系已打开: sid=${data.sid}, ${data.info?.n_atoms ?? '?'} 原子, `
         + `${data.info?.n_frames ?? '?'} 帧（用时 ${((Date.now() - t0) / 1000).toFixed(1)} s）`)
       const notes = data.load_notes || []
@@ -241,19 +238,7 @@ function fmtElapsed(sec) {
 
       {error && <div className="error">{error}</div>}
 
-      {/* 速度数据：只有 MS 的 .trj 里有（第 4-6 条 double 数组，单位 Å/ps）。
-          XTC 格式装不下速度 → 勾上时转成 TRR（坐标 + 速度，float32）。
-          换算一下体积，让用户在勾之前就知道代价。 */}
-      {/\.trj$/i.test(trajectory || '') && (
-        <label className="check mt6" style={{ fontSize: 11 }}
-               title={'Materials Studio 的 .trj 里自带速度（Å/ps），XTC 装不下。' +
-                 '勾上 → 转成 TRR（坐标 + 速度，坐标 float32 误差 ~1e-6 Å）。' +
-                 '文件约为 XTC 的 5~6 倍（每帧每原子 24 B）。'}>
-          <input type="checkbox" checked={keepVel} disabled={busy}
-                 onChange={(e) => setKeepVel(e.target.checked)} />
-          同时保留速度数据（.trj → TRR，文件约 6 倍大）
-        </label>
-      )}
+      {/* 速度数据开关已按用户要求删掉：MS 的 .trj 一律转 TRR（坐标 + 速度）。 */}
 
       {/* 「自动配对同名轨迹」开关已按用户要求删掉：固定为**只按选中的文件**读。
           要跑动力学就把轨迹放进「轨迹」槽。 */}

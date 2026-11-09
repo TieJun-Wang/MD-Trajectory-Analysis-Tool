@@ -71,7 +71,7 @@ export default function App() {
     cutoff: 5.0, axis: 2, nbins: 100, rmax: 12, dihedral_mode: 'auto',
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
     // 「分子质心」会大一圈（分子内振动/转动被去掉），两边不能直接比。
-    rdf_mode: 'inter', rdf_nbins: 120, msd_object: 'atom', msd_unwrap: false,
+    rdf_mode: 'inter', rdf_nbins: 120, msd_object: 'atom',
     gauche_edge: 120,
     // 「减去整体漂移」默认**关**：Materials Studio Forcite 的 MSD 不去漂移，
     // 默认关掉才能与它逐点对齐（实测 PE50：关掉差 0.000%，开着差 −0.01…−0.19%）。
@@ -491,10 +491,12 @@ export default function App() {
                mode: params.rdf_mode },
         // `remove_drift`：默认**关**（= Materials Studio Forcite 的口径，实测逐点一致）。
         // NPT 体系里整盒平移会把 MSD 抬起来，那时把「减去整体漂移」勾上。
-        // `unwrap`：默认**关**（= 直接用文件坐标，EinsteinMSD/Forcite 口径）。
+        // `unwrap`：不再让用户选，按轨迹来源自动定 ——
+        //   MS 的 .trj 坐标本来就是**展开的**（跨盒边的分子用 >L 的坐标）→ 不补；
+        //   GROMACS 的 xtc 等一般折回盒内 → 默认补最小镜像。
         msd: { object: params.msd_object,
                remove_drift: params.msd_drift === true,
-               unwrap: params.msd_unwrap === true },
+               unwrap: !/\.trj$/i.test(String(sess?.info?.trajectory || '')) },
         contact: { cutoff: Number(params.cutoff), mode: params.contact_mode },
         dihedral: { mode: params.dihedral_mode,
                     gauche_edge: Number(params.gauche_edge) || 120 },

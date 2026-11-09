@@ -271,9 +271,8 @@ python -m mdta.ms_trj
 > 删掉 `_convert_cache/` 里对应文件即可（不清也不会自动用，因为键变了）。
 >
 > **速度数据**：MS 的 `.trj` 里本来就存速度（第 4-6 条 double 数组，Å/ps），
-> 但 **XTC 格式装不下速度**。在「文件读取」里勾上
-> **「同时保留速度数据（.trj → TRR，文件约 6 倍大）」**，就会转成 **TRR**
-> （坐标 + 速度，float32，坐标误差 ~3e-6 Å），`u.atoms.velocities` /
+> 但 **XTC 格式装不下速度**。所以现在 **`.trj` 一律转成 TRR**（坐标 + 速度，
+> float32，坐标误差 ~3e-6 Å），不再给复选框 —— `u.atoms.velocities` /
 > `ts.has_velocities` 直接可用。代价是每帧每原子 24 B
 > （5596 原子 × 6001 帧 ≈ 800 MB，而 XTC 约 130 MB）。
 

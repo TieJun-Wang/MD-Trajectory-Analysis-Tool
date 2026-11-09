@@ -739,16 +739,15 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         ['atom', '原子（默认，= Forcite / EinsteinMSD 口径）'],
         ['molecule', '分子质心（比 Forcite 大一圈）'],
       ])),
-      F('msd_unwrap', 'PBC 展开', 'check',
-        chk('msd_unwrap', '跨帧补最小镜像',
-          '默认不勾：直接用文件里的坐标做差 —— MS 的 .trj 坐标通常**已经是解包的**，'
-          + '\n再补一次最小镜像会把 >L/2 的位移改错（graphite 27 与 Forcite 对不上就是这个）。'
-          + '\n只有当轨迹坐标被折回盒内（例如 GROMACS 的 xtc 默认折回）时勾上。'), '跨帧补最小镜像', 3),
+      // 「跨帧补最小镜像」不再暴露：MS 的 .trj 坐标本来就是展开的 → 不补；
+      // GROMACS/NPT 的 xtc 一般折回盒内 → 默认补。由 App.jsx 按轨迹类型自动决定。
       F('msd_drift', '去漂移', 'check',
         chk('msd_drift', '减去整体漂移',
           '默认不勾（= Materials Studio Forcite 的口径，可逐点对齐）。\n'
-          + 'NPT 体系里整盒缓慢平移会把 MSD 抬高，那时勾上；'
-          + '勾上后 MSD 会小 0.01%~0.2%（实测 PE50）。'), '减去整体漂移', 3),
+          + '什么时候勾：NPT/NVT 里**整盒在缓慢平移**（质心漂移）时，'
+          + '全体原子的共同平移会把 MSD 抬出一条额外抛物线上翘，勾上先减掉'
+          + '「全体平均位移」再看单分子扩散；盒子固定、质心不动的体系不用勾。\n'
+          + '勾上后 MSD 一般小 0.01%~0.2%（实测 PE50）。'), '减去整体漂移', 3),
       F('tau_intervals', 'τ 分段数', 'input',
         numInput('5', { step: 1, min: 1, ...p('tau_intervals') }), '留空不限'),
     ]],
