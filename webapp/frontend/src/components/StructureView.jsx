@@ -212,7 +212,7 @@ export default function StructureView({ st }) {
         {data && (
           <Viewer data={data} selected={selected}
                   onlySelected={!!st.onlySelected}
-                  pendingView={st.pendingView}
+                  pendingView={st.pendingView} sid={st.sid}
                   onPick={st.pick} onHover={st.setHover} binding={st.viewerRef}
                   onError={st.setErr} />
         )}
@@ -290,6 +290,7 @@ export function buildGeometry(st, data) {
     // 相机：优先"恢复存档"（F5 后接回来的），其次**保留当前视角**（同会话重载），
     // 都没有才回默认视角。用户要求：刷新/重载后还是原来一样。
     const savedView = st.pendingView
+      || (st.loadSavedView ? st.loadSavedView() : null)
     st.pendingView = null
     if (savedView && savedView.sph && Number.isFinite(savedView.sph.radius)) {
       st.sph = { theta: savedView.sph.theta, phi: savedView.sph.phi,
@@ -707,7 +708,7 @@ function applyBondState(st, data, selected, onlySelected) {
 
 /* ==================================================================== 画布 */
 function Viewer({ data, selected, onlySelected, pendingView = null,
-                  onPick, onHover, binding, onError }) {
+                  sid = '', onPick, onHover, binding, onError }) {
   const boxRef = useRef(null)
   const stRef = useRef(null)
   // 回调放 ref：切换"选择层级"会换掉 onPick 引用，放进依赖会让整个 WebGL 场景重建
@@ -781,6 +782,30 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
       st.refresh?.()
       kick()
     }
+    // ---- 相机存档：视角/注视点直接写 localStorage（按体系 sid 区分）。
+    // 为什么放在 Viewer 里而不是状态层：刷新（F5）后状态层的时序不可靠
+    // （data 还没回来时 viewerRef 可能为空），这里在渲染循环里自给自足。
+    st.viewKey = `mdta.structview:${sid || 'default'}`
+    let lastViewSave = 0
+    st.saveView = () => {
+      const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      if (now - lastViewSave < 400) return
+      lastViewSave = now
+      try {
+        if (!st.sph) return
+        window.localStorage.setItem(st.viewKey, JSON.stringify({
+          sph: { theta: st.sph.theta, phi: st.sph.phi, radius: st.sph.radius },
+          target: st.target
+            ? { x: st.target.x, y: st.target.y, z: st.target.z } : null,
+        }))
+      } catch { /* 配额满/隐私模式：忽略 */ }
+    }
+    st.loadSavedView = () => {
+      try {
+        const raw = window.localStorage.getItem(st.viewKey)
+        return raw ? JSON.parse(raw) : null
+      } catch { return null }
+    }
     stRef.current = st
 
     const render = () => {
@@ -810,6 +835,7 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
       raf = requestAnimationFrame(() => {
         raf = 0
         render()
+        st.saveView?.()          // 视角一变就把"上次看到的位置"写进存档
       })
     }
     st.kick = kick
