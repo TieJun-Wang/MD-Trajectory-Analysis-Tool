@@ -478,14 +478,19 @@ function applyBoxState(st) {
 }
 
 /* --------------------------------------------------------------- 棍（化学键） */
-/* -------------------------------------------------- 芳香环（虚线圆，MS 风格） */
+/* ------------------------------------------- 芳香环（分段弧线，MS 风格） */
 /**
- * 把后端给的**芳香六元环**（`data.rings`，原始原子编号）画成环心的虚线圈，
- * 与 Materials Studio 里苯环中间那个虚线圆一致。
+ * 把后端给的**芳香六元环**（`data.rings`，原始原子编号）画成 Materials Studio 那样：
+ * 环心附近一圈**分段弧线**（每段是一个小圆柱，所以有实际粗细 —— WebGL 的
+ * LineDashedMaterial 线宽恒为 1 px，画出来只是一根细线）。
  *
- * 全部环合成**一个** LineSegments（一个 draw call）：每个环在其所在平面内画 48 段
- * 圆周（平面由环上三个原子决定）；虚线由 LineDashedMaterial + computeLineDistances
- * 实现。只画**当前显示**的原子都齐的环（抽稀/截断时自动跳过）。
+ * 两个关键点（用户实测反馈）：
+ * 1. 圆弧半径取环**内切半径的 0.62 倍**（≈ 0.54 × 环外接半径），保证弧线整体落在
+ *    六元环内部，不会跑到化学键外面去；
+ * 2. 每圈 8 段、每段再细分成 2 段小弧，段与段之间留空 → 就是 MS 的分段弧线效果；
+ *    粗细取该环原子球棍半径的 1.8 倍。
+ *
+ * 全部弧段合成**一个** InstancedMesh（一次 draw call），随几何重建。
  */
 function buildRings(st, data) {
   const rings = data.rings || []
@@ -493,8 +498,12 @@ function buildRings(st, data) {
   const [ox, oy, oz] = st.offset
   const xyz = data.xyz
   const posOf = st.posOf
-  const SEG = 48
-  const verts = []
+  const NSEG = 8            // 一圈分 8 段
+  const SUB = 2             // 每段再细分，弧更顺
+  const FILL = 0.55         // 每段实际画多长（0.55 = 弧:空 ≈ 1:1，MS 的比例）
+  const RAD_FRAC = 0.54     // 圆半径 = 环外接半径 × 0.54（在环内）
+
+  const arcs = []           // [p0, p1, radius]
   const c = new THREE.Vector3()
   const uA = new THREE.Vector3()
   const vA = new THREE.Vector3()
@@ -519,31 +528,61 @@ function buildRings(st, data) {
     nA.normalize()
     uA.addScaledVector(nA, -uA.dot(nA)).normalize()
     vA.crossVectors(nA, uA).normalize()
-    const r = pts.reduce((acc, p) => acc + p.distanceTo(c), 0) / pts.length
-    let prev = null
-    for (let k = 0; k <= SEG; k += 1) {
-      const th = (k / SEG) * Math.PI * 2
-      const p = c.clone()
-        .addScaledVector(uA, Math.cos(th) * r)
-        .addScaledVector(vA, Math.sin(th) * r)
-      if (prev) verts.push(prev.x, prev.y, prev.z, p.x, p.y, p.z)
-      prev = p
+    const ringR = pts.reduce((acc, p) => acc + p.distanceTo(c), 0) / pts.length
+    const r = ringR * RAD_FRAC
+    // 粗细：取环上原子球棍半径的平均值再放大 1.8 倍（适当加粗）
+    let thick = 0
+    for (const orig of ring) {
+      const i = posOf.get(orig)
+      if (i !== undefined) thick += stickRad(st, data, i)
+    }
+    thick = (thick / ring.length) * 1.8
+    const at = (th) => c.clone()
+      .addScaledVector(uA, Math.cos(th) * r)
+      .addScaledVector(vA, Math.sin(th) * r)
+    for (let s = 0; s < NSEG; s += 1) {
+      const a0 = (s / NSEG) * Math.PI * 2
+      const a1 = a0 + (Math.PI * 2 / NSEG) * FILL
+      for (let k = 0; k < SUB; k += 1) {
+        const b0 = a0 + (a1 - a0) * (k / SUB)
+        const b1 = a0 + (a1 - a0) * ((k + 1) / SUB)
+        arcs.push([at(b0), at(b1), thick])
+      }
     }
   }
-  if (!verts.length) return
-  const geo = new THREE.BufferGeometry()
-  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
-  const mat = new THREE.LineDashedMaterial({
-    color: 0x1f2937, dashSize: 0.22, gapSize: 0.16,
-    transparent: true, opacity: 0.9, depthWrite: false,
+  if (!arcs.length) return
+
+  const geo = new THREE.CylinderGeometry(1, 1, 1, 6, 1, false)   // 单位半径/高，沿 +Y
+  const mat = new THREE.MeshPhongMaterial({ color: 0x1f2937, shininess: 30,
+    specular: 0x333333 })
+  const mesh = new THREE.InstancedMesh(geo, mat, arcs.length)
+  const UP = new THREE.Vector3(0, 1, 0)
+  const dir = new THREE.Vector3()
+  const mid = new THREE.Vector3()
+  const q = new THREE.Quaternion()
+  const m4 = new THREE.Matrix4()
+  const scl = new THREE.Vector3()
+  arcs.forEach(([p0, p1, thick], k) => {
+    dir.copy(p1).sub(p0)
+    const len = dir.length()
+    if (len < 1e-6) {
+      m4.makeScale(1e-6, 1e-6, 1e-6)
+      mesh.setMatrixAt(k, m4)
+      return
+    }
+    dir.normalize()
+    q.setFromUnitVectors(UP, dir)
+    mid.copy(p0).add(p1).multiplyScalar(0.5)
+    scl.set(thick, len, thick)
+    m4.compose(mid, q, scl)
+    mesh.setMatrixAt(k, m4)
   })
-  const seg = new THREE.LineSegments(geo, mat)
-  seg.computeLineDistances()
-  seg.renderOrder = 2
-  seg.visible = st.showRings !== false
-  seg.frustumCulled = false
-  st.ringGroup = seg
-  st.scene.add(seg)
+  mesh.instanceMatrix.needsUpdate = true
+  mesh.renderOrder = 2
+  mesh.visible = st.showRings !== false
+  mesh.frustumCulled = false
+  st.ringGroup = mesh
+  st.scene.add(mesh)
 }
 
 /**
