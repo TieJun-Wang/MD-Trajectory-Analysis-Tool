@@ -207,8 +207,12 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
                       try {
                         let all = { columns, rows }
                         if (sid) {
+                          // 与表格显示**完全一致**：勾了「只看当前图例」就只导出
+                          // 当前表格里的这几列（而不是再去猜图例状态）
+                          const keepCols = onlyShown && columns.length > 1
+                            ? columns.slice(1) : null
                           all = await api.tableAll(sid, { name: active.name,
-                            panel: active.index, only: onlyLabels })
+                            panel: active.index, only: keepCols })
                         }
                         const text = [all.columns.join('\t'),
                           ...all.rows.map((r) => r.join('\t'))].join('\n')
@@ -218,8 +222,10 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
             <button className="mini" title="下载**整张表** CSV（全部行，不受分页限制）"
                     onClick={() => {
                       if (sid) {
+                        const keepCols = onlyShown && columns.length > 1
+                          ? columns.slice(1) : null
                         const url = api.tableCsvUrl(sid, { name: active.name,
-                          panel: active.index, only: onlyLabels })
+                          panel: active.index, only: keepCols })
                         const a = document.createElement('a')
                         a.href = url
                         a.download = `${active.name}__panel${active.index}.csv`
