@@ -285,6 +285,82 @@ def density_profile(mdt, groups: Mapping[str, object], selection: FrameSelection
     return centers, OrderedDict(acc), meta
 
 
+def density_profile_multi(mdt, groups, selection, axes=(0, 1, 2), *,
+                          nbins: int | None = None, mode: str = "mass",
+                          wrap: bool = True, verbose: bool = False):
+    """沿**多个盒矢量方向**同时统计密度分布（只遍历一次轨迹）。
+
+    为什么单独写：axis="all" 以前是分别调用三次 density_profile —— 同样一帧要
+    读三遍、反矩阵算三遍。这里把帧循环提到外面，每帧只读一次坐标、只求一次
+    ``inv``，三个方向各自积累直方图，耗时接近单方向。
+
+    返回 ``{axis: (centers, {组分: 密度数组}, meta)}``。
+    """
+    u = mdt.universe
+    axes = tuple(int(a) for a in axes)
+    if any(a not in (0, 1, 2) for a in axes):
+        raise ValueError("axis 必须是 0、1 或 2")
+    idx0 = int(np.asarray(selection.indices)[0])
+    u.trajectory[idx0]
+    m0 = box_matrix(u)
+    nb = {}
+    for ax in axes:
+        n = int(nbins or 0)
+        if n <= 0:
+            L = float(np.linalg.norm(m0[ax]))
+            n = max(10, int(round(L / 0.5)))          # 自适应 0.5 Å/箱
+        nb[ax] = n
+    fedges = {ax: np.linspace(0.0, 1.0, nb[ax] + 1) for ax in axes}
+
+    weights = {}
+    for name, ag in groups.items():
+        weights[name] = (_group_masses(ag) if mode == "mass"
+                         else np.ones(ag.n_atoms, dtype=float))
+
+    acc = {ax: {name: np.zeros(nb[ax]) for name in groups} for ax in axes}
+    sum_vbox = 0.0
+    lens = {ax: 0.0 for ax in axes}
+    n_used = 0
+    n_total = len(selection.indices)
+    for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
+        m = box_matrix(u)
+        inv = np.linalg.inv(m)
+        sum_vbox += float(abs(np.linalg.det(m)))
+        for ax in axes:
+            lens[ax] += float(np.linalg.norm(m[ax]))
+        n_used += 1
+        for name, ag in groups.items():
+            if ag.n_atoms == 0:
+                continue
+            frac_all = np.asarray(ag.positions, dtype=float) @ inv
+            for ax in axes:
+                fr = frac_all[:, ax]
+                if wrap:
+                    fr = fr % 1.0
+                h, _ = np.histogram(fr, bins=fedges[ax], weights=weights[name])
+                acc[ax][name] += h
+    if n_used == 0:
+        raise ValueError("没有任何帧可用于密度分布计算")
+    mean_vbox = sum_vbox / n_used
+    out = {}
+    for ax in axes:
+        mean_len = lens[ax] / n_used
+        centers = (np.arange(nb[ax]) + 0.5) / nb[ax] * mean_len
+        vbin = mean_vbox / nb[ax]
+        prof = OrderedDict()
+        for name in groups:
+            y = acc[ax][name] / float(n_used)
+            prof[name] = (y / vbin * AMU_PER_A3_TO_G_CM3 if mode == "mass"
+                          else y / vbin)
+        out[ax] = (centers, prof, {
+            "axis": ax, "nbins": nb[ax], "mode": mode,
+            "mean_box_length": float(mean_len),
+            "mean_box_volume": float(mean_vbox),
+            "n_frames": int(n_used),
+        })
+    return out
+
+
 @register("density", "密度分布")
 def analyze_density(mdt, groups: Mapping[str, object] | None = None,
                     selection: FrameSelection | None = None, *,
@@ -311,12 +387,9 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
     # axis="all"：三个晶向一起算（C100/C010/C001），各自一条曲线画在同一张图上。
     # 这是默认行为：Forcite 的 Concentration Profile 也是分别按三个方向导出的。
     if str(axis) == "all" or (isinstance(axis, int) and axis < 0):
-        # nbins 可能是 None / 0（= 自适应 0.5 Å/箱），这里**透传**给单轴调用，
-        # 不能 int(None)（用户实测会崩）。
-        subs = [analyze_density(mdt, groups, selection, axis=ax,
-                                nbins=0 if nbins is None else nbins,
-                                mode=mode, verbose=verbose)
-                for ax in (0, 1, 2)]
+        # 一次遍历同时算三个方向（不再分别扫三遍轨迹；见 density_profile_multi）。
+        multi = density_profile_multi(mdt, groups, selection, axes=(0, 1, 2),
+                                      nbins=nbins, mode=mode, verbose=verbose)
         ylabel = "质量密度 ρ (g/cm³)" if str(mode) == "mass" else "数密度 ρ (1/Å³)"
         res = AnalysisResult(
             name="density", title="沿 a / b / c 三个方向的组分密度分布",
@@ -330,14 +403,27 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
             Panel(xlabel="位置 (Å)", ylabel="归一化密度 ρ/ρ_bulk",
                   title="归一化密度分布（C100 / C010 / C001）"),
         ]
-        for ax, sub in zip((0, 1, 2), subs):
-            tag = "C001" if ax == 2 else ("C010" if ax == 1 else "C100")
-            for c in sub.curves:
-                pn = 1 if int(getattr(c, "panel", 0)) == 1 else 0
-                res.add_curve(f"{c.label} ({tag})", c.x, c.y,
-                              panel=pn, group=str(getattr(c, "group", "") or ""))
-            for k, v in sub.summary.items():
-                res.summary[f"{tag} {k}"] = v
+        for ax in (0, 1, 2):
+            tag = {0: "C100", 1: "C010", 2: "C001"}[ax]
+            centers, prof, dmeta = multi[ax]
+            vbox = float(dmeta.get("mean_box_volume") or 0.0)
+            for name, y in prof.items():
+                res.add_curve(f"{name} ({tag})", centers, y, panel=0, group=name)
+                bulk = _bulk_value(y)
+                res.summary[f"{tag} {name} 体相密度"] = float(bulk)
+                res.summary[f"{tag} {name} 平均密度"] = float(np.nanmean(y))
+                try:
+                    ga = groups[name]
+                    num = (float(np.sum(np.asarray(ga.masses, dtype=float)))
+                           if str(mode) == "mass" else float(ga.n_atoms))
+                    rho_bar = num / vbox if vbox > 0 else float("nan")
+                except Exception:                         # noqa: BLE001
+                    rho_bar = float("nan")
+                res.summary[f"{tag} {name} 整盒平均密度 ρ̄"] = rho_bar
+                den = rho_bar if np.isfinite(rho_bar) and rho_bar > 0 else bulk
+                res.add_curve(f"{name} (Forcite 相对浓度 ρ/ρ̄) ({tag})", centers,
+                              y / den if den > 0 else y * np.nan,
+                              panel=1, group=name)
         res.add_notes("三个方向一次算出（C100=a / C010=b / C001=c），"
                       "与 Forcite Concentration Profile 的方向一一对应。")
         res.add_notes("归一化曲线 = ρ/ρ_bulk（体相密度取上四分位区中位数）；"
