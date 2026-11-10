@@ -1294,18 +1294,43 @@ def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
                          f"取的是键图直径两端；若要量特定两个原子，请用 atom_indices "
                          f"显式指定。")
 
-    # ------------------------------------------------ 逐帧计算
+    # ------------------------------------------------ 逐帧计算（**向量化**）
+    # 旧写法是「每个分子 × 每一帧」都单独取一次坐标（MDAnalysis 子集构造很贵），
+    # 分子多、帧数多时是平方级开销。现在只遍历**帧**一次：
+    #   · 把全部端原子压成一个去重索引表 need，逐帧只取这一小批坐标；
+    #   · 所有分子的端距用一次 numpy 减法 + norm 批量算出来（NPT 下逐帧按该帧的
+    #     box 做最小镜像，与 compute_end_to_end 的 minimize_vectors 口径一致）。
     n_pair = len(pairs)
     ree = np.full((n_frame, n_pair), np.nan)
-    for p, (name, i1, i2) in enumerate(pairs):
-        pair_ag = u.atoms[[i1, i2]]
+    if pairs:
+        from ..cancel import check as _cancel_check
+
+        i1s = np.fromiter((int(p[1]) for p in pairs), dtype=np.int64, count=n_pair)
+        i2s = np.fromiter((int(p[2]) for p in pairs), dtype=np.int64, count=n_pair)
+        need = np.unique(np.concatenate([i1s, i2s]))
+        ia = np.searchsorted(need, i1s)
+        ib = np.searchsorted(need, i2s)
+        pos = np.empty((n_frame, need.size, 3), dtype=float)
+        boxes: list = []
         for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
-            pp = positions_for(pair_ag, unwrap=bool(unwrap and not raw_mode))
-            if pp.shape[0] < 2:
-                continue
-            ree[k, p] = compute_end_to_end(
-                pp[0], pp[-1],
-                box=None if (unwrap or raw_mode) else u.dimensions)
+            _cancel_check()
+            pos[k] = u.atoms[need].positions
+            boxes.append(None if u.dimensions is None
+                         else np.asarray(u.dimensions, dtype=float))
+        # (n_frame, n_pair, 3)：一次减完所有分子
+        diff = pos[:, ia, :] - pos[:, ib, :]
+        use_min_image = bool(not (unwrap or raw_mode))
+        if not use_min_image:
+            ree = np.linalg.norm(diff, axis=2)
+        else:
+            from MDAnalysis.lib.distances import minimize_vectors
+
+            for k in range(n_frame):
+                box = boxes[k]
+                if box is None:
+                    ree[k] = np.linalg.norm(diff[k], axis=2)
+                else:
+                    ree[k] = np.linalg.norm(minimize_vectors(diff[k], box), axis=2)
 
     main = np.nanmean(ree, axis=1) if n_pair > 1 else ree[:, 0]
     tx, tlabel = time_axis(times)
