@@ -400,6 +400,9 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
                   "密度用时间窗口内的平均盒尺寸归一化。")
     res.add_notes("体相密度取分布上四分位区的中位数，作为归一化基准。")
     res.add_notes(
+        "Forcite 的 Relative concentration 是**按原子数**归一化的（= 数密度口径），"
+        "要与它逐箱对比请把密度口径选「数密度」；选「质量密度」时 ρ/ρ̄ 用质量加权，"
+        "形状会略有不同（重原子主导）。\n"
         "归一化曲线（面板 2）= ρ/ρ̄，ρ̄ = N/V_box 整盒平均 —— 与 Forcite 的 "
         "`Relative concentration` 同口径（实测 graphite 27 峰值 16.211 = 16.0 一次对齐）。"
         "⚠️ 本剖面是**时间平均**结果。若要统计**窄带**（±几 Å）内的原子数或密度，"

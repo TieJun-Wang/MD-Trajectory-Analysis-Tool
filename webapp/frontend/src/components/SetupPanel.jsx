@@ -709,7 +709,7 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
           ['number', '数密度（1/Å³）']]),
         '质量密度（默认）'),
       F('nbins', '密度 bin 数', 'input',
-        numInput('', { step: 1, min: 1, ...p('nbins') }),
+        numInput('自适应（0.5 Å/箱）', { step: 1, min: 1, ...p('nbins') }),
         '自适应（0.5 Å/箱）'),
     ]],
     ['径向分布函数 RDF', ['rdf'], [
