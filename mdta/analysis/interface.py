@@ -916,6 +916,16 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
               title="模拟前半段 vs 后半段（结构有序化趋势）"),
     ]
 
+    res.add_notes(
+        "与 MDAnalysis `InterRDF` 对账时注意三点（同一批原子 / 同样 rmax,nbins 时）："
+        "(1) 本工具默认 `mode=inter`，会**剔除同一分子内的原子对**；"
+        "要和 InterRDF 比请把「配对模式」切到 `total`（= 1.0.0 的旧行为）。"
+        "(2) 本工具把 <0.3 Å 的极近距离（自配对 / 镜像残留）当作异常剔除，"
+        "所以第 0 箱是 0；InterRDF 会把**自配对**留在第 0 箱（数值极大）。"
+        "(3) 归一化：本工具按 **N(N−1)**（同种原子对只数一次），InterRDF 按 **N²**"
+        "（含自配对），所以同一条曲线 `g_ours ≈ g_InterRDF × (1 + 1/N)`"
+        "（N=164 时约 0.6%）。这三条都能在「说明」里看到，不是数值错误。")
+
     # rmax 安全性：按所选帧的**最小**盒边长判断（逐帧在循环里收集），
     # 不再用"调用时轨迹停在哪一帧"的盒边长——那会随轨迹位置飘。
     min_blen_seen = float("inf")
