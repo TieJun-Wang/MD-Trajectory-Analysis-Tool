@@ -122,6 +122,20 @@ def summarize(counts: dict, *, resname: str = "", n_rings: int = 0,
     n_c = int(counts.get("C", 0))
     n_h = int(counts.get("H", 0))
 
+    # ---- 聚苯乙烯：每个重复单元（C8H8）带 1 个苯环 —— 判据用"每 8 个碳 1 个环"，
+    #      这样即使导出时丢了部分氢（实测 C160H122 只有 20 个环）也能认出来；
+    #      聚合度直接取**环数**（= 苯乙烯单元个数）。
+    if els == {"C", "H"} and n_rings >= 2 and n_c >= 16:
+        ratio = n_c / float(n_rings)
+        if 6.0 <= ratio <= 10.0:
+            dp_s = int(n_rings)
+            out["name"] = f"聚苯乙烯（DP≈{dp_s}）"
+            out["category"] = "含环烃（苯乙烯聚合物）"
+            out["dp"] = dp_s
+            out["note"] = (f"{f}：含 {n_rings} 个苯环、平均每环 {ratio:.1f} 个碳，"
+                           f"按 C8H8（−CH₂−CH(C₆H₅)−）重复单元计聚合度 ≈ {dp_s}")
+            return out
+
     # ---- ② 纯烃：按 C/H 比判烷/烯/炔，再按碳数命名
     if els <= {"C", "H"} and n_c > 0:
         if n_h == 0:

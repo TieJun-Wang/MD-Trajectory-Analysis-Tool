@@ -173,6 +173,98 @@ def residue_names(universe) -> np.ndarray:
     return _np.array(["RES"] * n_res, dtype=str)
 
 
+
+def repair_fragmented_bonds(universe, fudge_factor: float | None = None,
+                            max_add: int = 20000) -> dict:
+    """修**拓扑键表不全**的体系：只在不同连通分量之间按距离补键。
+
+    为什么要有（真实数据）：Materials Studio 导出的 .xsd 里，个别
+    「链–链 / 单元–单元」之间的键会漏写，于是一条长链被切成 1 个原子、4 个原子
+    这种碎片 —— 逐分子 Rg/R_ee、分子数、芳香环识别全错。
+    实测 20PE30-10PS20：5547 原子本该是 20 条 DP30 聚乙烯 + 10 条聚苯乙烯，
+    结果被切成 48 个碎片（还有 8 个孤立原子），苯环一个也认不出来。
+
+    算法：先按现有键做并查集得到连通分量；用共价半径筛出"可能是键"的近距离原子对，
+    只在**不同分量之间**合并（分量内部一根都不新增，避免凭空造出环），
+    按距离从近到远合并，直到没有可合并的对。
+    """
+    from MDAnalysis.lib.distances import capped_distance
+
+    u = universe
+    n = int(u.atoms.n_atoms)
+    info = {"added": 0, "components_before": 0, "components_after": 0,
+            "skipped": ""}
+    if n < 2:
+        return info
+    try:
+        bonds = np.asarray([(int(b[0].index), int(b[1].index)) for b in u.bonds],
+                           dtype=np.int64)
+    except Exception:                                         # noqa: BLE001
+        info["skipped"] = "没有键表"
+        return info
+    parent = np.arange(n, dtype=np.int64)
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = int(parent[a])
+        return a
+
+    def union(a: int, b: int) -> bool:
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return False
+        parent[rb] = ra
+        return True
+
+    for a, b in bonds:
+        union(int(a), int(b))
+    comps0 = len({find(i) for i in range(n)})
+    info["components_before"] = int(comps0)
+
+    types = _atom_types(u)
+    if types is None or len(types) != n:
+        info["skipped"] = "无法确定原子类型"
+        return info
+    radii = np.array([COVALENT_RADII.get(str(x), 0.0) for x in types], dtype=float)
+    pos = np.asarray(u.atoms.positions, dtype=float)
+    fudge = DEFAULT_FUDGE if fudge_factor is None else float(fudge_factor)
+    max_r = float(radii[radii > 0].max()) if np.any(radii > 0) else 1.8
+    cutoff = max(0.9, 2.0 * max_r * fudge)
+    pairs = capped_distance(pos, pos, max_cutoff=cutoff, box=u.dimensions,
+                            return_distances=True)
+    pairs_idx = np.asarray(pairs[0]) if isinstance(pairs, tuple) else np.asarray(pairs)
+    dists = np.asarray(pairs[1]) if isinstance(pairs, tuple) else None
+    if pairs_idx.size == 0:
+        info["components_after"] = int(comps0)
+        return info
+    a = pairs_idx[:, 0].astype(np.int64)
+    b = pairs_idx[:, 1].astype(np.int64)
+    keep = a != b
+    a, b = a[keep], b[keep]
+    need = (radii[a] + radii[b]) * fudge
+    ok = (radii[a] > 0) & (radii[b] > 0)
+    ok &= dists[keep] <= need if dists is not None else True
+    a, b = a[ok], b[ok]
+    if dists is not None:
+        order = np.argsort(dists[keep][ok])
+        a, b = a[order], b[order]
+    added = []
+    for i in range(a.size):
+        if len(added) >= max_add:
+            break
+        if union(int(a[i]), int(b[i])):
+            added.append((int(a[i]), int(b[i])))
+    if added:
+        try:
+            u.add_bonds(added)
+        except Exception:                                     # noqa: BLE001
+            info["skipped"] = "写回键表失败"
+            return info
+    info["added"] = len(added)
+    info["components_after"] = int(len({find(i) for i in range(n)}))
+    return info
+
 def guess_bonds(universe, fudge_factor: float = DEFAULT_FUDGE,
                 max_neighbors: int = 8, verbose: bool = False,
                 replace: bool = False) -> dict:

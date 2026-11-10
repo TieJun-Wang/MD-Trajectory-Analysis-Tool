@@ -401,6 +401,7 @@ class MDTrajectory:
             _progress("解析拓扑与帧数")
             self._validate()
             self._maybe_guess_bonds()
+            self._maybe_repair_bonds()
             _progress("按坐标补全键表",
                       bonds=(self.bond_guess_info or {}).get("bonds"),
                       fragments=(self.bond_guess_info or {}).get("fragments"),
@@ -855,6 +856,69 @@ class MDTrajectory:
         return "\n".join(lines)
 
     # ------------------------------------------------------------ 键补全
+    def _maybe_repair_bonds(self) -> None:
+        """拓扑键表**不全**时，只在不同连通分量之间按距离补键。
+
+        真实数据：MS 的 .xsd 偶尔漏写"单元之间 / 链之间"的键，一条链就被切成
+        几个碎片（实测 20PE30-10PS20：5547 原子本应是 30 条链，却被切成 48 个碎片、
+        还有 8 个孤立原子，苯环一个也认不出来）。分量内部一根都不新增，
+        所以不会凭空造出环。
+        """
+        import numpy as np
+
+        u = self._universe
+        if u is None:
+            return
+        if getattr(self, "guess_bonds", None) is False:
+            return                    # 用户显式要求「按拓扑原样」→ 不自动补键
+        try:
+            nb = len(u.bonds)
+        except Exception:                                     # noqa: BLE001
+            return
+        if nb == 0:
+            return                    # 完全没键表：交给「按坐标猜键」
+        n = int(u.atoms.n_atoms)
+        parent = np.arange(n, dtype=np.int64)
+
+        def find(a: int) -> int:
+            while parent[a] != a:
+                parent[a] = parent[parent[a]]
+                a = int(parent[a])
+            return a
+
+        deg0 = n
+        try:
+            for b in u.bonds:
+                i, j = int(b[0].index), int(b[1].index)
+                deg0 -= 1 if False else 0
+                ri, rj = find(i), find(j)
+                if ri != rj:
+                    parent[rj] = ri
+        except Exception:                                     # noqa: BLE001
+            return
+        n_comp = len({find(i) for i in range(n)})
+        n_res = int(u.residues.n_residues)
+        # 判据：连通分量数 > 残基数（每条分子至少 1 个残基），或存在孤立原子
+        isolated = int(np.sum(np.bincount(
+            np.asarray([int(b[0].index) for b in u.bonds]
+                       + [int(b[1].index) for b in u.bonds]),
+            minlength=n) == 0)) if nb else n
+        if n_comp <= max(n_res, 1) and isolated == 0:
+            return
+        try:
+            from .topology import repair_fragmented_bonds
+
+            info = repair_fragmented_bonds(u)
+        except Exception as exc:                              # noqa: BLE001
+            self.load_notes.append(f"拓扑键表疑似不全，自动补键失败：{exc}")
+            return
+        if info.get("added"):
+            self.load_notes.append(
+                f"拓扑键表不全（孤立原子 {isolated} 个，{n_comp} 个连通分量 > "
+                f"{n_res} 个残基）：已在**不同分量之间**补 {info['added']} 根键，"
+                f"连通分量 {info['components_before']} → "
+                f"{info['components_after']}（分子划分按补后的键表）")
+
     def _maybe_guess_bonds(self) -> None:
         """按共价半径补/修键表，把分子与链的划分弄对。
 
