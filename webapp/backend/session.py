@@ -2086,7 +2086,8 @@ class Session:
         ys = [c.get("y") or [] for c in curves]
         total = min(len(x) for x in (xs, *ys)) if xs else 0
         off = max(0, int(offset))
-        lim = max(1, min(int(limit), 2000))
+        # limit=None 或 <=0：取**全部**（复制 / 下载 CSV 用）
+        lim = total if (limit is None or int(limit) <= 0) else min(int(limit), 2000)
         end = min(total, off + lim)
         rows = []
         for i in range(off, end):
@@ -2097,6 +2098,18 @@ class Session:
             xlabel = str((panels[int(panel)] or {}).get("xlabel") or "x")
         return {"columns": [xlabel, *labels], "rows": rows, "total": int(total),
                 "offset": off, "limit": lim, "panel": int(panel)}
+
+    def table_csv(self, name: str, panel: int = 0, only: list | None = None) -> str:
+        """整个面板的 CSV 文本（**不分页**，给「下载 CSV」与「复制」用）。"""
+        import csv
+        import io as _io
+
+        data = self.table_slice(name, panel=panel, offset=0, limit=0, only=only)
+        buf = _io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(data["columns"])
+        w.writerows(data["rows"])
+        return buf.getvalue()
 
     def run_progress(self, after: int = 0) -> dict:
         """轮询用：返回运行状态 + **只包含客户端还没有的结果**。

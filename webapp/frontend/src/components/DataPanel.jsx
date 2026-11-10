@@ -202,11 +202,34 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
                      onChange={(e) => setOnlyShown(e.target.checked)} />
               只看当前图例
             </label>
-            <button className="mini" onClick={() => {
-              const text = [columns.join('\t'), ...rows.map((r) => r.join('\t'))].join('\n')
-              navigator.clipboard?.writeText(text)
-            }}>复制</button>
-            <button className="mini" onClick={downloadCsv}>下载 CSV</button>
+            <button className="mini" title="复制**全部行**（不只是当前这一页）"
+                    onClick={async () => {
+                      try {
+                        let all = { columns, rows }
+                        if (sid) {
+                          all = await api.tableAll(sid, { name: active.name,
+                            panel: active.index, only: onlyLabels })
+                        }
+                        const text = [all.columns.join('\t'),
+                          ...all.rows.map((r) => r.join('\t'))].join('\n')
+                        await navigator.clipboard?.writeText(text)
+                      } catch (e) { setSliceErr(`复制失败：${e.message}`) }
+                    }}>复制全部</button>
+            <button className="mini" title="下载**整张表** CSV（全部行，不受分页限制）"
+                    onClick={() => {
+                      if (sid) {
+                        const url = api.tableCsvUrl(sid, { name: active.name,
+                          panel: active.index, only: onlyLabels })
+                        const a = document.createElement('a')
+                        a.href = url
+                        a.download = `${active.name}__panel${active.index}.csv`
+                        document.body.appendChild(a)
+                        a.click()
+                        a.remove()
+                        return
+                      }
+                      downloadCsv()          // 没有会话（自检）时退回本地全表
+                    }}>下载 CSV（全部）</button>
           </div>
         </div>
 

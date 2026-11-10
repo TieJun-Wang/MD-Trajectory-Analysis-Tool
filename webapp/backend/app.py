@@ -39,7 +39,8 @@ from typing import Any, Mapping
 
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
+                                StreamingResponse)
 from fastapi.staticfiles import StaticFiles
 
 # ---------------------------------------------------------------- 路径准备
@@ -563,6 +564,24 @@ def session_selection_delete(sid: str, name: str) -> dict:
         return sess.delete_selection(name)
     except SessionError as exc:
         raise _fail(exc) from exc
+
+
+@app.get("/api/session/{sid}/table.csv")
+def session_table_csv(sid: str, name: str, panel: int = 0, only: str = ""):
+    """整表 CSV（不分页）：浏览器直接下载，行数再多也不会撑爆页面。"""
+    sess = _sess(sid)
+    labels = [x for x in str(only).split(",") if x]
+    try:
+        with sess.lock:
+            text = sess.table_csv(name, panel=panel, only=labels or None)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+    except Exception as exc:                                     # noqa: BLE001
+        raise _fail(SessionError(f"导出数据表失败：{type(exc).__name__}: {exc}")) from exc
+    fname = f"{name}__panel{int(panel)}.csv"
+    return PlainTextResponse(
+        text, media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 
 @app.get("/api/session/{sid}/table")

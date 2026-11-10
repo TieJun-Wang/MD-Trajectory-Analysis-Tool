@@ -210,6 +210,32 @@ export const api = {
   /** 已保存的可视化选择 */
   selections: (sid) => request(`/session/${sid}/selections`),
 
+  /** 整表 CSV 的下载地址（服务端直接吐文件，行数再多也不占页面内存） */
+  tableCsvUrl: (sid, { name, panel = 0, only = null } = {}) => {
+    const q = new URLSearchParams({ name: String(name), panel: String(panel) })
+    if (Array.isArray(only) && only.length) q.set('only', only.join(','))
+    return `${BASE}/session/${sid}/table.csv?${q.toString()}`
+  },
+
+  /** 把整张表分页取全（复制到剪贴板用）：返回 {columns, rows, total} */
+  tableAll: async (sid, { name, panel = 0, only = null, pageSize = 2000 } = {}) => {
+    let offset = 0
+    let total = Infinity
+    let columns = []
+    const rows = []
+    while (offset < total) {
+      const r = await api.table(sid, { name, panel, offset, limit: pageSize, only })
+      if (!r) break
+      columns = r.columns || columns
+      total = Number(r.total) || 0
+      const got = r.rows || []
+      rows.push(...got)
+      if (!got.length || got.length < pageSize) break
+      offset += got.length
+    }
+    return { columns, rows, total }
+  },
+
   /** 数据表分页：只取一页（offset/limit），`only` = 只看这些曲线标签（可空） */
   table: (sid, { name, panel = 0, offset = 0, limit = 200, only = null } = {}) => {
     const q = new URLSearchParams({ name: String(name), panel: String(panel),
