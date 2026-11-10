@@ -33,7 +33,10 @@ def register(name: str, title: str):
 def frame_iterator(mdt, selection: FrameSelection, verbose: bool = False) -> Iterator[tuple[int, float]]:
     """按选中的帧号逐帧遍历，产出 ``(帧号, 时间/ps)``。"""
     u = mdt.universe
+    from ..cancel import check as _cancel_check
+
     for k, idx in enumerate(selection.indices):
+        _cancel_check()          # 用户取消 → 立刻停（AnalysisCancelled）
         ts = u.trajectory[int(idx)]
         if verbose and (k % 10 == 0 or k == len(selection.indices) - 1):
             print(f"    帧 {k + 1}/{len(selection.indices)}  (index={idx}, t={ts.time:.1f} ps)")

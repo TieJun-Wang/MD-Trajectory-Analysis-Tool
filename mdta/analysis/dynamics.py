@@ -429,7 +429,10 @@ def particle_series(mdt, ag, frame_indices, *, object="molecule",
         mode = "ram"
 
     boxes: list = []
+    from ..cancel import check as _cancel_check
+
     for k, i in enumerate(idx):
+        _cancel_check()          # 用户取消 → 立刻停
         u.trajectory[int(i)]
         box = u.dimensions
         boxes.append(None if box is None else np.asarray(box, dtype=float))

@@ -734,7 +734,7 @@ export default function App() {
 
   const cancelRun = async () => {
     cancelledRef.current = true
-    pushLog('已请求取消：当前这项算完后停止，已完成的结果会保留')
+    pushLog('已请求取消：正在算的这一项会立刻中断，已完成的结果会保留')
     try {
       const p = await api.runCancel(sess.sid)
       setLive((l) => (l ? { ...l, message: p.message || l.message } : l))
@@ -987,7 +987,18 @@ export default function App() {
                                           onSetsChange={applySets} />
                           <FrameBlock frames={frames} setFrames={setFrames} />
                           <FunctionBlock titles={titles} order={order}
-                                         which={which} setWhich={setWhich}
+                                         which={which}
+                                         setWhich={(next) => {
+                                           // 运行中把分析项取消掉 → 立刻打断当前计算
+                                           const running = live?.status === 'running'
+                                           const removed = which.filter((n) => !next.includes(n))
+                                           if (running && removed.length) {
+                                             pushLog(`已取消分析项：${removed.join('、')}`
+                                               + '（当前计算会立刻中断，可重新开始）')
+                                             cancelRun()
+                                           }
+                                           setWhich(next)
+                                         }}
                                          groups={groups}
                                          feasible={feasible}
                                          estimates={live?.estimates} />

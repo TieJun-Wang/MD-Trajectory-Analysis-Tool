@@ -792,6 +792,13 @@ class Analyzer:
                 print(f"          {n}")
         total = max(len(names), 1)
         self.cancelled = False
+        # 取消令牌挂到模块级：分析内部的长循环（逐帧/逐粒子）会检查它，
+        # 于是「取消」不必等当前这一项算完（用户要求立即生效）。
+        from .cancel import AnalysisCancelled
+        from .cancel import bind as _cancel_bind
+        from .cancel import clear as _cancel_clear
+
+        _cancel_bind(cancel)
         self.current = ""
         for i, name in enumerate(names):
             if cancel is not None and cancel.is_set():
@@ -808,6 +815,10 @@ class Analyzer:
                 print(f"[分析] {title} ...")
             try:
                 res = self.run(name, params=params.get(name), verbose=False)
+            except AnalysisCancelled:
+                # 用户取消：不算失败；已完成的项保留，剩余项不再跑
+                self.cancelled = True
+                break
             except Exception as exc:  # noqa: BLE001
                 # 「做不了」和「算错了」要分开：像"没有盒信息"这种，是体系本身
                 # 不满足该项的前提（用户实测：非周期体系跑 RDF 直接抛
@@ -852,6 +863,7 @@ class Analyzer:
             # 关键：算完一项就立刻回调，Web 版据此实时刷新页面
             if on_result:
                 on_result(name, res, self.timings[name], len(self.results), total)
+        _cancel_clear()
         if progress:
             progress(1.0, "正在导出结果…")
         if outdir:

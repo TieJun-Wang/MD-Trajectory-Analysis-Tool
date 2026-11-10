@@ -686,7 +686,10 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
     n_used = 0
     n_pairs = 0
     n_intra = 0
+    from ..cancel import check as _cancel_check
+
     for idx in frame_indices:
+        _cancel_check()
         u.trajectory[int(idx)]
         pa = np.asarray(ref.positions, dtype=float)
         pb = None if same else np.asarray(conf.positions, dtype=float)
