@@ -700,16 +700,18 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       ])),
     ]],
     ['密度分布 / 界面宽度', ['density', 'interface'], [
-      // 三个参数**排在同一行**：2+2+2 = 6（ParamTable 每行跨度上限 6）
+      // 方向**独占第一行**（span 6）；口径与分箱数排第二行（2+2）。
       F('axis', '密度方向', 'select',
-        sel('axis', [['all', '三个方向'], [2, 'C001'], [1, 'C010'], [0, 'C100']]),
-        '三个方向', 2),
+        sel('axis', [['all', '三个方向（默认）'], [2, 'C001（c 轴）'],
+                     [1, 'C010（b 轴）'], [0, 'C100（a 轴）']]),
+        '三个方向（默认）', 6),
       F('density_mode', '密度口径', 'select',
-        sel('density_mode', [['mass', '质量密度'], ['number', '数密度']]),
+        sel('density_mode', [['mass', '质量密度（Forcite 默认）'],
+          ['number', '数密度']]),
         '质量密度', 2),
       F('nbins', '密度 bin 数', 'input',
-        numInput('自适应', { step: 1, min: 1, ...p('nbins') }),
-        '自适应', 2),
+        numInput('自适应（0.5 Å/箱）', { step: 1, min: 1, ...p('nbins') }),
+        '自适应（0.5 Å/箱）', 2),
     ]],
     ['径向分布函数 RDF', ['rdf'], [
       F('rmax', 'RDF 最大 r (Å)', 'input', numInput('', { step: 1, ...p('rmax') })),

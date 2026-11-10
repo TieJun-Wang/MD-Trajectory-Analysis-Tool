@@ -86,7 +86,7 @@ export default function App() {
     start_ps: '', stop_ps: '', equil_ps: '', interval_ps: '', max_frames: '',
   })
   const [params, setParams] = useState({
-    cutoff: 5.0, axis: 'all', nbins: 50, rmax: 12, dihedral_mode: 'auto',
+    cutoff: 5.0, axis: 'all', nbins: '', rmax: 12, dihedral_mode: 'auto',
     // 密度口径：mass = 质量密度 g/cm³（Forcite 默认）/ number = 数密度 1/Å³
     density_mode: 'mass',
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
