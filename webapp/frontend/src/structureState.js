@@ -169,6 +169,25 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sid, scope, filters, onlySelected, mode])
 
+  /** **反选**：把"当前没被选中的原子"选上，已选中的取消（集合运算，不是猜）。 */
+  const invertSelection = useCallback(() => {
+    const n = Number(nAtoms) || 0
+    if (!n) return
+    const cur = selected || new Set()
+    const next = []
+    for (let i = 0; i < n; i += 1) {
+      if (!cur.has(i)) next.push(i)
+    }
+    setScope(new Set(next))
+    setFilters([])
+    setSelKeys(new Set())
+    keyAtomsRef.current.clear()
+    setOnlySelected(false)
+    setHover(null)
+    log?.(`已反选：${next.length.toLocaleString()} 个原子`
+      + `（原来选中 ${cur.size.toLocaleString()} 个）`)
+  }, [nAtoms, selected, log])
+
   /** 选中一批原始原子编号（外部直接给定，例如集合载入） */
   const setIndices = useCallback((indices) => {
     setScope(new Set(indices || []))
@@ -507,6 +526,7 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     onlySelected, setOnlySelected,
     mode, setMode,
     load, pick, selectGroup, highlightSet, createFromIndices, resetView, resetAll,
+    invertSelection,
     search, highlightMatch, runQuery,
     additive, setAdditive, applySelection, filterElement,
     toggleFilter, clearFilters, filters,

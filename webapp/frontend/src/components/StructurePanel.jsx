@@ -144,6 +144,13 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
                   title="清空所有选择（高亮 / 只显示已选 / 搜索 / 分析集合）；三维视图的视角保持不变">
             重置
           </button>
+          <button className="mini"
+                  onClick={() => st.invertSelection?.()}
+                  disabled={!st.selected?.size}
+                  title={'反选：把「当前没选中的原子」全部选上、把已选中的取消'
+                    + '（相当于 全体系 − 当前选择；没有任何选择时无法反选）'}>
+            反选
+          </button>
           <button className={`mini ${st.additive ? 'active' : ''}`}
                   onClick={() => st.setAdditive(!st.additive)}
                   title={'累加选择：开时点击结构层级会把原子**加到**已有选择上，'
