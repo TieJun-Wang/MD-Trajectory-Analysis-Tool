@@ -86,7 +86,7 @@ export default function App() {
     start_ps: '', stop_ps: '', equil_ps: '', interval_ps: '', max_frames: '',
   })
   const [params, setParams] = useState({
-    cutoff: 5.0, axis: 2, nbins: 100, rmax: 12, dihedral_mode: 'auto',
+    cutoff: 5.0, axis: 'all', nbins: 100, rmax: 12, dihedral_mode: 'auto',
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
     // 「分子质心」会大一圈（分子内振动/转动被去掉），两边不能直接比。
     rdf_mode: 'inter', rdf_nbins: 120, msd_object: 'atom',
@@ -527,8 +527,11 @@ export default function App() {
         max_frames: frames.max_frames || null,
       },
       params: {
-        density: { axis: Number(params.axis), nbins: Number(params.nbins) },
-        interface: { axis: Number(params.axis), nbins: Math.max(Number(params.nbins), 60) },
+        // 密度默认三个方向一起算（C100/C010/C001）；其它模块仍用单个轴
+        density: { axis: (params.axis === 'all' ? 'all' : Number(params.axis)),
+                   nbins: Number(params.nbins) },
+        interface: { axis: (params.axis === 'all' ? 2 : Number(params.axis)),
+                     nbins: Math.max(Number(params.nbins), 60) },
         // RDF 分箱数以前写死 120 —— Forcite 是按「间隔(Å)」给的（如 20 Å / 0.02 Å
         // = 1000 箱），界面能设分箱数，两边才能逐 bin 对比。
         rdf: { rmax: Number(params.rmax),
@@ -569,11 +572,11 @@ export default function App() {
                    q6_solid: Number(params.q6_solid) || 0.5,
                    min_cluster: Number(params.min_cluster) || 10 },
         // 面内 RDF (2D)：slab 留空 = 全盒；两组分质心距：默认包裹坐标相减(与作者一致)
-        rdf2d: { plane_axis: Number(params.axis) ?? 2,
+        rdf2d: { plane_axis: (params.axis === 'all' ? 2 : Number(params.axis)) ?? 2,
                  rmax: Number(params.rdf2d_rmax) || 70,
                  nbins: Number(params.rdf2d_nbins) || 140,
                  slab: slabRange },
-        comdist: { axis: Number(params.axis) ?? 2,
+        comdist: { axis: (params.axis === 'all' ? 2 : Number(params.axis)) ?? 2,
                    pbc: params.comdist_pbc === true },
       },
       selection: {

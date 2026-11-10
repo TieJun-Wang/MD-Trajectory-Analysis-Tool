@@ -294,6 +294,38 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
     if selection is None:
         raise ValueError("必须提供 frame selection")
 
+    # axis="all"：三个晶向一起算（C100/C010/C001），各自一条曲线画在同一张图上。
+    # 这是默认行为：Forcite 的 Concentration Profile 也是分别按三个方向导出的。
+    if str(axis) == "all" or (isinstance(axis, int) and axis < 0):
+        subs = [analyze_density(mdt, groups, selection, axis=ax, nbins=int(nbins),
+                                mode=mode, verbose=verbose)
+                for ax in (0, 1, 2)]
+        ylabel = "质量密度 ρ (g/cm³)" if str(mode) == "mass" else "数密度 ρ (1/Å³)"
+        res = AnalysisResult(
+            name="density", title="沿 a / b / c 三个方向的组分密度分布",
+            meta={"axes": [0, 1, 2], "nbins": int(nbins), "mode": str(mode)},
+        )
+        res.panels = [
+            Panel(xlabel="位置 (Å)", ylabel=ylabel,
+                  title="组分密度分布（C100 / C010 / C001）"),
+            Panel(xlabel="位置 (Å)", ylabel="归一化密度 ρ/ρ_bulk",
+                  title="归一化密度分布（C100 / C010 / C001）"),
+        ]
+        for ax, sub in zip((0, 1, 2), subs):
+            tag = "C001" if ax == 2 else ("C010" if ax == 1 else "C100")
+            for c in sub.curves:
+                pn = 1 if int(getattr(c, "panel", 0)) == 1 else 0
+                res.add_curve(f"{c.label} ({tag})", c.x, c.y,
+                              panel=pn, group=str(getattr(c, "group", "") or ""))
+            for k, v in sub.summary.items():
+                res.summary[f"{tag} {k}"] = v
+        res.add_notes("三个方向一次算出（C100=a / C010=b / C001=c），"
+                      "与 Forcite Concentration Profile 的方向一一对应。")
+        res.add_notes("归一化曲线 = ρ/ρ_bulk（体相密度取上四分位区中位数）；"
+                      "Forcite 的 Relative concentration 用的是另一个基准，"
+                      "两者差一个常数因子（PE50/ETH 实测 15.5）。")
+        return res
+
     centers, prof, dmeta = density_profile(mdt, groups, selection, axis=axis,
                                            nbins=nbins, mode=mode, verbose=verbose)
     u = mdt.universe

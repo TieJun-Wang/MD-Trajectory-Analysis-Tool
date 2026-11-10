@@ -706,9 +706,9 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     ]],
     ['密度分布 / 界面宽度', ['density', 'interface'], [
       F('axis', '密度方向', 'select',
-        sel('axis', [[2, 'C001（c 轴，2）'], [1, 'C010（b 轴，1）'],
-                     [0, 'C100（a 轴，0）']]),
-        'C001（默认）'),
+        sel('axis', [['all', '三个方向（默认）'], [2, 'C001（c 轴，2）'],
+                     [1, 'C010（b 轴，1）'], [0, 'C100（a 轴，0）']]),
+        '三个方向（默认）'),
       F('nbins', '密度 bin 数', 'input', numInput('', p('nbins'))),
     ]],
     ['径向分布函数 RDF', ['rdf'], [
