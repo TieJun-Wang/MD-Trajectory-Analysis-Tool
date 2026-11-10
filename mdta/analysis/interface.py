@@ -217,7 +217,18 @@ def density_profile(mdt, groups: Mapping[str, object], selection: FrameSelection
     u = mdt.universe
     if axis not in (0, 1, 2):
         raise ValueError("axis 必须是 0、1 或 2")
-    nbins = int(nbins)
+    nbins = int(nbins or 0)
+    if nbins <= 0:
+        # 自适应：**0.5 Å 一个箱**（= Forcite Concentration Profile 的默认）。
+        # 长度取所选帧第一帧该方向的盒矢量长度（NPT 下各帧差别很小，
+        # 而 bin 本身是按分数坐标均分的，不会因盒长波动错位）。
+        try:
+            idx0 = int(np.asarray(selection.indices)[0])
+            u.trajectory[idx0]
+            L = float(np.linalg.norm(np.asarray(box_matrix(u))[axis]))
+        except Exception:                                     # noqa: BLE001
+            L = 100.0
+        nbins = max(10, int(round(L / 0.5)))
     fedges = np.linspace(0.0, 1.0, nbins + 1)
 
     weights = {}
@@ -294,6 +305,9 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
     if selection is None:
         raise ValueError("必须提供 frame selection")
 
+    # 分箱自适应：nbins 为空/<=0 时按 **0.5 Å/箱** 取（Forcite 的 Concentration
+    # Profile 默认就是 0.5 Å：PE50 的 120 Å → 240 箱、graphite 27 的 40 Å → 80 箱，
+    # 与它们导出的 CSV 行数完全一致）。所以界面上不用每次手填。
     # axis="all"：三个晶向一起算（C100/C010/C001），各自一条曲线画在同一张图上。
     # 这是默认行为：Forcite 的 Concentration Profile 也是分别按三个方向导出的。
     if str(axis) == "all" or (isinstance(axis, int) and axis < 0):

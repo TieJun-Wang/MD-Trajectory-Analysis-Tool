@@ -529,7 +529,8 @@ export default function App() {
       params: {
         // 密度默认三个方向一起算（C100/C010/C001）；其它模块仍用单个轴
         density: { axis: (params.axis === 'all' ? 'all' : Number(params.axis)),
-                   nbins: Number(params.nbins) },
+                   // 留空 = 自适应（0.5 Å/箱，与 Forcite 一致）
+                   nbins: params.nbins ? Number(params.nbins) : null },
         interface: { axis: (params.axis === 'all' ? 2 : Number(params.axis)),
                      nbins: Math.max(Number(params.nbins), 60) },
         // RDF 分箱数以前写死 120 —— Forcite 是按「间隔(Å)」给的（如 20 Å / 0.02 Å
