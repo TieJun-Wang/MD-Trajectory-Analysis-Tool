@@ -2059,6 +2059,45 @@ class Session:
                                   if job.preexisting else ""))
             job.finished = time.time()
 
+    def table_slice(self, name: str, panel: int = 0, offset: int = 0,
+                    limit: int = 200, only: list | None = None) -> dict:
+        """数据表**分页**：只把一页的行传前端。
+
+        为什么要有：曲线数据本来就全在浏览器里（图表要画全点），但数据表把上万行
+        全渲染成 <td> 会明显卡顿。这里按 (分析项, 面板) 切一页（默认 200 行），
+        前端翻页时再取下一段 —— 传的和画的都只是一页。
+
+        ``only`` 给定时只保留这些曲线（对应界面上的「只看当前图例」）。
+        """
+        res = (getattr(self, "results_json", None) or {}).get(str(name))
+        if not res:
+            raise SessionError(f"没有这项结果：{name}")
+        curves = [c for c in (res.get("curves") or [])
+                  if int(c.get("panel", 0)) == int(panel)]
+        if only:
+            keep = {str(x) for x in only}
+            hit = [c for c in curves if str(c.get("label")) in keep]
+            curves = hit or curves
+        if not curves:
+            return {"columns": [], "rows": [], "total": 0, "offset": int(offset),
+                    "limit": int(limit)}
+        labels = [str(c.get("label")) for c in curves]
+        xs = curves[0].get("x") or []
+        ys = [c.get("y") or [] for c in curves]
+        total = min(len(x) for x in (xs, *ys)) if xs else 0
+        off = max(0, int(offset))
+        lim = max(1, min(int(limit), 2000))
+        end = min(total, off + lim)
+        rows = []
+        for i in range(off, end):
+            rows.append([xs[i], *[y[i] for y in ys]])
+        panels = res.get("panels") or []
+        xlabel = "x"
+        if 0 <= int(panel) < len(panels):
+            xlabel = str((panels[int(panel)] or {}).get("xlabel") or "x")
+        return {"columns": [xlabel, *labels], "rows": rows, "total": int(total),
+                "offset": off, "limit": lim, "panel": int(panel)}
+
     def run_progress(self, after: int = 0) -> dict:
         """轮询用：返回运行状态 + **只包含客户端还没有的结果**。
 

@@ -1053,7 +1053,8 @@ export default function App() {
                 （图例里没勾的组不出现，用户要求） */}
             {tab === 'data' && <DataPanel run={run} groups={groups}
                                           chart={chart} setChart={setChart}
-                                          visible={visibleCurves} />}
+                                          visible={visibleCurves}
+                                          sid={sess?.sid || ''} />}
             {/* 统计量：只显示指标 */}
             {tab === 'stats' && <StatsPanel run={run} groups={groups}
                                             focus={chart?.name || ''} />}

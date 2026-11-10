@@ -209,6 +209,14 @@ export const api = {
 
   /** 已保存的可视化选择 */
   selections: (sid) => request(`/session/${sid}/selections`),
+
+  /** 数据表分页：只取一页（offset/limit），`only` = 只看这些曲线标签（可空） */
+  table: (sid, { name, panel = 0, offset = 0, limit = 200, only = null } = {}) => {
+    const q = new URLSearchParams({ name: String(name), panel: String(panel),
+      offset: String(offset), limit: String(limit) })
+    if (Array.isArray(only) && only.length) q.set('only', only.join(','))
+    return request(`/session/${sid}/table?${q.toString()}`)
+  },
   deleteSelection: (sid, name) =>
     request(`/session/${sid}/selections/${encodeURIComponent(name)}`,
       { method: 'DELETE' }),

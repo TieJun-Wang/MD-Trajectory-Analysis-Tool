@@ -6,6 +6,8 @@
  * `analysisGroups` 定义，所以两边的分法不会不一致。
  */
 import { useMemo, useState } from 'react'
+import { useEffect } from 'react'
+import { api } from '../api'
 import { buildOption, formatCell } from '../chartOption'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
 
@@ -51,7 +53,7 @@ function buildTable(result, panelIndex, onlyShown, visible) {
 }
 
 export default function DataPanel({ run, groups, chart = null, setChart = null,
-                                   visible = null }) {
+                                   visible = null, sid = '' }) {
   const results = run?.results || {}
   const order = useMemo(() => Object.keys(results), [results])
   // 选中的「分析项 + 第几张图」：与图表页**共用同一个状态**（切页不丢），
@@ -67,11 +69,49 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
 
   const active = sel && results[sel.name] ? sel : (order.length ? { name: order[0], index: 0 } : null)
   const result = active ? results[active.name] : null
-  const { columns, rows } = useMemo(
+
+  // ---- 分页：默认从后端只取一页（PB 级曲线全渲染成 <td> 会卡死浏览器）
+  const PAGE_DEFAULT = 200
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(PAGE_DEFAULT)
+  const [slice, setSlice] = useState(null)       // {columns, rows, total, offset}
+  const [sliceErr, setSliceErr] = useState('')
+  useEffect(() => { setPage(0) }, [active?.name, active?.index, onlyShown])
+
+  const onlyLabels = useMemo(() => {
+    if (!onlyShown || !result) return null
+    if (Array.isArray(visible)) return visible
+    try {
+      const opt = buildOption(result, active.index)
+      const sel = opt && opt.legend && opt.legend.selected
+      if (sel) return Object.keys(sel).filter((k) => sel[k])
+    } catch { /* 忽略 */ }
+    return null
+  }, [onlyShown, result, active, visible])
+
+  // 没有会话（自检 / 单独渲染）：同步用本地数据建表，首帧就有表头与行
+  const local = useMemo(
     () => (result ? buildTable(result, active.index, onlyShown, visible)
       : { columns: [], rows: [] }),
     [result, active, onlyShown, visible],
   )
+
+  useEffect(() => {
+    if (!result || !sid) return undefined
+    let alive = true
+    setSliceErr('')
+    api.table(sid, { name: active.name, panel: active.index,
+      offset: page * pageSize, limit: pageSize, only: onlyLabels })
+      .then((r) => { if (alive) setSlice(r) })
+      .catch((e) => { if (alive) setSliceErr(e.message) })
+    return () => { alive = false }
+  }, [sid, result, active, page, pageSize, onlyShown, visible, onlyLabels])
+
+  const { columns, rows } = sid
+    ? (slice || { columns: local.columns, rows: [] })
+    : local
+  const totalRows = sid ? (slice?.total ?? rows.length) : local.rows.length
+  const nPage = Math.max(1, Math.ceil(totalRows / pageSize))
 
   if (!order.length) {
     return <div className="placeholder"><p>还没有结果。</p></div>
@@ -168,6 +208,28 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
             }}>复制</button>
             <button className="mini" onClick={downloadCsv}>下载 CSV</button>
           </div>
+        </div>
+
+        <div className="tablefoot">
+          <span className="dim">
+            共 {totalRows.toLocaleString()} 行
+            {totalRows > pageSize
+              ? ` · 第 ${Math.min(page + 1, nPage)} / ${nPage} 页（每页 ${pageSize} 行）` : ''}
+            {sliceErr ? ` · ${sliceErr}` : ''}
+          </span>
+          <span className="charttools">
+            <button className="mini" disabled={page <= 0}
+                    onClick={() => setPage((p) => Math.max(0, p - 1))}>上一页</button>
+            <button className="mini" disabled={page + 1 >= nPage}
+                    onClick={() => setPage((p) => p + 1)}>下一页</button>
+            <select value={pageSize} onChange={(e) => {
+              setPageSize(Number(e.target.value)); setPage(0)
+            }}>
+              {[200, 500, 1000, 2000].map((n) => (
+                <option key={n} value={n}>每页 {n} 行</option>
+              ))}
+            </select>
+          </span>
         </div>
 
         <div className="tablewrap">

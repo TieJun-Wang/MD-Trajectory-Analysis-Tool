@@ -565,6 +565,22 @@ def session_selection_delete(sid: str, name: str) -> dict:
         raise _fail(exc) from exc
 
 
+@app.get("/api/session/{sid}/table")
+def session_table(sid: str, name: str, panel: int = 0, offset: int = 0,
+                  limit: int = 200, only: str = "") -> dict:
+    """数据表分页（一页一传）：``only`` 是逗号分隔的曲线标签（只看这些）。"""
+    sess = _sess(sid)
+    labels = [x for x in str(only).split(",") if x]
+    try:
+        with sess.lock:
+            return sess.table_slice(name, panel=panel, offset=offset, limit=limit,
+                                    only=labels or None)
+    except SessionError as exc:
+        raise _fail(exc) from exc
+    except Exception as exc:                                     # noqa: BLE001
+        raise _fail(SessionError(f"取数据表失败：{type(exc).__name__}: {exc}")) from exc
+
+
 @app.post("/api/session/{sid}/run")
 async def session_run(sid: str, payload: Mapping[str, Any] = Body(...)) -> JSONResponse:
     """跑分析（**同步**等待全部完成）。放在线程池里执行，避免阻塞事件循环。

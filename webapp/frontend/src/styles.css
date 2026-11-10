@@ -945,6 +945,11 @@ table.inforows tr:first-child td { padding-top: 3px; }
 .fsbtn { white-space: nowrap; }
 
 /* 图表占满剩余高度；ECharts 的 containLabel 保证标签不越界 */
+.tablefoot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; font-size: 11px; margin-bottom: 6px;
+}
+.tablefoot select { font-size: 11px; }
 .chart-box {
   flex: 1 1 auto;
   min-height: 0;
@@ -956,7 +961,12 @@ table.inforows tr:first-child td { padding-top: 3px; }
 
 /* 图表容器（MSD 拟合信息条在图外，不再盖住标题 / ECharts 工具条） */
 .chartwrap { position: relative; flex: 1 1 auto; min-height: 0; display: flex; }
-.chartwrap > .chart-box { flex: 1 1 auto; }
+.chartwrap > .tablefoot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; font-size: 11px; margin-bottom: 6px;
+}
+.tablefoot select { font-size: 11px; }
+.chart-box { flex: 1 1 auto; }
 
 /* MSD 线性区拟合：区间写在标题行（点数字就能改），统计量贴在绘图区右上角 */
 .fitinline {
@@ -1004,7 +1014,12 @@ table.inforows tr:first-child td { padding-top: 3px; }
   box-shadow: 0 0 0 100vmax rgba(15, 23, 42, .25);
 }
 .chartarea.fs .charttitle { font-size: 15px; }
-.chartarea.fs .chart-box { border-color: var(--line-strong); }
+.chartarea.fs .tablefoot {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; font-size: 11px; margin-bottom: 6px;
+}
+.tablefoot select { font-size: 11px; }
+.chart-box { border-color: var(--line-strong); }
 
 /* 说明文字样式在 .notelist / .noterow（见上）；
    这里不再重复定义 .notes —— 那个选择器已经被右侧面板容器占用了。
