@@ -709,7 +709,8 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         sel('density_mode', [['mass', '质量密度'], ['number', '数密度']]),
         '质量密度', 3),
       F('nbins', '密度 bin 数', 'input',
-        numInput('默认', { step: 1, min: 1, ...p('nbins') }),
+        numInput('默认', { step: 1, min: 1, style: { width: 56, minWidth: 56 },
+                           ...p('nbins') }),
         '默认', 2),
     ]],
     ['径向分布函数 RDF', ['rdf'], [
