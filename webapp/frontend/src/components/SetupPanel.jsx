@@ -666,7 +666,12 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         '整体体系 分子 / 链', 6),
       F('mass_weighted', '质量加权 Rg', 'check',
         chk('mass_weighted', '用质量加权',
-          '默认按原子质量加权；关掉则每个原子权重相同'), '用质量加权'),
+          '默认按原子质量加权（= Materials Studio Forcite 的口径）；\n'
+          + '关掉则每个原子权重相同（= MDAnalysis analyze.Rg 的默认，'
+          + '也是作者 mda_test.py 的算法）。\n'
+          + '两种都对，但数值差 ~1%（PE 链上 H 多）：实测 20PE30 同一体系'
+          + '加权 10.685 Å、不加权 10.812 Å，后者与 eth_rg_mda.csv 逐点一致。'),
+        '用质量加权'),
     ]],
     ['R_ee 端到端距离', ['ree'], [
       // 下面这个开关**只影响 R_ee**：Rg 的「整组 / 逐分子」由上面的「分析对象」决定。
