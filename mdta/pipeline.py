@@ -45,7 +45,7 @@ DEFAULT_PARAMS: dict = {
     "ree": {},
     "dihedral": {"mode": "auto", "gauche_edge": 120.0},
     # 默认三个晶向一起出（C100/C010/C001）；界面/2D RDF/质心距仍用 axis=2
-    "density": {"axis": "all", "nbins": None, "mode": "mass"},
+    "density": {"axis": "all", "nbins": 50, "mode": "mass"},
     "rdf": {"rmax": 12.0, "nbins": 120, "compare_halves": False},
     "rdf2d": {"plane_axis": 2, "rmax": 70.0, "nbins": 140},
     "comdist": {"axis": 2, "pbc": False},
