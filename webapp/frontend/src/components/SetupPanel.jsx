@@ -707,13 +707,14 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         '三个方向（默认）', 6),
       // 口径下拉 + bin 数**同一格内联**：标签紧贴输入框，不占一整列
       F('density_mode', '密度口径', 'select',
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5,
+                       whiteSpace: 'nowrap', flexWrap: 'nowrap' }}>
           {sel('density_mode', [['mass', '质量密度'], ['number', '数密度']])}
-          <span style={{ color: 'var(--dim)' }}>bin 数</span>
+          <span style={{ color: 'var(--dim)' }}>密度bin</span>
           {numInput('默认', { step: 1, min: 1,
                              style: { width: 56, minWidth: 56 }, ...p('nbins') })}
         </span>,
-        '质量密度', 4),
+        '质量密度', 5),
     ]],
     ['径向分布函数 RDF', ['rdf'], [
       F('rmax', 'RDF 最大 r (Å)', 'input', numInput('', { step: 1, ...p('rmax') })),
