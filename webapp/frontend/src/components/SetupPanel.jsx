@@ -716,6 +716,7 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         ['inter', '分子间（默认）'],
         ['intra', '分子内'],
         ['total', '总体（含分子内）'],
+        ['all', '三种一起（同图对比）'],
       ])),
     ]],
     ['二面角分析', ['dihedral'], [

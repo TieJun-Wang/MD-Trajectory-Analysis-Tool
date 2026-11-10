@@ -668,6 +668,11 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
 
     rmax = float(edges[-1])
     hist = np.zeros(edges.size - 1, dtype=float)
+    #: mode="all" 时一次遍历就给出三条直方图（total / inter / intra），
+    #: 配对筛选只是布尔掩码，所以**耗时与单模式相同**。
+    hist_all = {"total": np.zeros(edges.size - 1, dtype=float),
+                "inter": np.zeros(edges.size - 1, dtype=float),
+                "intra": np.zeros(edges.size - 1, dtype=float)}
     na, nb = ref.n_atoms, conf.n_atoms
     qc = {"有效原子对数": 0, "统计帧数": 0, "分子内配对占比": 0.0,
           "模式": str(mode), "模式退化": "",
@@ -751,36 +756,40 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
             if exclude_bonded:
                 keep &= _drop_bonded_pairs(ref, conf, pairs, dist, same,
                                            return_mask=True)
+            masks = {"total": keep}
             if mc is not None:
                 mi = ma[np.asarray(pairs[:, 0], dtype=np.int64)]
                 mj = (ma if same else mb)[np.asarray(pairs[:, 1], dtype=np.int64)]
                 same_mol = mi == mj
-                if eff_mode == "inter":
-                    keep &= ~same_mol
-                elif eff_mode == "intra":
-                    keep &= same_mol
-                dist = dist[keep]
-                n_intra += int(np.sum(same_mol[keep]))
-                n_pairs += int(keep.sum())
-            else:
-                dist = dist[keep]
-                n_pairs += int(keep.sum())
-        if dist.size:
-            # ⚠️ 极近距离对（严重重叠/镜像残留）必须剔除：它会把第 0 箱顶到几十上百，
-            # 相邻箱也被污染 —— 实测 PE50 的 RDF 前几箱出现过 g≈285 这种值，
-            # 而 Forcite 那边 r<2 Å 的分子间 g(r) 严格为 0。真实成键距离 ≥0.7 Å，
-            # 所以 < 0.3 Å 只可能是数值/镜像异常。
-            tiny = dist < _RDF_MIN_DIST
-            if tiny.any():
-                qc["异常近距离对数"] = int(qc.get("异常近距离对数", 0)) + int(tiny.sum())
-                dist = dist[~tiny]
-            if dist.size:
-                h, _ = np.histogram(dist, bins=edges)
-                hist += h * (2.0 if same else 1.0)
+                masks["inter"] = keep & ~same_mol
+                masks["intra"] = keep & same_mol
+                # 统计口径跟着**实际模式**走：inter 时分子内配对占比必须是 0，
+                # intra 时是 1，total 时才是真实比例（qc 里要如实反映）。
+                _sel = masks.get(eff_mode, masks["total"])
+                n_intra += int(np.sum(same_mol[_sel]))
+            n_pairs += int(keep.sum())
+            # ⚠️ 极近距离对（严重重叠/镜像残留）必须剔除：它会把第 0 箱顶到几十上百。
+            # 真实成键距离 ≥0.7 Å，< 0.3 Å 只可能是数值/镜像异常。
+            for k, m in masks.items():
+                dsel = dist[m]
+                if not dsel.size:
+                    continue
+                tiny = dsel < _RDF_MIN_DIST
+                if tiny.any():
+                    qc["异常近距离对数"] = (int(qc.get("异常近距离对数", 0))
+                                           + int(tiny.sum()))
+                    dsel = dsel[~tiny]
+                if dsel.size:
+                    h, _ = np.histogram(dsel, bins=edges)
+                    hist_all[k] += h * (2.0 if same else 1.0)
+                    if k == eff_mode:
+                        hist += h * (2.0 if same else 1.0)
         n_used += 1
     qc["有效原子对数"] = n_pairs
     qc["统计帧数"] = n_used
     qc["分子内配对占比"] = float(n_intra / n_pairs) if n_pairs else 0.0
+    if str(mode) == "all":
+        return hist_all, n_used, qc
     return hist, n_used, qc
 
 
@@ -960,6 +969,49 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                                            exclude_bonded=exclude_bonded,
                                            mode=eff_mode, verbose=verbose)
         if n_used == 0:
+            continue
+        # mode="all"：一次遍历已经拿到 total/inter/intra 三条直方图，这里分别用
+        # 各自的**真实有序原子对数**归一化，画在同一张 RDF 图上（耗时与单模式相同）。
+        if isinstance(hist, dict):
+            _siv = float(qc.get("体积倒数和", 0.0) or 0.0)
+            for _m in ("total", "inter", "intra"):
+                _h = hist.get(_m)
+                if _h is None or not _h.size:
+                    continue
+                _neff = (float(counts.get(_m, counts["total"])) if counts is not None
+                         else float(ga.n_atoms) * float(gb.n_atoms)
+                         - (float(ga.n_atoms) if same else 0.0))
+                if _neff <= 0 or not np.any(_h):
+                    continue
+                _nm = 1
+                if _m == "intra":
+                    try:
+                        _mm = _molnums_for_filter(ga)
+                        _nm = (max(1, int(np.unique(_mm).size))
+                               if _mm is not None else 1)
+                    except Exception:                         # noqa: BLE001
+                        _nm = 1
+                if _siv > 0:
+                    _ideal = _neff * shell * _siv * _nm
+                else:
+                    _ideal = float(n_used) * _neff * shell / max(vbox_fallback, 1e-12) * _nm
+                _ideal = np.asarray(_ideal, dtype=float)
+                if not np.any(_ideal > 0):
+                    continue
+                _g = np.divide(_h, _ideal, out=np.zeros_like(_h), where=_ideal > 0)
+                _lab = f"{a}-{b} ({_m})"
+                res.add_curve(_lab, centers, _g, panel=0, group=f"{a}-{b}")
+                res.summary[f"{_lab} 归一化分母 (有序原子对)"] = _neff
+                res.summary[f"{_lab} g(rmax)"] = float(
+                    np.nanmean(_g[-max(3, _g.size // 20):]))
+                _pk = _first_peak(centers, _g)
+                if _pk and _pk["height"] >= 1.2 and _pk.get("minimum_position"):
+                    _vb = (float(n_used) / _siv) if _siv > 0 else vbox_fallback
+                    _rho = float(n_orig.get(b, gb.n_atoms)) / max(_vb, 1e-12)
+                    res.summary[f"{_lab} 第一峰位置 (Å)"] = _pk["position"]
+                    res.summary[f"{_lab} 第一峰高度 g_max"] = _pk["height"]
+                    res.summary[f"{_lab} 配位数 (第一壳层)"] = _coordination_number(
+                        centers, _g, _pk["minimum_position"], _rho)
             continue
         n_boxless = max(n_boxless, int(qc.get("无盒帧", 0)))
         if qc.get("模式退化"):
