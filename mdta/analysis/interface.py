@@ -344,6 +344,11 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
               title="归一化密度分布（用于确定界面）"),
     ]
 
+    # 归一化基准：**Forcite 口径**——ρ(z)/ρ̄，ρ̄ = N/V_box（整盒平均密度）。
+    # 用户实测（graphite 27 的 eth_Concentration Profile.csv）：Forcite 的
+    # "Relative concentration" 峰值 16.211，正好等于 ρ(z)_max / (N/V_box)（16.0）。
+    # 以前这里用"体相上四分位中位数"归一，方便找界面，但与 Forcite 差常数因子，
+    # 现在统一成 Forcite 口径；体相密度仍单独在摘要里给出，界面检测照旧可用。
     for name, y in prof.items():
         # `group=name`：一张图里有多个组分时，前端默认只显示**第一个组分**
         # （其余在图例里点开）—— 见 chartOption.buildOption 的 legend.selected。
@@ -351,7 +356,21 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
         bulk = _bulk_value(y)
         res.summary[f"{name} 体相密度"] = float(bulk)
         res.summary[f"{name} 平均密度"] = float(np.nanmean(y))
-        res.add_curve(f"{name} (归一化)", centers, y / bulk if bulk > 0 else y * np.nan,
+        # ρ̄：整盒平均（与 Forcite 相同口径）
+        try:
+            ga = groups[name]
+            vbox_mean = float(dmeta.get("mean_box_volume") or 0.0)
+            if str(mode) == "mass":
+                num = float(np.sum(np.asarray(ga.masses, dtype=float)))
+            else:
+                num = float(ga.n_atoms)
+            rho_bar = num / vbox_mean if vbox_mean > 0 else float("nan")
+        except Exception:                                     # noqa: BLE001
+            rho_bar = float("nan")
+        res.summary[f"{name} 整盒平均密度 ρ̄"] = rho_bar
+        den = rho_bar if np.isfinite(rho_bar) and rho_bar > 0 else bulk
+        res.add_curve(f"{name} (Forcite 相对浓度 ρ/ρ̄)", centers,
+                      y / den if den > 0 else y * np.nan,
                       panel=1, group=name)
 
     res.summary["沿轴平均盒长 (Å)"] = dmeta["mean_box_length"]
@@ -367,6 +386,8 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
                   "密度用时间窗口内的平均盒尺寸归一化。")
     res.add_notes("体相密度取分布上四分位区的中位数，作为归一化基准。")
     res.add_notes(
+        "归一化曲线（面板 2）= ρ/ρ̄，ρ̄ = N/V_box 整盒平均 —— 与 Forcite 的 "
+        "`Relative concentration` 同口径（实测 graphite 27 峰值 16.211 = 16.0 一次对齐）。"
         "⚠️ 本剖面是**时间平均**结果。若要统计**窄带**（±几 Å）内的原子数或密度，"
         "必须**逐帧**用动态参考（膜质心/界面位置）重算，不能从时间平均剖面里取窄带 —— "
         "实测某 CG 膜体系：逐帧膜质心得 0.515 个水珠子，用时间平均质心固定带得 7.76 个"
