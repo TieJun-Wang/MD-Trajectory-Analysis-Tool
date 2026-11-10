@@ -645,11 +645,24 @@ class Analyzer:
                     on_item(i, len(names), name)
                 rec = {"probe_frames": pk, "n_frames": n, "fixed_sec": None,
                        "per_frame_sec": None, "est_sec": None, "note": ""}
+                # VACF 的定义要求 ≥3 帧，探测也至少给 3 帧
+                n_probe = n1
+                if name == "vacf":
+                    if pk < 3:
+                        rec["note"] = "帧数太少（VACF 至少需要 3 帧），不给预估"
+                        out[name] = rec
+                        continue
+                    n_probe = min(3, pk)   # VACF 的定义要求 ≥3 帧
                 try:
-                    t1 = self._time_one(name, params, probe.head(n1))
+                    t1 = self._time_one(name, params, probe.head(n_probe))
                     tk = self._time_one(name, params, probe)
                 except Exception as exc:  # noqa: BLE001
-                    rec["note"] = f"估不出来（{type(exc).__name__}: {exc}）"
+                    msg = str(exc)
+                    if "没有速度" in msg:
+                        rec["note"] = ("这条轨迹没有速度数据：VACF 需要带速度的轨迹"
+                                       "（MS 的 .trj 会转 TRR 后自带速度）")
+                    else:
+                        rec["note"] = f"估不出来（{type(exc).__name__}: {exc}）"
                     out[name] = rec
                     continue
                 per_raw = (tk - t1) / max(pk - n1, 1)

@@ -185,23 +185,34 @@ class MSTrajectory:
             payloads.append(buf[pos + 4:pos + 4 + l2])
             pos += 8 + l2
 
-        main, pv, _x32, cellrec, _x116 = payloads
+        # 版式差异：MDTR 2018 的元数据是 [492, 96, 32, 176, 116]；
+        # 2010 版**没有** 32 那条、晶胞记录前移 → 按**长度**取，别按位置。
+        by_len = {}
+        for p in payloads:
+            by_len.setdefault(len(p), p)
+        main = by_len.get(492, payloads[0] if payloads else b'')
+        pv = by_len.get(96, b'\x00' * 96)
+        cellrec = by_len.get(176, b'\x00' * 176)
         time = BIG_DBL.unpack_from(main, 0)[0]
         (step,) = BIG_INT.unpack_from(main, 8)
         vals = np.frombuffer(main[12:12 + 8 * 61], dtype='>f8')
         thermo = {name: float(vals[i]) for i, name in enumerate(_THERMO_NAMES)
                   if not name.startswith('_') and i < vals.size}
 
-        pv8 = np.frombuffer(pv, dtype='>f8')
-        cell8 = np.frombuffer(cellrec, dtype='>f8')
+        pv8 = (np.frombuffer(pv, dtype='>f8') if len(pv) >= 64
+               else np.zeros(8))
+        cell8 = (np.frombuffer(cellrec, dtype='>f8') if len(cellrec) % 8 == 0
+                 and len(cellrec) >= 64 else np.zeros(8))
         a, b, c = float(cell8[2]), float(cell8[3]), float(cell8[4])
         ca, cb, cg = float(cell8[5]), float(cell8[6]), float(cell8[7])
         ang = tuple(float(np.degrees(np.arccos(min(1.0, max(-1.0, x)))))
                     for x in (ca, cb, cg))
 
         fr = Frame(index=k, step=step, time=time, cell=(a, b, c) + ang,
-                   pressure=float(pv8[0]), volume=float(pv8[1]),
-                   pressure_avg=float(pv8[6]), thermo=thermo)
+                   pressure=float(pv8[0]) if pv8.size > 1 else float('nan'),
+                   volume=float(pv8[1]) if pv8.size > 1 else float('nan'),
+                   pressure_avg=float(pv8[6]) if pv8.size > 6 else float('nan'),
+                   thermo=thermo)
         return off, fr
 
     def meta(self, k: int) -> Frame:

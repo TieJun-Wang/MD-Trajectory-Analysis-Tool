@@ -97,11 +97,16 @@ def summarize(counts: dict, *, resname: str = "", n_rings: int = 0,
     n_c0 = int(counts.get("C", 0))
     n_h0 = int(counts.get("H", 0))
     if els0 <= {"C", "H"} and n_c0 >= 6 and n_h0 == 2 * n_c0 + 2 and not big:
-        out["name"] = f"聚乙烯类（DP≈{n_c0}）"
-        out["alias"] = f"{_hydrocarbon_stem(n_c0)}烷（饱和烃，CH₂ 重复 {n_c0} 个）"
+        # 聚合度按**聚乙烯重复单元 −CH₂−CH₂−（C2H4）**计：DP = 碳数 / 2。
+        # （用户实测：100 个碳的链应报 DP≈50，以前报 100 是把 CH₂ 当成了重复单元）
+        dp0 = n_c0 // 2 if n_c0 % 2 == 0 else n_c0 / 2.0
+        out["name"] = f"聚乙烯类（DP≈{dp0:g}）"
+        out["alias"] = f"{_hydrocarbon_stem(n_c0)}烷（饱和烃，{n_c0} 个碳）"
         out["category"] = "饱和烃（CₙH₂ₙ₊₂）"
-        out["dp"] = n_c0
-        out["note"] = (f"{f}：按 CH₂ 重复单元计聚合度 ≈ {n_c0}；两端 CH₃ 封端，"
+        out["dp"] = dp0
+        dp0s = f"{dp0:g}"
+        out["note"] = (f"{f}：按 C2H4（−CH₂−CH₂−）重复单元计聚合度 ≈ {dp0s}"
+                       f"（{n_c0} 个碳）；两端 CH₃ 封端，"
                        f"按小分子命名即{_hydrocarbon_stem(n_c0)}烷")
         return out
 
@@ -128,10 +133,12 @@ def summarize(counts: dict, *, resname: str = "", n_rings: int = 0,
             # 用户口径：C12H26 这种"12 个碳的长链"就是**聚合度 12 的聚乙烯**，
             # 所以两条都给：聚乙烯（DP≈n）为正式名字，烷烃俗名放 alias。
             if n_c >= 6:
-                out["name"] = f"聚乙烯类（DP≈{n_c}）"
-                out["alias"] = f"{_hydrocarbon_stem(n_c)}烷（饱和烃，CH₂ 重复 {n_c} 个）"
-                out["dp"] = n_c
-                out["note"] = (f"{f}：按 CH₂ 重复单元计聚合度≈{n_c}；两端为 CH₃ 封端，"
+                dp = n_c // 2 if n_c % 2 == 0 else n_c / 2.0
+                out["name"] = f"聚乙烯类（DP≈{dp:g}）"
+                out["alias"] = f"{_hydrocarbon_stem(n_c)}烷（饱和烃，{n_c} 个碳）"
+                out["dp"] = dp
+                out["note"] = (f"{f}：按 C2H4（−CH₂−CH₂−）重复单元计聚合度≈{dp:g}"
+                               f"（{n_c} 个碳）；两端为 CH₃ 封端，"
                                f"按小分子命名即{_hydrocarbon_stem(n_c)}烷")
             else:
                 out["name"] = f"{_hydrocarbon_stem(n_c)}烷"
@@ -143,9 +150,11 @@ def summarize(counts: dict, *, resname: str = "", n_rings: int = 0,
                 out["category"] = "烯烃 / 聚乙烯类（CₙH₂ₙ）"
                 # 碳数够多且是链 → 更像聚乙烯片段，报"重复单元 CH2 + 聚合度"
                 if n_c >= 6:
-                    out["name"] = "聚乙烯片段（重复单元 CH2）"
-                    out["dp"] = n_c
-                    out["note"] = (f"按 (CH2)n 计，聚合度 ≈ {n_c}；"
+                    dp2 = n_c // 2 if n_c % 2 == 0 else n_c / 2.0
+                    out["name"] = "聚乙烯类（C2H4 重复单元）"
+                    out["dp"] = dp2
+                    out["note"] = ("按 C2H4（−CH₂−CH₂−）重复单元计聚合度 ≈ "
+                                   f"{dp2:g}（{n_c} 个碳）；"
                                    f"若这是小分子则应为烯烃 C{n_c}H{2 * n_c}")
                 else:
                     out["name"] = f"{_hydrocarbon_stem(n_c)}烯"

@@ -1267,6 +1267,30 @@ class Session:
         mol = molecule_ids(u.atoms)
         mol = np.zeros(n, dtype=int) if mol is None else np.asarray(mol, dtype=int)
 
+        # ---- 显示用坐标：把每个分子**整体平移回主盒**
+        # 真实情况：MS 的 .trj 坐标常常是"展开"的（分子跨盒、原子散在盒子外面），
+        # 直接画会看到一大片原子在盒子外。MS 里看到的都是主盒内的构型，所以这里
+        # 按分子质心的小数坐标取整平移（不拆分子、保持分子完整性），只影响**显示**。
+        boxed = False
+        try:
+            if u.dimensions is not None and mol.size:
+                from MDAnalysis.lib.mdamath import triclinic_vectors
+
+                A = triclinic_vectors(u.dimensions)
+                if np.all(np.isfinite(A)) and abs(float(np.linalg.det(A))) > 1e-6:
+                    frac = pos @ np.linalg.inv(A).T
+                    nm = int(mol.max()) + 1
+                    cnt = np.maximum(np.bincount(mol, minlength=nm), 1)
+                    cen = np.column_stack([
+                        np.bincount(mol, weights=frac[:, d], minlength=nm) / cnt
+                        for d in range(3)])
+                    shift = np.floor(cen)[mol]
+                    if np.any(shift):
+                        pos = pos - shift @ A
+                        boxed = True
+        except Exception:                                     # noqa: BLE001
+            boxed = False
+
         # ---- 抽稀（只影响显示，index 保持原始编号）
         # ⚠️ 按**整残基**取，而不是等间隔抽原子：等间隔会把分子切成碎片，键表就画不
         #    出来了（分子内键的两端很少同时落在同一个抽稀子集里）。按整残基取既能
@@ -1324,6 +1348,8 @@ class Session:
             # 盒子照画，但要说清楚它有没有把原子围住（坐标未按周期折回时盒外还有原子）
             **{k: v for k, v in self._box_report(u, idx).items() if k != "box"},
             "truncated": bool(truncated),
+            # 显示坐标是否按分子折回了主盒（真实坐标没动）
+            "boxed_for_display": bool(boxed),
             # 拓扑是否够用来做"分子/残基"层级选择
             "has_bonds": bond_kind == "topology",
             "n_molecules": int(mol_in_view.max()) + 1 if mol_in_view.size else 0,
