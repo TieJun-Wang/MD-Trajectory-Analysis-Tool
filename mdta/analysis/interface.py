@@ -311,13 +311,18 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
     # axis="all"：三个晶向一起算（C100/C010/C001），各自一条曲线画在同一张图上。
     # 这是默认行为：Forcite 的 Concentration Profile 也是分别按三个方向导出的。
     if str(axis) == "all" or (isinstance(axis, int) and axis < 0):
-        subs = [analyze_density(mdt, groups, selection, axis=ax, nbins=int(nbins),
+        # nbins 可能是 None / 0（= 自适应 0.5 Å/箱），这里**透传**给单轴调用，
+        # 不能 int(None)（用户实测会崩）。
+        subs = [analyze_density(mdt, groups, selection, axis=ax,
+                                nbins=0 if nbins is None else nbins,
                                 mode=mode, verbose=verbose)
                 for ax in (0, 1, 2)]
         ylabel = "质量密度 ρ (g/cm³)" if str(mode) == "mass" else "数密度 ρ (1/Å³)"
         res = AnalysisResult(
             name="density", title="沿 a / b / c 三个方向的组分密度分布",
-            meta={"axes": [0, 1, 2], "nbins": int(nbins), "mode": str(mode)},
+            meta={"axes": [0, 1, 2],
+                  "nbins": 0 if nbins is None else int(nbins),
+                  "mode": str(mode)},
         )
         res.panels = [
             Panel(xlabel="位置 (Å)", ylabel=ylabel,
@@ -349,7 +354,8 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
     res = AnalysisResult(
         name="density",
         title=f"沿 {axis_name} 方向的组分密度分布",
-        meta={"axis": axis, "nbins": nbins, "mode": mode, **dmeta},
+        meta={"axis": axis, "nbins": 0 if nbins is None else int(nbins),
+              "mode": mode, **dmeta},
     )
     res.panels = [
         Panel(xlabel=f"位置沿 {axis_name} 方向 (Å)", ylabel=ylabel,
