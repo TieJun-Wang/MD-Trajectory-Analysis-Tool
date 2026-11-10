@@ -86,7 +86,9 @@ export default function App() {
     start_ps: '', stop_ps: '', equil_ps: '', interval_ps: '', max_frames: '',
   })
   const [params, setParams] = useState({
-    cutoff: 5.0, axis: 'all', nbins: 100, rmax: 12, dihedral_mode: 'auto',
+    cutoff: 5.0, axis: 'all', nbins: '', rmax: 12, dihedral_mode: 'auto',
+    // 密度口径：mass = 质量密度 g/cm³（Forcite 默认）/ number = 数密度 1/Å³
+    density_mode: 'mass',
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
     // 「分子质心」会大一圈（分子内振动/转动被去掉），两边不能直接比。
     rdf_mode: 'inter', rdf_nbins: 120, msd_object: 'atom',
@@ -530,7 +532,8 @@ export default function App() {
         // 密度默认三个方向一起算（C100/C010/C001）；其它模块仍用单个轴
         density: { axis: (params.axis === 'all' ? 'all' : Number(params.axis)),
                    // 留空 = 自适应（0.5 Å/箱，与 Forcite 一致）
-                   nbins: params.nbins ? Number(params.nbins) : null },
+                   nbins: params.nbins ? Number(params.nbins) : null,
+                   mode: params.density_mode === 'number' ? 'number' : 'mass' },
         interface: { axis: (params.axis === 'all' ? 2 : Number(params.axis)),
                      nbins: Math.max(Number(params.nbins), 60) },
         // RDF 分箱数以前写死 120 —— Forcite 是按「间隔(Å)」给的（如 20 Å / 0.02 Å
