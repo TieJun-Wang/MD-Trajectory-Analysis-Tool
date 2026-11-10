@@ -303,6 +303,18 @@ def build_universe(doc: dict, *, time_ps: float = 0.0):
     names = [str(x) or "X" for x in (doc.get("names") or ["X"] * n)]
     elems = [str(x).upper() or "X" for x in (doc.get("elements") or ["X"] * n)]
     types = [str(x) or "X" for x in (doc.get("types") or ["X"] * n)]
+    # .xsd 的 <Atom3d> 常常没有 Name 属性（只有 Components="C"/"H"），
+    # 于是 names 全是 "X"。外部脚本（例如 mda_test.py 用 atom.name[0] 判元素）
+    # 会把所有原子的质量都落到默认值上 —— 这里用元素补成 C1 / H2 …，
+    # 让 name[0] 始终是真元素符号（已有 Name 的格式不受影响）。
+    if n and sum(1 for x in names if x and x != "X") == 0:
+        cnt: dict[str, int] = {}
+        fixed = []
+        for el in elems:
+            k = str(el) or "X"
+            cnt[k] = cnt.get(k, 0) + 1
+            fixed.append(f"{k}{cnt[k]}")
+        names = fixed
     bonds = doc.get("bonds") or []
 
     mol = _molecule_index(n, bonds)
