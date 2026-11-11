@@ -861,6 +861,19 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
         pa = np.asarray(ref.positions, dtype=float)
         pb = None if same else np.asarray(conf.positions, dtype=float)
         box = u.dimensions
+        # ⚠️ MS 的 .trj 坐标是**展开**的：分子跨盒后，不同分子的原子经最小镜像会
+        # 落到 0.3~0.5 Å 的假近距离（实测 PE50 的 eth 组分 RDF 前几箱 g≈9，
+        # 而 Forcite 严格为 0）。统计前先把坐标按分数坐标折回主盒 —— 对
+        # "最小镜像 + 盒内坐标"的口径，Forcite / MDAnalysis InterRDF 都是这个前提。
+        if box is not None:
+            try:
+                m_box = box_matrix(u)
+                inv_b = np.linalg.inv(m_box)
+                pa = (pa @ inv_b) % 1.0 @ m_box
+                if pb is not None:
+                    pb = (pb @ inv_b) % 1.0 @ m_box
+            except Exception:                             # noqa: BLE001
+                pass
         # 距离一律用**周期最小镜像**（与 MDAnalysis InterRDF / Forcite 同口径，
         # selftest 有对账）。此前试过"坐标不在盒内就不用周期"的启发式：它能让
         # PE50 的分子间短程归零，但会把"坐标恰好不在盒内、却本就该周期统计"的
@@ -1192,26 +1205,17 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             vbox_eff = float(n_used) / sum_inv_vol
         else:
             vbox_eff = vbox_fallback
-        if eff_mode == "intra":
-            # **分子内 g(r) 再除以分子数**：Materials Studio Forcite 是把"每个分子的
-            # 分子内配对分布"做**等权平均**（每个分子先各自归一），所以整体还要再除
-            # N_mol。实测 PE50：不加这一步时形状完全一致（相关 0.99982），但幅度
-            # 恒定高约 N_mol 倍（50 倍）；除以分子数后与 Forcite 逐点吻合。
-            n_mol_set = 1
-            try:
-                mm = _molnums_for_filter(ga)
-                if mm is not None:
-                    n_mol_set = max(1, int(np.unique(mm).size))
-            except Exception:                                 # noqa: BLE001
-                pass
-            _den = (sum_inv_vol if sum_inv_vol > 0
-                    else float(n_used) / vbox_fallback)
-            ideal = neff * shell * n_mol_set * _den
-            res.summary[f"{a}-{b} 分子内按分子数归一"] = n_mol_set
-        elif sum_inv_vol > 0:
-            ideal = neff * shell * sum_inv_vol
+        # **三种模式共用 total 的分母**：Forcite 的三个导出列满足
+        # total = inter + intra（实测恒等式误差 1e-8），也就是 inter/intra 是同一
+        # 归一化下的两个子集；以前 inter/intra 各自用自己的分母、intra 还多除一次
+        # 分子数，导致三者不可加、与 Forcite 差一大截。
+        _neff_total = (float(counts["total"]) if counts is not None
+                       else float(ga.n_atoms) * float(gb.n_atoms)
+                       - (float(ga.n_atoms) if same else 0.0))
+        if sum_inv_vol > 0:
+            ideal = _neff_total * shell * sum_inv_vol
         else:
-            ideal = n_used * neff * shell / vbox_fallback
+            ideal = n_used * _neff_total * shell / vbox_fallback
         min_blen_seen = min(min_blen_seen, float(qc.get("最小盒边长", float("inf"))))
         vbox_last = vbox_eff
         g = np.divide(hist, ideal, out=np.zeros_like(hist), where=ideal > 0)
