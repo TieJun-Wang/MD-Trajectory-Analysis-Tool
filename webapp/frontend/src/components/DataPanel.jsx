@@ -66,6 +66,8 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
 
   // 「只看当前图例」：默认关（数据表列出所有曲线的数据，用户要求）
   const [onlyShown, setOnlyShown] = useState(false)
+  //: 复制时**只复制数据行**（不含表头那行），方便直接粘进 Excel / Origin
+  const [onlyData, setOnlyData] = useState(false)
 
   const active = sel && results[sel.name] ? sel : (order.length ? { name: order[0], index: 0 } : null)
   const result = active ? results[active.name] : null
@@ -207,6 +209,13 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
                      onChange={(e) => setOnlyShown(e.target.checked)} />
               只看当前图例
             </label>
+            <label className="mini"
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                   title="勾上后「复制全部」只复制数值行，不带第一行表头">
+              <input type="checkbox" checked={onlyData}
+                     onChange={(e) => setOnlyData(e.target.checked)} />
+              只复制数据
+            </label>
             <button className="mini" title="复制**全部行**（不只是当前这一页）"
                     onClick={async () => {
                       try {
@@ -219,8 +228,9 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
                           all = await api.tableAll(sid, { name: active.name,
                             panel: active.index, only: keepCols })
                         }
-                        const text = [all.columns.join('\t'),
-                          ...all.rows.map((r) => r.join('\t'))].join('\n')
+                        const body = all.rows.map((r) => r.join('\t'))
+                        const text = (onlyData ? body
+                          : [all.columns.join('\t'), ...body]).join('\n')
                         await navigator.clipboard?.writeText(text)
                       } catch (e) { setSliceErr(`复制失败：${e.message}`) }
                     }}>复制全部</button>
