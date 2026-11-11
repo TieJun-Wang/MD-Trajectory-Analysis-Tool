@@ -53,7 +53,7 @@ function buildTable(result, panelIndex, onlyShown, visible) {
 }
 
 export default function DataPanel({ run, groups, chart = null, setChart = null,
-                                   visible = null, sid = '' }) {
+                                   visible = null, sid = '', legendByKey = null }) {
   const results = run?.results || {}
   const order = useMemo(() => Object.keys(results), [results])
   // 选中的「分析项 + 第几张图」：与图表页**共用同一个状态**（切页不丢），
@@ -80,6 +80,11 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
 
   const onlyLabels = useMemo(() => {
     if (!onlyShown || !result) return null
+    // 优先用这个（分析项:面板）记住的图例选择；其次用当前图例状态；
+    // 都没有才退回图表默认图例（buildOption 的 legend.selected）。
+    const key = `${active?.name || ''}:${active?.index ?? 0}`
+    const byKey = legendByKey ? legendByKey[key] : null
+    if (Array.isArray(byKey)) return byKey
     if (Array.isArray(visible)) return visible
     try {
       const opt = buildOption(result, active.index)

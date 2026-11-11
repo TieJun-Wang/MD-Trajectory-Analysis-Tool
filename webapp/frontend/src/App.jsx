@@ -166,6 +166,9 @@ export default function App() {
   useEffect(() => { writeBool('mdta.notesCollapsed', notesCollapsed) }, [notesCollapsed])
   // 当前图表里**仍然显示**的曲线（由图例点选决定）：说明区据此动态过滤
   const [visibleCurves, setVisibleCurves] = useState(null)
+  //: 每个（分析项:面板）各自记住图例里当前显示的曲线 —— 切页签/换图后再回来
+  //: 依然能取到，数据表的「只看当前图例」就靠它（用户实测：切到数据表后失效）。
+  const legendByKeyRef = useRef({})
   const abortRef = useRef(null)
   const liveRunRef = useRef(null)
   const cancelledRef = useRef(false)
@@ -1048,7 +1051,11 @@ export default function App() {
           <div className="tabbody">
             {tab === 'struct' && <StructureView st={struct} />}
             {tab === 'charts' && (
-              <ChartPanel onVisibleChange={setVisibleCurves}
+              <ChartPanel onVisibleChange={(vis) => {
+              const k = `${chart?.name || ''}:${chart?.index ?? 0}`
+              legendByKeyRef.current[k] = vis
+              setVisibleCurves(vis)
+            }}
                                  run={run} chart={chart} setChart={setChart}
                           live={live} titles={titles} groups={groups}
                           current={current?.result} panelIndex={current?.panelIndex ?? 0} />
@@ -1061,6 +1068,7 @@ export default function App() {
             {tab === 'data' && <DataPanel run={run} groups={groups}
                                           chart={chart} setChart={setChart}
                                           visible={visibleCurves}
+                                          legendByKey={legendByKeyRef.current}
                                           sid={sess?.sid || ''} />}
             {/* 统计量：只显示指标 */}
             {tab === 'stats' && <StatsPanel run={run} groups={groups}
