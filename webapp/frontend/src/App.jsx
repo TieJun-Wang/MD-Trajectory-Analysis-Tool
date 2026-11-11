@@ -543,7 +543,9 @@ export default function App() {
         // = 1000 箱），界面能设分箱数，两边才能逐 bin 对比。
         rdf: { rmax: Number(params.rmax),
                nbins: Math.max(2, Number(params.rdf_nbins) || 120),
-               mode: params.rdf_mode },
+               mode: params.rdf_mode,
+               // Forcite 口径（折回主盒 / 键连通分量分子 / inter+intra 可加）
+               forcite: params.rdf_forcite === true },
         // `remove_drift`：默认**关**（= Materials Studio Forcite 的口径，实测逐点一致）。
         // NPT 体系里整盒平移会把 MSD 抬起来，那时把「减去整体漂移」勾上。
         // `unwrap`：不再让用户选，按轨迹来源自动定 ——

@@ -616,7 +616,7 @@ def _atom_molnums(ag) -> np.ndarray | None:
     return m
 
 
-def _molnums_for_filter(ag) -> np.ndarray | None:
+def _molnums_for_filter(ag, force_bonds: bool = False) -> np.ndarray | None:
     """用于配对过滤的分子编号；未归属残基（``-1``）给每个原子独立编号。
 
     为什么：``-1`` 表示该残基没被归入任何分子。若原样参与比较，所有 ``-1``
@@ -633,6 +633,22 @@ def _molnums_for_filter(ag) -> np.ndarray | None:
     而 Forcite 那边严格为 0）。检测到"一个连通块横跨多个 molnum"时改用
     **键连通分量**作为原子级分子编号。
     """
+    if force_bonds:
+        # Forcite 口径：不用 molnums（MS 里常是"残基级"），直接用键连通分量。
+        try:
+            from ..topology import bond_components
+
+            u = ag.universe
+            sel = np.asarray(ag.indices, dtype=np.int64)
+            pos_of = np.full(int(u.atoms.n_atoms), -1, dtype=np.int64)
+            pos_of[sel] = np.arange(sel.size)
+            edges = np.asarray(u.bonds.indices, dtype=np.int64).reshape(-1, 2)
+            e = pos_of[edges]
+            e = e[(e[:, 0] >= 0) & (e[:, 1] >= 0)]
+            if e.size:
+                return bond_components(int(ag.n_atoms), e).astype(np.int64)
+        except Exception:                                     # noqa: BLE001
+            pass
     m = _atom_molnums(ag)
     if m is None:
         return None
@@ -809,7 +825,8 @@ def _pairs_bruteforce(pa, pb, rmax: float, box, same: bool):
 
 def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
                     exclude_bonded: bool = False, mode: str = "total",
-                    verbose: bool = False):
+                    verbose: bool = False, wrap_inbox: bool = False,
+                    mol_from_bonds: bool = False):
     """手工累积 RDF 直方图，支持任意帧号列表与配对模式。
 
     配对计数约定
@@ -843,8 +860,8 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
     if na == 0 or nb == 0:
         return hist, 0, qc
 
-    ma = _molnums_for_filter(ref)
-    mb = ma if same else _molnums_for_filter(conf)
+    ma = _molnums_for_filter(ref, force_bonds=mol_from_bonds)
+    mb = ma if same else _molnums_for_filter(conf, force_bonds=mol_from_bonds)
     eff_mode = str(mode)
     if eff_mode in ("inter", "intra") and (ma is None or mb is None):
         eff_mode = "total"                      # 没有分子信息 → 只能给总体
@@ -861,11 +878,11 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
         pa = np.asarray(ref.positions, dtype=float)
         pb = None if same else np.asarray(conf.positions, dtype=float)
         box = u.dimensions
-        # ⚠️ MS 的 .trj 坐标是**展开**的：分子跨盒后，不同分子的原子经最小镜像会
-        # 落到 0.3~0.5 Å 的假近距离（实测 PE50 的 eth 组分 RDF 前几箱 g≈9，
-        # 而 Forcite 严格为 0）。统计前先把坐标按分数坐标折回主盒 —— 对
-        # "最小镜像 + 盒内坐标"的口径，Forcite / MDAnalysis InterRDF 都是这个前提。
-        if box is not None:
+        # Forcite 口径（`wrap_inbox=True`）：统计前把坐标折回主盒。MS 的 .trj
+        # 坐标是**展开**的，多组分体系里不同分子的原子经最小镜像会在 0.3~0.5 Å
+        # 处产生假近距离（实测 PE50 的 eth 组分前几箱 g≈9，而 Forcite 为 0）。
+        # **默认关**，以保持与 MDAnalysis InterRDF（假设盒内坐标）一致的现有行为。
+        if wrap_inbox and box is not None:
             try:
                 m_box = box_matrix(u)
                 inv_b = np.linalg.inv(m_box)
@@ -1027,6 +1044,9 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 rmax: float = 12.0, nbins: int = 120,
                 exclude_bonded: bool = False,
                 mode: str = "inter",
+                forcite: bool = False,
+                wrap_inbox: bool = False, additive: bool = False,
+                mol_from_bonds: bool = False,
                 compare_halves: bool = False,
                 max_group_atoms: int = 6000,
                 verbose: bool = False) -> AnalysisResult:
@@ -1140,9 +1160,11 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             # 直接给空曲线或 0 都没有物理意义，因此自动改用分子内口径并写明。
             eff_mode = "intra"
             auto_intra.add(f"{a}-{b}")
-        hist, n_used, qc = _rdf_accumulate(u, ga, gb, edges, idx, same,
-                                           exclude_bonded=exclude_bonded,
-                                           mode=eff_mode, verbose=verbose)
+        hist, n_used, qc = _rdf_accumulate(
+            u, ga, gb, edges, idx, same, exclude_bonded=exclude_bonded,
+            mode=eff_mode, verbose=verbose,
+            wrap_inbox=bool(forcite or wrap_inbox),
+            mol_from_bonds=bool(forcite or mol_from_bonds))
         if n_used == 0:
             continue
         # mode="all"：一次遍历已经拿到 total/inter/intra 三条直方图，这里分别用
@@ -1205,17 +1227,35 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             vbox_eff = float(n_used) / sum_inv_vol
         else:
             vbox_eff = vbox_fallback
-        # **三种模式共用 total 的分母**：Forcite 的三个导出列满足
-        # total = inter + intra（实测恒等式误差 1e-8），也就是 inter/intra 是同一
-        # 归一化下的两个子集；以前 inter/intra 各自用自己的分母、intra 还多除一次
-        # 分子数，导致三者不可加、与 Forcite 差一大截。
+        # 归一化：
+        # · 默认（additive=False）= **各模式用自己的真实配对数**，这是与
+        #   MDAnalysis InterRDF 对得上的口径（total 实测逐点一致）；
+        # · additive=True（Forcite 口径）= 三种模式**共用 total 的分母**，
+        #   于是 total = inter + intra（Forcite 三列满足该恒等式，误差 1e-8）。
         _neff_total = (float(counts["total"]) if counts is not None
                        else float(ga.n_atoms) * float(gb.n_atoms)
                        - (float(ga.n_atoms) if same else 0.0))
-        if sum_inv_vol > 0:
-            ideal = _neff_total * shell * sum_inv_vol
+        if forcite or additive:
+            if sum_inv_vol > 0:
+                ideal = _neff_total * shell * sum_inv_vol
+            else:
+                ideal = n_used * _neff_total * shell / vbox_fallback
+        elif eff_mode == "intra":
+            n_mol_set = 1
+            try:
+                mm = _molnums_for_filter(ga)
+                if mm is not None:
+                    n_mol_set = max(1, int(np.unique(mm).size))
+            except Exception:                                 # noqa: BLE001
+                pass
+            _den = (sum_inv_vol if sum_inv_vol > 0
+                    else float(n_used) / vbox_fallback)
+            ideal = neff * shell * n_mol_set * _den
+            res.summary[f"{a}-{b} 分子内按分子数归一"] = n_mol_set
+        elif sum_inv_vol > 0:
+            ideal = neff * shell * sum_inv_vol
         else:
-            ideal = n_used * _neff_total * shell / vbox_fallback
+            ideal = n_used * neff * shell / vbox_fallback
         min_blen_seen = min(min_blen_seen, float(qc.get("最小盒边长", float("inf"))))
         vbox_last = vbox_eff
         g = np.divide(hist, ideal, out=np.zeros_like(hist), where=ideal > 0)

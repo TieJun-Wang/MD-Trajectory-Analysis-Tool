@@ -720,6 +720,13 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       F('rmax', 'RDF 最大 r (Å)', 'input', numInput('', { step: 1, ...p('rmax') })),
       F('rdf_nbins', 'RDF 分箱数', 'input',
         numInput('120', { step: 1, min: 1, ...p('rdf_nbins') }), '步长 = rmax/分箱数'),
+      F('rdf_forcite', 'Forcite 口径', 'check',
+        chk('rdf_forcite', '按 Forcite 口径',
+          '默认不勾（与 MDAnalysis InterRDF 逐点一致）。\n'
+          + '勾上后：① 统计前把坐标折回主盒、② 分子用键连通分量划分、'
+          + '③ inter/intra 与 total 共用分母（于是 total = inter + intra）。\n'
+          + '这三条是 Forcite 导出的实际口径，对 PE50 这类多组分体系尤其必要。'),
+        '按 Forcite 口径', 2),
       F('rdf_mode', 'RDF 配对模式', 'select', sel('rdf_mode', [
         ['inter', '分子间（默认）'],
         ['intra', '分子内'],
