@@ -826,7 +826,8 @@ def _pairs_bruteforce(pa, pb, rmax: float, box, same: bool):
 def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
                     exclude_bonded: bool = False, mode: str = "total",
                     verbose: bool = False, wrap_inbox: bool = False,
-                    mol_from_bonds: bool = False):
+                    mol_from_bonds: bool = False,
+                    distance: str = "minimage", drop_overlap: float = 0.0):
     """手工累积 RDF 直方图，支持任意帧号列表与配对模式。
 
     配对计数约定
@@ -895,8 +896,11 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
         # selftest 有对账）。此前试过"坐标不在盒内就不用周期"的启发式：它能让
         # PE50 的分子间短程归零，但会把"坐标恰好不在盒内、却本就该周期统计"的
         # 体系（selftest 的水盒子、GROMACS 轨迹）算错，故不采用。
-        qc["坐标前处理"] = "周期最小镜像"
-        box_d = box
+        qc["坐标前处理"] = ("周期最小镜像" if str(distance) == "minimage"
+                            else "无周期（簇模式原始距离）")
+        box_d = box if str(distance) == "minimage" else None
+        if str(distance) != "minimage":
+            qc["距离口径"] = "cluster"
         if box is not None:
             try:
                 vol = box_volume_from_dims(box)
@@ -955,6 +959,25 @@ def _rdf_accumulate(u, ref, conf, edges, frame_indices, same: bool,
                 same_mol = mi == mj
                 masks["inter"] = keep & ~same_mol
                 masks["intra"] = keep & same_mol
+                # ---- Forcite 口径：剔除「伪重叠」分子对 --------------------
+                # MS 的 .trj 坐标是展开的，两个分子的原子经最小镜像可能落到
+                # 0.2~1.5 Å（物理上不可能）。Forcite 的 RDF 里这些对不出现
+                # （实测 PE50 的 eth 分子间 g(r) 在 r<1.7 Å 严格为 0），
+                # 用法是把**存在伪近距离（< drop_overlap）的整对分子**从
+                # 分子间统计里剔除（只剔除该距离以下的原子对会把整对分子的
+                # 其它配对仍然留在曲线里，与 Forcite 形状不符）。
+                if drop_overlap and drop_overlap > 0 and np.any(same_mol == False):  # noqa: E712
+                    _bad = masks["inter"] & (dist < float(drop_overlap))
+                    if _bad.any():
+                        _nmax = int(max(mi.max(initial=0), mj.max(initial=0))) + 1
+                        _key = mi * _nmax + mj
+                        _bkey = np.unique(_key[_bad])
+                        _drop = np.isin(_key, _bkey) & masks["inter"]
+                        if _drop.any():
+                            masks["inter"] &= ~_drop
+                            masks["total"] &= ~_drop
+                            qc["伪重叠原子对"] = (int(qc.get("伪重叠原子对", 0))
+                                              + int(_drop.sum()))
                 # 统计口径跟着**实际模式**走：inter 时分子内配对占比必须是 0，
                 # intra 时是 1，total 时才是真实比例（qc 里要如实反映）。
                 _sel = masks.get(eff_mode, masks["total"])
@@ -1047,6 +1070,8 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                 forcite: bool = False,
                 wrap_inbox: bool = False, additive: bool = False,
                 mol_from_bonds: bool = False,
+                distance: str = "minimage", drop_overlap: float = 0.0,
+                rho_scale: float = 1.0,
                 compare_halves: bool = False,
                 max_group_atoms: int = 6000,
                 verbose: bool = False) -> AnalysisResult:
@@ -1143,6 +1168,27 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         half = idx.size // 2
         halves = {"前半段": idx[:half], "后半段": idx[half:]}
 
+    # Forcite 口径开关的可见记录（两条分支共用）
+    res.summary["RDF 距离口径"] = ("周期最小镜像" if str(distance) == "minimage"
+                                 else "无周期（簇模式，原始坐标距离）")
+    if float(drop_overlap or 0.0) > 0:
+        res.summary["RDF 伪重叠剔除阈值 (Å)"] = float(drop_overlap)
+        res.add_notes(
+            f"已启用「伪重叠分子对剔除」（阈值 {float(drop_overlap):g} Å）："
+            "MS 的 .trj 坐标是展开的，两个分子的原子经最小镜像可能落到 0.2~1.5 Å"
+            "（物理上不可能，Forcite 的分子间 RDF 里也不出现）。这里把"
+            "**存在该阈值以下原子对的整对分子**从分子间统计中剔除，"
+            "与 Forcite 的分子间 g(r) 口径一致。默认关闭（与 MDAnalysis "
+            "InterRDF 一致）。")
+    if float(rho_scale or 1.0) != 1.0:
+        res.summary["RDF 密度因子"] = float(rho_scale)
+        res.add_notes(
+            f"RDF 归一化密度乘了因子 {float(rho_scale):g}（g 除以它，"
+            f"即放大 {1.0 / float(rho_scale):.3g} 倍）：Forcite 的分子间 g(r) "
+            "与我们的「无周期簇模式」曲线形状逐箱一致、只差一个密度常数 —— "
+            "实测 PE50 的 eth 为 2.95 倍（归一化体积口径不同）。"
+            "要逐箱对上 Forcite，用 distance=cluster + 密度因子≈0.339。")
+
     for a, b in pairs:
         ga, gb = groups[a], groups[b]
         same = (ga.n_atoms == gb.n_atoms
@@ -1164,7 +1210,8 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             u, ga, gb, edges, idx, same, exclude_bonded=exclude_bonded,
             mode=eff_mode, verbose=verbose,
             wrap_inbox=bool(forcite or wrap_inbox),
-            mol_from_bonds=bool(forcite or mol_from_bonds))
+            mol_from_bonds=bool(forcite or mol_from_bonds),
+            distance=str(distance), drop_overlap=float(drop_overlap or 0.0))
         if n_used == 0:
             continue
         # mode="all"：一次遍历已经拿到 total/inter/intra 三条直方图，这里分别用
@@ -1192,6 +1239,11 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                     _ideal = _neff * shell * _siv * _nm
                 else:
                     _ideal = float(n_used) * _neff * shell / max(vbox_fallback, 1e-12) * _nm
+                # 密度因子（见单模式分支说明）：rho_scale<1 → 归一化密度更小 → g 更大。
+                # ⚠️ 只作用于 inter / total：Forcite 的**分子内**曲线与我们的
+                # 逐箱一致（本就按"每个分子一组配对"归一化），再乘因子反而偏大。
+                if float(rho_scale or 1.0) != 1.0 and _m == "inter":
+                    _ideal = _ideal * float(rho_scale)
                 _ideal = np.asarray(_ideal, dtype=float)
                 if not np.any(_ideal > 0):
                     continue
@@ -1256,6 +1308,18 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             ideal = neff * shell * sum_inv_vol
         else:
             ideal = n_used * neff * shell / vbox_fallback
+        # 密度因子 rho_scale：归一化密度 ρ_eff = rho_scale·ρ(N/V_box)，
+        # 于是 g 放大 1/rho_scale 倍。
+        # 实测（PE50 eth，xsd 参考结构，xsd_rdf_periodic.csv）：
+        # Forcite 的分子间 RDF = 我们的「无周期簇模式」曲线 × 2.946 —— 形状逐箱
+        # 一致（mean|Δ| 从 1.955 降到 0.106），只差一个密度常数，说明 Forcite
+        # 归一化用的密度比 N/V_box 小约 2.95 倍（体积口径不同，等效体积 ≈
+        # V_box/2.95 ≈ 85,400 Å³）。所以对齐 Forcite 用 distance=cluster +
+        # rho_scale≈0.339。
+        # 分子内（intra）不乘：它的归一化本来就按"每分子一组配对"做的，
+        # Forcite 的 intra 与我们的逐箱一致（76.2 vs 76.8 @1.15 Å）。
+        if float(rho_scale or 1.0) != 1.0 and eff_mode == "inter":
+            ideal = ideal * float(rho_scale)
         min_blen_seen = min(min_blen_seen, float(qc.get("最小盒边长", float("inf"))))
         vbox_last = vbox_eff
         g = np.divide(hist, ideal, out=np.zeros_like(hist), where=ideal > 0)
@@ -1316,7 +1380,9 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
         for hname, hidx in halves.items():
             h, nu, qc_h = _rdf_accumulate(u, ga, gb, edges, hidx, same,
                                           exclude_bonded=exclude_bonded,
-                                          mode=eff_mode)
+                                          mode=eff_mode,
+                                          distance=str(distance),
+                                          drop_overlap=float(drop_overlap or 0.0))
             if nu == 0:
                 continue
             siv = float(qc_h.get("体积倒数和", 0.0) or 0.0)

@@ -155,6 +155,18 @@ export const api = {
       method: 'POST', body: JSON.stringify({ name, indices, from }),
     }),
 
+  /** 三维视图手势：双击取"单体"、右击取"所在链"、再右击取"同类全部链"。 */
+  pickAtom: (sid, index, kind = 'chain') =>
+    request(`/session/${sid}/pick`, {
+      method: 'POST', body: JSON.stringify({ index, kind }),
+    }),
+
+  /** 给已定义的集合改名（重名时后端自动加序号 `_2`/`_3`…，返回值 name 为准）。 */
+  renameSet: (sid, oldName, newName) =>
+    request(`/session/${sid}/set-rename`, {
+      method: 'POST', body: JSON.stringify({ old: oldName, new: newName }),
+    }),
+
   /** 数据能力检测：坐标 / 多帧轨迹 / 键连接 / 质量 / 电荷 / 分子归属 / 周期盒
    *  （外加 mode：static / dynamic）。不靠文件后缀，直接看体系里有什么。 */
   capabilities: (sid, refresh = false) =>

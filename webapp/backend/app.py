@@ -551,6 +551,37 @@ def session_selection(sid: str, payload: Mapping[str, Any] = Body(default={})) -
         raise _fail(exc) from exc
 
 
+@app.post("/api/session/{sid}/pick")
+def session_pick(sid: str, payload: Mapping[str, Any] = Body(default={})) -> dict:
+    """三维视图手势 → 一批原子索引。
+
+    ``{"index": 123, "kind": "chain"}``；``kind`` ∈ ``monomer`` / ``chain`` /
+    ``same_type``（双击取单体、右击取所在链、再右击取同类全部链）。
+    """
+    sess = _sess(sid)
+    raw = payload.get("index")
+    if raw is None:
+        raise _fail(SessionError("缺少 index"))
+    try:
+        return sess.pick_atom(int(raw), str(payload.get("kind") or "chain"))
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
+@app.post("/api/session/{sid}/set-rename")
+def session_set_rename(sid: str, payload: Mapping[str, Any] = Body(default={})) -> dict:
+    """给已定义的分析集合改名（``{"old": "A", "new": "B"}``）。
+
+    新名字与别的集合重名时**自动加序号**（``B_2``、``B_3``…），返回值里的
+    ``name`` 是最终生效的名字、``renamed`` 表示是否加过序号。
+    """
+    sess = _sess(sid)
+    try:
+        return sess.rename_set(payload.get("old"), payload.get("new"))
+    except SessionError as exc:
+        raise _fail(exc) from exc
+
+
 @app.get("/api/session/{sid}/selections")
 def session_selections(sid: str) -> dict:
     """已保存的可视化选择（名字 / 原子数 / 类型）。"""

@@ -92,6 +92,7 @@ export default function App() {
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
     // 「分子质心」会大一圈（分子内振动/转动被去掉），两边不能直接比。
     rdf_mode: 'inter', rdf_nbins: 120, msd_object: 'atom',
+    rdf_distance: 'minimage', rdf_drop_overlap: '', rdf_rho_scale: '',
     // VACF 的 τ 上限（帧）；留空 = 全段（与 Forcite 一样逐 lag 全给）
     vacf_max_lag: '',
     gauche_edge: 120,
@@ -231,6 +232,32 @@ export default function App() {
    * 后端同步交给下面的防抖 effect —— 这样"勾选框 / 主链 / 组分胶囊 / 集合"
    * 走的是**同一条**同步路径，不会出现某一条路忘了通知后端。
    */
+  /**
+   * 给已定义的集合改名（重名时后端自动加序号 `_2`/`_3`…）。
+   * 名字在四处都是键（components / 主链 / 集合定义 / 已保存选择），所以改完
+   * 要把本地这四份一起改写，否则防抖同步会立刻把旧名字又发回后端。
+   */
+  const renameSet = async (oldName, newName) => {
+    const sid = sess?.sid
+    if (!sid) return
+    const nm = String(newName || '').trim()
+    if (!nm || nm === oldName) return
+    try {
+      const r = await api.renameSet(sid, oldName, nm)
+      const fin = r?.name || nm
+      setSets((prev) => prev.map((x) => (x.name === oldName ? { ...x, name: fin } : x)))
+      if (r?.sets) setSetsInfo(r.sets)
+      setComponents((prev) => prev.map((c) => (c === `set:${oldName}` ? `set:${fin}` : c)))
+      setPrimary((cur) => (cur && cur.name === `set:${oldName}`
+        ? { ...cur, name: `set:${fin}` } : cur))
+      setSelSync((n) => n + 1)
+      pushLog(`集合改名：set:${oldName} → set:${fin}`
+        + (r?.renamed ? `（原名已存在，自动加序号）` : ''))
+    } catch (e) {
+      setError(`集合改名失败: ${e.message}`)
+    }
+  }
+
   const applySets = (next, highlight = '') => {
     setSets(next)
     if (!sess?.sid) return
@@ -255,8 +282,20 @@ export default function App() {
     if (r.selections) {
       setSess((cur) => (cur ? { ...cur, selections: r.selections } : cur))
       // 删除后同步掉本地那条（后端已把它从组分里摘掉）
-      const live = new Set((r.components || []).map((x) => x.name))
-      setSets((prev) => prev.filter((x) => live.has(`set:${x.name}`)))
+      // ⚠️ 这里**必须**同时看两个来源（用户实测 bug：建了第二个集合，第一个就没了）：
+      //   · r.components  —— 只在 `/select` 的响应里有；`/selection`（新建/加载
+      //     一个集合）的响应顶层只有 set / selection / selections。
+      //     以前直接读 `r.components` 拿到 undefined → live 为空 → 把本地**所有**
+      //     集合都过滤掉了，于是"选一个再选下一个，前一个被覆盖"。
+      //   · r.selection.components —— 新建走的是这一层（apply_selection 的返回）。
+      //   · r.selections —— 后端仍然保存着的可视化选择（含已关掉、不参与分析的
+      //     集合）。已关掉的集合不在 components 里，但**不能因此删掉**。
+      const compsResp = r.components
+        || (r.selection && r.selection.components) || []
+      const live = new Set(compsResp.map((x) => (typeof x === 'string' ? x : x.name)))
+      const saved = new Set((r.selections || []).map((x) => x.name))
+      setSets((prev) => prev.filter((x) => (live.has(`set:${x.name}`)
+        || saved.has(x.name))))
     }
     if (r.set?.name) {
       const nm = String(r.set.name).replace(/^set:/, '')
@@ -545,7 +584,17 @@ export default function App() {
                nbins: Math.max(2, Number(params.rdf_nbins) || 120),
                mode: params.rdf_mode,
                // Forcite 口径（折回主盒 / 键连通分量分子 / inter+intra 可加）
-               forcite: params.rdf_forcite === true },
+               forcite: params.rdf_forcite === true,
+               // 距离口径：minimage=周期最小镜像（默认，与 InterRDF 一致）；
+               // cluster=无周期（MK 簇模式：按原始坐标算距离）
+               distance: params.rdf_distance || 'minimage',
+               // 伪重叠分子对剔除阈值：MS 的 .trj 是展开坐标，不同分子的原子经
+               // 最小镜像可能落到 0.2~1.5 Å（物理不可能，Forcite 的分子间 RDF 里
+               // 没有）。留空=不剔除；填 1.7 即复现 Forcite 在 r<1.7 Å 为 0 的口径。
+               drop_overlap: optNum(params.rdf_drop_overlap),
+               // 归一化密度因子（g 除以它）：Forcite 的分子间曲线 =
+               // 我们的「无周期簇模式」×2.95，即 rho_scale≈0.339。
+               rho_scale: optNum(params.rdf_rho_scale) || 1 },
         // `remove_drift`：默认**关**（= Materials Studio Forcite 的口径，实测逐点一致）。
         // NPT 体系里整盒平移会把 MSD 抬起来，那时把「减去整体漂移」勾上。
         // `unwrap`：不再让用户选，按轨迹来源自动定 ——
@@ -981,11 +1030,29 @@ export default function App() {
                         <StructurePanel sess={sess} st={struct}
                                         sets={sets} setsInfo={setsInfo}
                                         onSetsChange={applySets}
+                                        onRenameSet={renameSet}
                                         components={components}
-                                        onToggleComponent={(name) => setComponents(
-                                          (prev) => (prev.includes(name)
-                                            ? prev.filter((c) => c !== name)
-                                            : [...prev, name]))}
+                                        onToggleComponent={(name) => {
+                                          // 集合的参与状态有两个入口：分析集合行里的
+                                          // 勾选框（sets[].on）和「分析对象」里的胶囊
+                                          // （components）。两者必须是**同一份状态** ——
+                                          // 否则在胶囊上取消勾选集合后，开跑时
+                                          // payload 又会按 sets[].on=true 把它加回来
+                                          //（用户实测：没勾的集合照样进了 MSD）。
+                                          const key = String(name)
+                                          if (!key.startsWith('set:')) {
+                                            setComponents((prev) => (prev.includes(key)
+                                              ? prev.filter((c) => c !== key)
+                                              : [...prev, key]))
+                                            return
+                                          }
+                                          const nm = key.slice(4)
+                                          setSets((prev) => prev.map((x) => (x.name === nm
+                                            ? { ...x, on: x.on === false } : x)))
+                                          setComponents((prev) => (prev.includes(key)
+                                            ? prev.filter((c) => c !== key)
+                                            : [...prev, key]))
+                                        }}
                                         onNext={() => setOpen(SEC_SETUP)}
                                         log={pushLog} />
                       )}
@@ -996,7 +1063,8 @@ export default function App() {
                                           components={components}
                                           setComponents={setComponents}
                                           sets={sets} setsInfo={setsInfo}
-                                          onSetsChange={applySets} />
+                                          onSetsChange={applySets}
+                                          onRenameSet={renameSet} />
                           <FrameBlock frames={frames} setFrames={setFrames} />
                           <FunctionBlock titles={titles} order={order}
                                          which={which}

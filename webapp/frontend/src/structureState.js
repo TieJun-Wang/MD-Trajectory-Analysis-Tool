@@ -221,7 +221,13 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     const list = (indices || []).map(Number).filter((x) => Number.isFinite(x))
     if (!list.length) return
     const replacing = mode === 'replace' || (mode === 'auto' && !additive)
-    const removing = mode === 'auto' && list.every((x) => scope.has(x))
+    //: `toggle`（Ctrl/⌘ 单击）：整块已选 → 取消；否则加进来。
+    //  以前 Ctrl 单击走的是 `add`（只加不减），于是"取消选中"永远做不到
+    //  （用户实测）。
+    const toggling = mode === 'toggle'
+    const removing = mode === 'auto'
+      ? list.every((x) => scope.has(x))
+      : (toggling && list.every((x) => scope.has(x)))
     if (key) {
       // 记住这个节点键对应的原子，供"标红"与真实选择对齐（见下面的 prune 效果）
       if (removing || replacing) keyAtomsRef.current.delete(key)
@@ -341,7 +347,7 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
   const clearSelKeys = useCallback(() => setSelKeys(new Set()), [])
 
   /** 点三维视图里的一个原子：按当前层级展开（结构树会设置层级） */
-  const pick = useCallback(async (atomIndex, additive = false) => {
+  const pick = useCallback(async (atomIndex, ctrl = false) => {
     if (!sid || atomIndex === null || atomIndex === undefined) return
     let idxs = [atomIndex]
     if (mode !== 'atom') {
@@ -352,8 +358,44 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
         log?.(`按 ${mode} 展开失败：${e.message}`)
       }
     }
-    applySelection(idxs, additive ? 'add' : 'auto')
+    // Ctrl/⌘ 单击 = **切换**（整块已选就取消，否则加进来）；普通单击按
+    // 「累加选择」开关走 —— 两者不冲突（累加开时普通单击=加、Ctrl=切换）。
+    applySelection(idxs, ctrl ? 'toggle' : 'auto')
   }, [sid, mode, log, applySelection])
+
+  /** 双击三维视图里的原子：选中它所在的**单体（重复单元）**。 */
+  const pickMonomer = useCallback(async (atomIndex) => {
+    if (!sid || atomIndex === null || atomIndex === undefined) return
+    try {
+      const r = await api.pickAtom(sid, atomIndex, 'monomer')
+      applySelection(r.indices || [atomIndex], 'auto')
+      log?.(`选中${r.label}（${(r.n_atoms || 0).toLocaleString()} 原子）`)
+    } catch (e) {
+      log?.(`单体选择失败：${e.message}`)
+    }
+  }, [sid, applySelection, log])
+
+  /** 右击三维视图里的原子：选中所在的**一条链**；如果当前选择正好就是这条链，
+   *  再右击升级为**同类全部链**。 */
+  const pickChain = useCallback(async (atomIndex) => {
+    if (!sid || atomIndex === null || atomIndex === undefined) return
+    try {
+      const r = await api.pickAtom(sid, atomIndex, 'chain')
+      const idx = (r.indices || []).map(Number)
+      const same = idx.length > 0 && idx.length === scope.size
+        && idx.every((x) => scope.has(x))
+      if (same) {
+        const rt = await api.pickAtom(sid, atomIndex, 'same_type')
+        applySelection(rt.indices || idx, 'replace')
+        log?.(`选中${rt.label}（${(rt.n_atoms || 0).toLocaleString()} 原子）`)
+      } else {
+        applySelection(idx, 'auto')
+        log?.(`选中${r.label}（${(r.n_atoms || 0).toLocaleString()} 原子）`)
+      }
+    } catch (e) {
+      log?.(`链选择失败：${e.message}`)
+    }
+  }, [sid, applySelection, scope, log])
 
   /** 结构树点节点：按名字/层级取完整索引并选中 */
   const selectGroup = useCallback(async ({ level, index = null, segid = '',
@@ -525,7 +567,8 @@ export function useStructureState({ sess, log = null, onSetsChanged = null } = {
     selected, setSelected, setIndices, hover, setHover,
     onlySelected, setOnlySelected,
     mode, setMode,
-    load, pick, selectGroup, highlightSet, createFromIndices, resetView, resetAll,
+    load, pick, pickMonomer, pickChain, selectGroup, highlightSet,
+    createFromIndices, resetView, resetAll,
     invertSelection,
     search, highlightMatch, runQuery,
     additive, setAdditive, applySelection, filterElement,

@@ -22,7 +22,8 @@ const SEC_ICON = {
 }
 
 export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
-                                        onSetsChange = null, log = null,
+                                        onSetsChange = null, onRenameSet = null,
+                                        log = null,
                                         onNext = null,
                                         components = [], onToggleComponent = null }) {
   const [mode, setMode] = useState('recog')     // recog | classic
@@ -255,6 +256,7 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
       {/* ------------------------------------------------ ② 分析集合 */}
       <SetsBlock sess={sess} sets={sets} setsInfo={setsInfo}
                  onSetsChange={onSetsChange}
+                 onRenameSet={onRenameSet}
                  components={components}
                  onToggleComponent={onToggleComponent}
                  selectedCount={selCount}

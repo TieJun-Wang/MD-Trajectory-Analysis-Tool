@@ -46,7 +46,9 @@ DEFAULT_PARAMS: dict = {
     "dihedral": {"mode": "auto", "gauche_edge": 120.0},
     # 默认三个晶向一起出（C100/C010/C001）；界面/2D RDF/质心距仍用 axis=2
     "density": {"axis": "all", "nbins": None, "mode": "mass"},
-    "rdf": {"rmax": 12.0, "nbins": 120, "compare_halves": False},
+    "rdf": {"rmax": 12.0, "nbins": 120, "compare_halves": False,
+            "distance": "minimage", "drop_overlap": 0.0, "rho_scale": 1.0,
+            "forcite": False},
     "rdf2d": {"plane_axis": 2, "rmax": 70.0, "nbins": 140},
     "comdist": {"axis": 2, "pbc": False},
     "contact": {"cutoff": 5.0},
@@ -59,7 +61,11 @@ DEFAULT_PARAMS: dict = {
     #    静默覆盖（这里曾同时写了 `"order": {"gauche_edge": …}` 和 `"order": {}`，
     #    结果默认阈值被吃掉，只有显式传参才生效）。
     "order": {"gauche_edge": 120.0},
-    "msd": {"object": "molecule", "max_particles": None, "workers": 0},
+    # `object` 必须是 **atom**：Forcite 的 MSD 是逐原子追踪后平均（实测 PE-PP-MAPE
+    # 单链：t=1 ps 0.96075665、t=999 ps 21.51613092，逐点一致）。默认写成
+    # `molecule` 时同一组原子会给 2.873 / 75.707 —— 用户实测的"MSD 对不上、
+    # 但 Rg/密度对得上"就是这一处默认值造成的。
+    "msd": {"object": "atom", "max_particles": None, "workers": 0},
     # VACF：max_lag 留空 = 用满整条轨迹（与 Forcite 一样逐 lag 全给）
     "vacf": {"max_lag": None},
     # τ 轴默认**用满整条轨迹**；想收缩就传 {"tau_intervals": 5}（= 总时长/5）
@@ -526,10 +532,13 @@ class Analyzer:
             if not groups:
                 self.skip_reason = "没有勾选任何组分（MSD 至少需要一个组分）"
                 return None
-            # 逐组追踪语义：`set:C`（只取碳原子）按原子，`set:链状分子` 按分子质心
-            p = dict(p)
-            if self.msd_group_objects and "object_by_group" not in p:
-                p["object_by_group"] = dict(self.msd_group_objects)
+            # ⚠️ **不要**再用集合的 kind 覆盖用户的「MSD 追踪对象」选择。
+            # 旧代码把 `msd_group_objects`（= 集合的 kind，例如"整分子"集合是
+            # molecule）塞进 `object_by_group`，于是界面上明明选了「原子」，
+            # 集合仍按**分子质心**追踪 —— 实测 PE-PP-MAPE 单链：原子口径
+            # t=1 ps 0.9608 / t=999 ps 21.516（= Forcite），质心口径 0.066 /
+            # 0.94，用户看到的就是这个差异。口径应当只由界面那一个选择决定
+            # （"想按质心追踪" = 直接选「分子质心」）。
             return dyn.analyze_msd(self.trajectory, groups, sel, verbose=verbose, **p)
         if name == "vacf":
             groups = self._msd_groups()

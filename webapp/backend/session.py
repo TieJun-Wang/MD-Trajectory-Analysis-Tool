@@ -949,6 +949,188 @@ class Session:
             _add_residue(int(i))
         return {"query": raw, "matches": out, "total": int(hits.size)}
 
+    def pick_atom(self, index: int, kind: str = "chain") -> dict:
+        """三维视图里的右键/双击手势 → 返回该原子所属的一批原子。
+
+        ``kind``：
+        · ``monomer``  —— 单体（重复单元）近似：沿键连图从所点原子取
+          ``n_atoms(分子)/DP`` 个原子（DP 由化学式估：PE 按 C2H4）。用户要求
+          "双击任意原子高亮对应链的单体结构"。
+        · ``chain``    —— 该原子所在的**一条链**（优先 segid，其次分子编号；
+          两者都退化成"整个体系"时退到残基）。
+        · ``same_type``—— 与所点分子**同类型**的所有链（原子数 + 元素组成相同）。
+          用户要求"选中链后再右击 → 选中全部相同链"。
+
+        返回 ``{"indices", "label", "kind", "n_atoms"}``。
+        """
+        from mdta.topology import molecule_ids
+
+        u = self.az.universe
+        n = int(u.atoms.n_atoms)
+        i = int(index)
+        if not 0 <= i < n:
+            raise SessionError(f"原子索引越界：{i}（应在 0..{n - 1}）")
+        k = str(kind or "chain").lower()
+        mol = self._molecule_ids()
+        if mol is not None:
+            mid = int(mol[i])
+            members = np.nonzero(mol == mid)[0]
+        else:
+            mid = -1
+            members = np.arange(n)
+
+        if k in ("monomer", "repeat", "unit"):
+            idx = self._repeat_unit(i, members)
+            return {"indices": [int(x) for x in idx],
+                    "label": f"单体（{len(idx)} 原子）", "kind": "monomer",
+                    "n_atoms": int(len(idx))}
+
+        if k in ("same_type", "type", "all"):
+            idx = self._same_type_chain(i, mol)
+            return {"indices": [int(x) for x in idx],
+                    "label": f"同类链（{len(np.unique(u.atoms[idx].resindices))} 残基 / "
+                             f"{len(idx)} 原子）", "kind": "same_type",
+                    "n_atoms": int(len(idx))}
+
+        # chain：segid → 分子编号 → 残基，取第一个"真子集"的层级
+        cand = []
+        try:
+            seg = str(u.atoms.segids[i])
+            if seg:
+                cand.append(("链 " + seg,
+                             np.nonzero(np.asarray(u.atoms.segids, dtype=str) == seg)[0]))
+        except Exception:                                        # noqa: BLE001
+            pass
+        if mol is not None:
+            cand.append((f"分子 #{mid}", members))
+        rid = np.asarray(u.atoms.resindices, dtype=int)
+        r = u.residues[int(rid[i])]
+        cand.append((f"残基 {r.resname}{r.resid}", np.nonzero(rid == rid[i])[0]))
+        for label, idx in cand:
+            if 0 < len(idx) < n:
+                return {"indices": [int(x) for x in idx], "label": label,
+                        "kind": "chain", "n_atoms": int(len(idx))}
+        label, idx = cand[-1] if cand else ("原子", np.array([i]))
+        return {"indices": [int(x) for x in idx], "label": label,
+                "kind": "chain", "n_atoms": int(len(idx))}
+
+    def _molecule_ids(self):
+        """分子编号（带缓存：大体系上 molecule_ids 是 O(N) 但也不该每次点都算）。"""
+        key = (id(self.az.universe), int(self.az.universe.atoms.n_atoms))
+        if getattr(self, "_mol_cache_key", None) != key:
+            from mdta.topology import molecule_ids
+
+            try:
+                self._mol_cache = molecule_ids(self.az.universe.atoms)
+            except Exception:                                    # noqa: BLE001
+                self._mol_cache = None
+            self._mol_cache_key = key
+        return self._mol_cache
+
+    def _element_counts(self, ag) -> dict:
+        out: dict = {}
+        try:
+            for el in np.asarray(ag.elements, dtype=str):
+                out[el] = out.get(el, 0) + 1
+        except Exception:                                        # noqa: BLE001
+            pass
+        return out
+
+    def _repeat_unit(self, i: int, members) -> np.ndarray:
+        """单体（重复单元）近似：从原子 i 出发沿键连 BFS 取 k 个原子。
+
+        k = 分子原子数 / DP，DP 按**主链碳数**估：
+          · 没有支化碳（每个 C 的碳邻居 ≤ 2）→ PE 口径，DP = n_C / 2
+            （重复单元 −CH2−CH2− = 6 个原子，实测 C100H202 → k=6 ✓）
+          · 有支化碳（某个 C 的碳邻居 ≥ 3）→ PP 口径，DP = n_C / 3
+            （−CH2−CH(CH3)− = 9 个原子，实测 C150H302 → k=9 ✓）
+          · 含 O / 环等其它情况退回 PE 口径（n_C / 2），再不行退到残基。
+        """
+        u = self.az.universe
+        ag = u.atoms[members]
+        counts = self._element_counts(ag)
+        n_c = int(counts.get("C", 0))
+        # 分子内的碳-碳邻接（只统计 members 内部）
+        pos = {int(a): t for t, a in enumerate(np.asarray(members))}
+        cnb: dict = {}
+        try:
+            for b in u.bonds:
+                a0 = pos.get(int(b[0].index))
+                a1 = pos.get(int(b[1].index))
+                if a0 is None or a1 is None:
+                    continue
+                ea = str(ag.elements[a0]).upper()
+                eb = str(ag.elements[a1]).upper()
+                if ea == "C" and eb == "C":
+                    cnb[a0] = cnb.get(a0, 0) + 1
+                    cnb[a1] = cnb.get(a1, 0) + 1
+        except Exception:                                        # noqa: BLE001
+            cnb = {}
+        branched = any(v >= 3 for v in cnb.values())
+        try:
+            if n_c > 0:
+                per_c = 3.0 if branched else 2.0
+                dp = n_c / per_c
+                k = int(round(len(members) / dp)) if dp > 0 else 0
+            else:
+                k = 0
+        except Exception:                                        # noqa: BLE001
+            k = 0
+        if k < 3:
+            rid = np.asarray(u.atoms.resindices, dtype=int)
+            return np.nonzero(rid == rid[i])[0]
+        k = min(k, int(len(members)))
+        adj: dict = {}
+        try:
+            for b in u.bonds:
+                a0 = pos.get(int(b[0].index))
+                a1 = pos.get(int(b[1].index))
+                if a0 is None or a1 is None:
+                    continue
+                adj.setdefault(a0, []).append(a1)
+                adj.setdefault(a1, []).append(a0)
+        except Exception:                                        # noqa: BLE001
+            adj = {}
+        start = pos[int(i)]
+        seen = {start}
+        order = [start]
+        queue = [start]
+        while queue and len(order) < k:
+            cur = queue.pop(0)
+            for nb in adj.get(cur, []):
+                if nb not in seen:
+                    seen.add(nb)
+                    order.append(nb)
+                    queue.append(nb)
+                    if len(order) >= k:
+                        break
+        return np.asarray(members)[order]
+
+    def _same_type_chain(self, i: int, mol) -> np.ndarray:
+        """与所点分子**同类型**的所有链（原子数 + 元素组成相同）。"""
+        u = self.az.universe
+        n = int(u.atoms.n_atoms)
+        if mol is None:
+            rid = np.asarray(u.atoms.resindices, dtype=int)
+            r = u.residues[int(rid[i])]
+            mask = (np.asarray(u.residues.resnames, dtype=str) == str(r.resname))
+            keep = set(np.nonzero(mask)[0].tolist())
+            return np.array([j for j in range(n)
+                             if int(u.atoms.resindices[j]) in keep], dtype=int)
+        mid = int(mol[i])
+        members = np.nonzero(mol == mid)[0]
+        ref_key = (len(members), tuple(sorted(self._element_counts(
+            u.atoms[members]).items())))
+        out = []
+        for m in np.unique(mol):
+            idx = np.nonzero(mol == m)[0]
+            if len(idx) != ref_key[0]:
+                continue
+            key = tuple(sorted(self._element_counts(u.atoms[idx]).items()))
+            if key == ref_key[1]:
+                out.append(idx)
+        return np.concatenate(out) if out else members
+
     def expand(self, level: str, *, index: int | None = None,
                segid: str | None = None, resname: str | None = None,
                component: str | None = None) -> dict:
@@ -1580,6 +1762,16 @@ class Session:
             raise SessionError("集合需要一个名字")
         if nm.startswith("set:"):
             nm = nm[4:]
+        # 重名**不覆盖**：与「改名」同一套规则，自动加序号 `_2`、`_3`…
+        # （用户实测要求：多建几个集合时，同名的应该变成一个"新集合"而不是
+        #   悄悄顶掉原来的那一条 —— 原来的会被当成"没有变化"。）
+        existing = {str((s or {}).get("name") or "") for s in (self.sets_spec or [])}
+        existing |= set((self.selections or {}).keys())
+        base = nm
+        k = 2
+        while nm in existing:
+            nm = f"{base}_{k}"
+            k += 1
         spec = {"name": nm, "indices": [int(x) for x in (indices or [])]}
         if isinstance(from_meta, Mapping) and from_meta:
             spec["from"] = dict(from_meta)
@@ -1594,7 +1786,8 @@ class Session:
             raise SessionError(f"选择无效：{exc}") from exc
 
         with self._lock:
-            # 同名就覆盖（用户在可视化里改选后按"更新集合"）
+            # 名字在循环里已经保证唯一（重名自动加 _2/_3），这里直接追加；
+            # 只有"改名"或显式更新才会覆盖同名条目。
             self.sets_spec = [dict(s) for s in self.sets_spec
                               if str((s or {}).get("name") or "") != nm]
             self.sets_spec.append(spec)
@@ -1629,7 +1822,13 @@ class Session:
                 "set": {**{k: v for k, v in info.items() if k != "indices"},
                         "name": f"set:{nm}", "set_name": nm,
                         "from": dict(from_meta or {})},
-                "selection": info_list, "selections": self.selection_list()}
+                "selection": info_list, "selections": self.selection_list(),
+                # ⚠️ 顶层也要给一份 components / catalog：
+                # 前端 `onVisualSelection` 靠它判断"哪些 set: 还在"，
+                # 以前顶层没有这两个键 → 界面上把**之前建好的集合全过滤掉**，
+                # 表现就是"建了第二个集合，第一个被覆盖/消失"（用户实测）。
+                "components": (info_list or {}).get("components", []),
+                "catalog": (info_list or {}).get("catalog", [])}
 
     def selection_list(self) -> list[dict]:
         """已保存的可视化选择（名字 / 原子数 / 类型），供界面"加载已保存的选择"。"""
@@ -1638,6 +1837,66 @@ class Session:
             out.append({"name": nm, "n_atoms": int(rec.get("n_atoms") or 0),
                         "kind": rec.get("kind", ""), "label": rec.get("label", "")})
         return out
+
+    def rename_set(self, old: str, new: str) -> dict:
+        """把集合 ``set:<old>`` 改名成 ``set:<new>``（重名自动加序号）。
+
+        为什么要有这个：集合一旦建好，名字就写进了 `components` / 主链 /
+        集合定义 / 已保存选择四处，用户想改个看得懂的名字只能删了重建
+        （重建会丢"来自哪批原子"的说明，也容易把刚选好的原子弄丢）。
+
+        重名策略（用户要求）：新名字已经被别的集合占用时，不覆盖、也不报错，
+        而是自动加序号 ``name_2``、``name_3``…，返回值里的 ``name`` 是最终生效的
+        名字，``renamed`` 表示是否加过序号。
+        """
+        o = str(old or "").strip()
+        if o.startswith("set:"):
+            o = o[4:]
+        n = str(new or "").strip()
+        if n.startswith("set:"):
+            n = n[4:]
+        if not o:
+            raise SessionError("要改名的集合名为空")
+        if not n:
+            raise SessionError("新集合名为空")
+
+        existing = {str((s or {}).get("name") or "") for s in (self.sets_spec or [])}
+        existing |= set((self.selections or {}).keys())
+        if o not in existing:
+            raise SessionError(f"没有名为 {o!r} 的集合（可先在上面添加）")
+        base = n
+        k = 2
+        while n in existing and n != o:
+            n = f"{base}_{k}"
+            k += 1
+        changed = n != o
+        with self._lock:
+            self.sets_spec = [
+                ({**dict(s), "name": n} if str((s or {}).get("name") or "") == o
+                 else dict(s))
+                for s in (self.sets_spec or [])]
+            if not self.is_running:
+                comp = self.az.components
+                if f"set:{o}" in comp:
+                    comp[f"set:{n}"] = comp.pop(f"set:{o}")
+                for d in (getattr(self.az, "catalog", {}),
+                          getattr(self.az, "set_groups", {}),
+                          getattr(self.az, "msd_group_objects", {})):
+                    if isinstance(d, dict) and f"set:{o}" in d:
+                        d[f"set:{n}"] = d.pop(f"set:{o}")
+            self.sets_info = [
+                ({**dict(x), "name": f"set:{n}"} if str(x.get("name")) == f"set:{o}"
+                 else dict(x))
+                for x in (self.sets_info or [])]
+            if o in self.selections:
+                rec = dict(self.selections.pop(o))
+                rec["name"] = n
+                self.selections[n] = rec
+        return {"ok": True, "old": o, "name": n, "renamed": bool(changed),
+                "requested": base,
+                "sets": list(self.sets_info),
+                "selections": self.selection_list(),
+                "components": self.components(), "catalog": self.catalog()}
 
     def load_selection(self, name: str) -> dict:
         """把某个已保存的可视化选择重新变成集合（并参与分析）。"""

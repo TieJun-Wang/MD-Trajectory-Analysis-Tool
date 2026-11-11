@@ -18,7 +18,10 @@ const CPK = {
   NA: '#ab5cf2', K: '#8f40d4', LI: '#cc80ff', MG: '#8aff00', CA: '#3dff00',
   ZN: '#7d80b0', FE: '#e06633', SI: '#f0c8a0', B: '#ffb5b5',
 }
-const HIGHLIGHT = '#ff2d55'
+//: 被选中的原子/棍的高亮色 —— **亮黄**（用户要求"要明显"；洋红 #ff2d55 在浅底
+//: 上不够醒目，深黄 #c9a227 也不够亮，这里直接拉到纯黄系 #ffe600，
+//: 并且 `applyStateToScene` 会把选中的球再放大 15%，一眼就能看出来）。
+const HIGHLIGHT = '#ffe600'
 
 /* ---------------------------------------------------------- 球棍模型（参考 Material Studio）
  * 材质习惯：**球**按共价半径缩一圈当"原子球"，**棍**沿键方向画，且两端各取原子配色
@@ -114,6 +117,9 @@ function computeZoomLimits(st, data) {
     if (r > maxBall) maxBall = r
   }
   st.maxBallA = maxBall
+  // 最近缩放：最大球直径 = 视野高 × BALL_FILL（1.8 → 已经能钻进原子内部）。
+  // 注意：能不能"贴近箱内某颗原子"靠的是**注视点**（滚轮会朝光标下的原子漂），
+  // 不是这个下限 —— 以前只沿"体系中心"缩，看起来像"被盒子拦住"。
   st.radiusMin = maxBall / (BALL_FILL * tanHalf)
   st.radiusMin = Math.min(st.radiusMin, homeR * 0.5)          // 别比初始视角还远
   st.radiusMin = Math.max(st.radiusMin, MIN_RADIUS_A)
@@ -214,6 +220,8 @@ export default function StructureView({ st }) {
                   onlySelected={!!st.onlySelected}
                   pendingView={st.pendingView} sid={st.sid}
                   onPick={st.pick} onHover={st.setHover} binding={st.viewerRef}
+                  onPickMonomer={st.pickMonomer} onPickChain={st.pickChain}
+                  onClearSelection={st.resetAll}
                   onError={st.setErr} />
         )}
         {data && hover !== null && (
@@ -221,7 +229,9 @@ export default function StructureView({ st }) {
         )}
         {data && (
           <div className="viewhint">
-            球棍模型 · 左键拖动旋转 · 滚轮缩放 · **双击原子钻进分子** · 右键拖动平移 · 单击原子高亮（Ctrl 单击加减）
+            球棍模型 · 左键拖动旋转 · 滚轮缩放 · 单击原子高亮 · Ctrl 单击加/减选 ·
+            双击原子选中单体 · 右键原子选中整链（再右击 = 同类全部链）·
+            Ctrl+双击 聚焦 · 点空白处清空选择
           </div>
         )}
       </div>
@@ -661,8 +671,11 @@ export function applyStateToScene(st, data, selected, onlySelected = false) {
         const atom = data.index[i]
         const isSel = !!(selected && selected.has(atom))
         mesh.setColorAt(k, isSel ? hi : base)
-        // 「只显示已选」：没选中的缩到不可见（**编号不变**，只是不画）
-        const s = onlySelected && !isSel ? 1e-6 : ballRad(st, data, i)
+        // 「只显示已选」：没选中的缩到不可见（**编号不变**，只是不画）；
+        // 选中的再放大 15% —— 亮黄色 + 略大的球，远看也能一眼认出选了什么
+        // （用户实测：只换颜色不够明显）。
+        const r = ballRad(st, data, i)
+        const s = onlySelected && !isSel ? 1e-6 : r * (isSel ? 1.15 : 1)
         m4.makeScale(s, s, s)
         m4.setPosition(data.xyz[i][0] - ox, data.xyz[i][1] - oy, data.xyz[i][2] - oz)
         mesh.setMatrixAt(k, m4)
@@ -708,16 +721,23 @@ function applyBondState(st, data, selected, onlySelected) {
 
 /* ==================================================================== 画布 */
 function Viewer({ data, selected, onlySelected, pendingView = null,
-                  sid = '', onPick, onHover, binding, onError }) {
+                  sid = '', onPick, onHover, binding, onError,
+                  onPickMonomer = null, onPickChain = null,
+                  onClearSelection = null }) {
   const boxRef = useRef(null)
   const stRef = useRef(null)
   // 回调放 ref：切换"选择层级"会换掉 onPick 引用，放进依赖会让整个 WebGL 场景重建
   const pickRef = useRef(onPick)
   const hoverRef = useRef(onHover)
   const errRef = useRef(onError)
+  //: 双击 / 右击 / 点空白 三个新手势也放进 ref（同 onPick，避免重建场景）
+  const gestureRef = useRef({ monomer: onPickMonomer, chain: onPickChain,
+    clear: onClearSelection })
   pickRef.current = onPick
   hoverRef.current = onHover
   errRef.current = onError
+  gestureRef.current = { monomer: onPickMonomer, chain: onPickChain,
+    clear: onClearSelection }
 
   useEffect(() => {
     const box = boxRef.current
@@ -857,18 +877,59 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
     resize()
 
     // ---- 拾取：屏幕坐标 → 命中的**原始原子编号**
+    // ⚠️ 两个坑（用户实测"点的是别的链却识别成别的链"）：
+    //   1. 实例号 ≠ 显示序号：每个元素一个 InstancedMesh，第 k 个实例对应该元素
+    //      原子列表里的第 k 个（`userData.slots[k]` 才是**显示序号**）。
+    //      以前直接拿 `instanceId` 当显示序号，于是点到 H 会落到全局第 instanceId
+    //      个原子上 —— 完全是另一条链的原子。
+    //   2. 以前"第一个命中的网格"就算数：C 球和 H 球分属两个网格，先遍历到的
+    //      那个不一定是更近的那个。现在取**所有网格里最近**的交点。
     const pickAt = (cx, cy) => {
       const rect = box.getBoundingClientRect()
       const ndc = new THREE.Vector2(
         ((cx - rect.left) / rect.width) * 2 - 1,
         -((cy - rect.top) / rect.height) * 2 + 1)
       st.raycaster.setFromCamera(ndc, camera)
+      let bestSlot = null
+      let bestDist = Infinity
+      let bestMesh = null
       for (const m of st.meshes) {
         if (!m.visible) continue
         const hits = st.raycaster.intersectObject(m, false)
-        if (hits.length) return m.userData.displayIndex[hits[0].instanceId]
+        if (hits.length && hits[0].distance < bestDist) {
+          bestDist = hits[0].distance
+          bestSlot = m.userData.slots[hits[0].instanceId]
+          bestMesh = m
+        }
       }
-      return null
+      if (bestSlot === null || bestMesh === null) return null
+      return bestMesh.userData.displayIndex[bestSlot]
+    }
+
+    /** 兜底拾取：射线没打到任何球时（氢球很小、点在球的边缘外），
+     *  在屏幕 14 px 内找**最近的原子**。找不到才算"点了空白处"。
+     *  用户实测："我明明点的是别的链却识别成别的链" —— 一半是上面实例号映射
+     *  的 bug，另一半是点在球边缘直接落空、被当成点空白而清空选择。 */
+    const nearestScreenAtom = (cx, cy, maxPx = 14) => {
+      const rect = box.getBoundingClientRect()
+      const v = new THREE.Vector3()
+      const proj = new THREE.Matrix4()
+        .multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse)
+      const [ox, oy, oz] = st.offset || [0, 0, 0]
+      let best = null
+      let bestD = maxPx * maxPx
+      const xyz = data.xyz
+      for (let i = 0; i < xyz.length; i += 1) {
+        v.set(xyz[i][0] - ox, xyz[i][1] - oy, xyz[i][2] - oz).applyMatrix4(proj)
+        if (v.z > 1) continue                          // 在相机后方，忽略
+        const sx = (v.x * 0.5 + 0.5) * rect.width + rect.left
+        const sy = (-v.y * 0.5 + 0.5) * rect.height + rect.top
+        const dx = sx - cx
+        const dy = sy - cy
+        const d = dx * dx + dy * dy
+        if (d < bestD) { bestD = d; best = data.index[i] }
+      }
+      return best
     }
 
     // dragging: 0 无 / 1 旋转 / 2 平移；moved 记录累计位移，用来区分"单击"与"拖动"
@@ -912,13 +973,27 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
       // ⚠️ 只有"真的位移了"才算拖动：原来按 pointerdown 的标志位判断，
       //    于是每次单击都被当作拖动直接 return，原子永远选不中（用户实测）。
       if (wasDragging && dist > 4) return
-      const idx = pickAt(ev.clientX, ev.clientY)
-      if (idx === null || idx === undefined) return
-      // 双击某个原子 = **把镜头移到它身上并放大到分子内部**（用户要求：
-      // "可以穿透不同的分子、一直放大到多分子里的单个分子" —— 光靠绕质心转
-      // 是钻不进去的，得有一个"聚焦到这里"的手势）
+      let idx = pickAt(ev.clientX, ev.clientY)
+      // 点在球边缘外一点点：先按"屏幕 14 px 内最近的原子"兜底，避免把
+      // 一次普通点选当成"点了空白处"而把整份选择清掉。
+      if (idx === null || idx === undefined) {
+        idx = nearestScreenAtom(ev.clientX, ev.clientY)
+      }
+      // 点在空白处（14 px 内也没有原子）= 撤销全部选择（用户要求）
+      if (idx === null || idx === undefined) {
+        gestureRef.current?.clear?.()
+        return
+      }
+      // 右击：选中所在链；已经正好选中这条链时，再右击 → 同类全部链
+      if (ev.button === 2) {
+        gestureRef.current?.chain?.(idx)
+        return
+      }
       if (ev.detail >= 2) {
-        st.focusOn?.(idx)
+        // 双击 = 选中该原子所在的**单体（重复单元）**（用户要求）；
+        // Ctrl/⌘+双击 仍保留原来的"镜头聚焦到该原子"的手势。
+        if (ev.ctrlKey || ev.metaKey || ev.shiftKey) st.focusOn?.(idx)
+        else gestureRef.current?.monomer?.(idx)
         return
       }
       pickRef.current?.(idx, ev.ctrlKey || ev.metaKey)
@@ -927,11 +1002,29 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
       ev.preventDefault()
       const before = st.sph.radius
       // 上下限都按体系自身算（见 computeZoomLimits）：
-      //   最近 = 最大那颗原子直径 ≈ 视野 3/4；最远 = 模拟盒 ≈ 视野 1/3。
+      //   最近 = 最大球直径占视野 1.8 倍（能钻进原子内部）；最远 = 模拟盒 ≈ 视野 1/3
       const lo = st.radiusMin || MIN_RADIUS_A
       const hi = st.radiusMax || MAX_RADIUS_A
       st.sph.radius = Math.min(hi, Math.max(lo,
         st.sph.radius * Math.exp(ev.deltaY * ZOOM_PER_DELTA)))
+      // 放大时**朝鼠标下的原子钻**：以前缩放只沿"体系中心 → 相机"这条线走，
+      // 中心附近如果是空的（或想看的原子在别处），就会觉得"缩放到箱内的原子
+      // 被拦住、怎么滚都进不去"（用户实测）。这里命中原子就把注视点按比例
+      // 拉向它，滚几下就能贴到那个原子上。
+      if (st.sph.radius < before) {
+        try {
+          const idx = pickAt(ev.clientX, ev.clientY)
+          const dp = idx === null || idx === undefined
+            ? null : (st.posOf ? st.posOf.get(idx) : null)
+          if (dp !== null && dp !== undefined && data.xyz[dp]) {
+            const [ox, oy, oz] = st.offset || [0, 0, 0]
+            const p = new THREE.Vector3(
+              data.xyz[dp][0] - ox, data.xyz[dp][1] - oy, data.xyz[dp][2] - oz)
+            const k = Math.min(0.4, Math.max(0.06, 1 - st.sph.radius / before))
+            st.target.lerp(p, k)
+          }
+        } catch { /* 拾取失败不影响缩放本身 */ }
+      }
       // 缩放会改变"每像素多少 Å"→ 球/棍/盒棱的屏幕尺度跟着变（球棍模型靠这一步才成立：
       // 拉远靠下限保住可见，靠近让真实比例接管）。变化超过 8% 才重算矩阵，别每格都刷。
       if (Math.abs(st.sph.radius / before - 1) > 0.08) st.refresh?.()

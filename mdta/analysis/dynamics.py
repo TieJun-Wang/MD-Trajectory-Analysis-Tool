@@ -304,24 +304,18 @@ def _safe_masses(ag) -> np.ndarray:
 
 
 def _frame_com(ag, mol, n_mol, box, weights) -> np.ndarray:
-    """当前帧的**分子质心**坐标 ``(n_mol, 3)``。
+    """当前帧的**分子质心**坐标 ``(n_mol, 3)``（质量加权）。
 
-    先按最小镜像把分子内的原子聚拢到该分子的第 1 个原子上，再加权平均。
-    必须先聚拢：跨越周期边界的分子，其原子坐标分散在盒子的两侧，直接求质心
-    会得到分子外部的一个假位置。
+    ⚠️ 这里**不做**逐原子最小镜像折叠（旧实现用 ``minimize_vectors(pos-ref)``
+    把分子内原子折到第 1 个原子附近）。实测 PE-PP-MAPE 的单条 MAPE 链
+    （311 原子、链长 ~50 Å、盒 40 Å 量级）：折叠会把"离第 1 个原子超过半盒"的
+    原子折到错的镜像上，逐帧质心随机跳，分子质心 MSD 被抬成 35.7 Å²
+    （原子口径 17.0 Å²，Forcite 17.0 Å²）—— 质心 MSD 反比原子 MSD 大，
+    物理上不可能。MS 的 .trj 坐标本来就是**展开**的；被折回盒内的轨迹，
+    `particle_series` 的跨帧展开已经在原子层面解开了。所以这里直接对
+    （已展开的）逐帧坐标做加权平均即可。
     """
     pos = np.asarray(ag.positions, dtype=float)
-    first = np.full(n_mol, -1, dtype=np.int64)
-    uniq, idx0 = np.unique(mol, return_index=True)
-    first[uniq] = idx0
-    ref = pos[first[mol]]
-    if box is not None:
-        try:
-            from MDAnalysis.lib.distances import minimize_vectors
-
-            pos = ref + minimize_vectors(pos - ref, np.asarray(box, dtype=np.float32))
-        except Exception:  # noqa: BLE001
-            pass
     num = np.zeros((n_mol, 3), dtype=float)
     for d in range(3):
         num[:, d] = np.bincount(mol, weights=weights * pos[:, d], minlength=n_mol)
@@ -1182,9 +1176,11 @@ def analyze_msd(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
                       "（或留空 = 不限制）。")
     if max_lag_frames:
         res.add_notes(f"τ 上限还受「分段模式」限制（max_lag_frames={max_lag_frames}）。")
-    res.add_notes("默认追踪对象是**分子质心**：得到的是分子的平动扩散；"
-                  "若选「原子」，MSD 会额外包含分子内部的振动与转动"
-                  "（长 τ 下斜率仍趋于同一个 D，但截距更大）。")
+    res.add_notes("追踪对象可选：**原子**（= Forcite / MDAnalysis EinsteinMSD 口径，"
+                  "默认）或**分子质心**（只留平动扩散）。选「分子质心」时曲线整体偏小"
+                  "（实测 PE-PP-MAPE 单链：原子口径 t=1 ps 0.961、t=999 ps 21.516，"
+                  "与 Forcite 逐点一致；分子质心同一条链是 2.873 / 75.707 —— "
+                  "两者不能直接对比）。")
     res.add_notes("MSD 用 FFT 快速相关算法一次算完，保留完整时间分辨率"
                   "（不做分块、不牺牲长 τ）。")
     res.add_notes("跨周期性边界通过「最小镜像位移累加」追踪粒子，相当于把分子在时间上解开。")

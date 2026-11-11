@@ -16,6 +16,7 @@ import { fmtSec } from '../format'
  * `onSetsChange`（变更回调），和原来的 SelectionBlock 用法一致。
  */
 export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
+                          onRenameSet = null,
                           selectedCount = 0, onCreateFromIndices = null,
                           onHighlight = null, activeSet = '',
                           onFilterElement = null, activeElement = '',
@@ -34,19 +35,36 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
   const [draft, setDraft] = useState({
     name: '', elements: [], shape: 'all', min_atoms: '', max_atoms: '', pure: false,
   })
+  //: 集合改名的行内编辑（保存"正在改名的集合名"和新名字草稿）
+  const [renaming, setRenaming] = useState('')
+  const [renameDraft, setRenameDraft] = useState('')
   //: 变更集合；`highlight` = 这次新建/更新的集合名（父组件会在三维视图里高亮它）
   const emit = (next, highlight = '') => { onSetsChange?.(next, highlight) }
   const addSet = (spec) => {
     const name = String(spec.name || '').trim()
     if (!name) return
-    if (sets.some((x) => x.name === name)) {
-      // 同名覆盖
-      emit([...sets.filter((x) => x.name !== name), { ...spec, name }], name)
-      return
-    }
-    emit([...sets, { ...spec, name }], name)
+    // 重名**不覆盖**：和「改名」同一套规则，自动加序号 _2/_3…
+    //（用户实测要求：多建几个集合时，同名的不应悄悄顶掉原来那条）
+    const final = uniqueName(name)
+    emit([...sets, { ...spec, name: final }], final)
+  }
+  /** 自动命名去重：留空时生成 `C` / `自定义` 这类名字，但**不能和已有集合重名**
+   *  （用户实测 bug：不填名字连建两个集合，第二个把第一个覆盖了 —— 同名即覆盖）。 */
+  const uniqueName = (base) => {
+    const b = String(base || '').trim() || '集合'
+    const used = new Set((sets || []).map((x) => x.name))
+    if (!used.has(b)) return b
+    let i = 2
+    while (used.has(`${b}_${i}`)) i += 1
+    return `${b}_${i}`
   }
   const removeSet = (name) => emit(sets.filter((x) => x.name !== name))
+  /** 提交改名：手填的名字与已有集合重名时由后端自动加 `_2`/`_3` 序号 */
+  const commitRename = (oldName) => {
+    const v = String(renameDraft || '').trim()
+    setRenaming('')
+    if (v && v !== oldName && onRenameSet) onRenameSet(oldName, v)
+  }
   const toggleSetOn = (name) => emit(sets.map((x) => (x.name === name
     ? { ...x, on: x.on === false ? true : false } : x)))
   const toggleEl = (e) => setDraft((d) => ({ ...d,
@@ -54,7 +72,9 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
       ? d.elements.filter((x) => x !== e)
       : [...d.elements, e] }))
   const submitDraft = () => {
-    const nm = draft.name.trim() || (draft.elements.join('') || '自定义')
+    // 手填名字 → 按填的来（同名视为"更新"）；留空 → 自动命名并**保证唯一**
+    const typed = draft.name.trim()
+    const nm = typed || uniqueName(draft.elements.join('') || '自定义')
     // ① 三维视图里选中了原子、且用户没改成"按筛选条件" → 用这批原子建集合
     if (useSel && selectedCount > 0 && onCreateFromIndices) {
       // 记下这条集合"怎么来的"：集合行只显示名字，全部说明放悬浮提示
@@ -302,6 +322,33 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
                     <input type="checkbox" checked={on} onChange={() => toggleSetOn(x.name)} />
                     <b>set:{x.name}</b>
                   </label>
+                  {renaming === x.name ? (
+                    <span style={{ display: 'inline-flex', gap: 4, alignItems: 'center',
+                                   whiteSpace: 'nowrap' }}
+                          onClick={(e) => e.stopPropagation()}>
+                      <input autoFocus value={renameDraft} style={{ width: 108 }}
+                             placeholder="新名字（重名自动加序号）"
+                             onChange={(e) => setRenameDraft(e.target.value)}
+                             onKeyDown={(e) => {
+                               if (e.key === 'Enter') { e.preventDefault(); commitRename(x.name) }
+                               if (e.key === 'Escape') { e.preventDefault(); setRenaming('') }
+                             }} />
+                      <button className="mini"
+                              onClick={(e) => { e.stopPropagation(); commitRename(x.name) }}>
+                        确定
+                      </button>
+                    </span>
+                  ) : (
+                    <button className="mini"
+                            title="重命名这条集合（与已有集合重名时自动加 _2/_3 序号）"
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setRenaming(x.name)
+                              setRenameDraft(x.name)
+                            }}>
+                      改名
+                    </button>
+                  )}
                   <button className="mini" onClick={(e) => { e.stopPropagation(); removeSet(x.name) }}>
                     删除
                   </button>
@@ -730,9 +777,23 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       F('rdf_mode', 'RDF 配对模式', 'select', sel('rdf_mode', [
         ['inter', '分子间（默认）'],
         ['intra', '分子内'],
-        ['total', '总体（含分子内）'],
-        ['all', '三种一起（同图对比）'],
+        ['total', '总体'],
+        ['all', '三者对比'],
       ])),
+      // 三个「Forcite 口径」旋钮**挤在一格里**（同一行内联，能自动换行）：
+      // 用户实测：每个都占一整行时面板太长、还要左右滑动才能看全。
+      F('rdf_forcite_knobs', 'RDF 距离开径', 'select',
+        <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center',
+                       flexWrap: 'wrap', whiteSpace: 'normal' }}>
+          {sel('rdf_distance', [['minimage', '最小镜像'], ['cluster', '无周期']])}
+          <span style={{ color: 'var(--dim)', whiteSpace: 'nowrap' }}>伪重叠</span>
+          {numInput('关', { step: 0.1, min: 0, style: { width: 46, minWidth: 46 },
+                           ...p('rdf_drop_overlap') })}
+          <span style={{ color: 'var(--dim)', whiteSpace: 'nowrap' }}>ρ因子</span>
+          {numInput('1', { step: 0.01, min: 0.01, style: { width: 50, minWidth: 50 },
+                          ...p('rdf_rho_scale') })}
+        </span>,
+        '', 6),
     ]],
     ['二面角分析', ['dihedral'], [
       F('dihedral_mode', '二面角模式', 'select', sel('dihedral_mode', [
@@ -759,8 +820,8 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     ]],
     ['均方位移 MSD', ['msd'], [
       F('msd_object', 'MSD 追踪对象', 'select', sel('msd_object', [
-        ['atom', '原子（默认，= Forcite / EinsteinMSD 口径）'],
-        ['molecule', '分子质心（比 Forcite 大一圈）'],
+        ['atom', '原子（Forcite）'],
+        ['molecule', '分子质心'],
       ])),
       // 「跨帧补最小镜像」不再暴露：MS 的 .trj 坐标本来就是展开的 → 不补；
       // GROMACS/NPT 的 xtc 一般折回盒内 → 默认补。由 App.jsx 按轨迹类型自动决定。
