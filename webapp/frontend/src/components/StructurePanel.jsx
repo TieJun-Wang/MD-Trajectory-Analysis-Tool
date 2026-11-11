@@ -164,7 +164,7 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
                   title="只显示已选中的原子（其余不画；原子编号不变）">
             只显示已选
           </button>
-        </div>
+                  </div>
 
         {/* 两个视图在同一块区域里切换：识别分类 / 组分残基 */}
         <div className="tree-modes">

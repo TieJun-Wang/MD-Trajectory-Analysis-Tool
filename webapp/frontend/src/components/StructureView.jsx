@@ -10,40 +10,35 @@
 import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { STRUCT_MODES } from '../structureState'
+import {
+  AROMATIC_RING, ATOM_MATERIAL, BOND_MATERIAL, DEFAULT_COLOR, HIGHLIGHT_COLOR, HIGHLIGHT_SCALE,
+  LIGHTING, RENDER, BOX as BOX_CFG,
+  bondRadius, displayRadius, elementColor, qualityFor,
+} from '../renderConfig'
 
-//: CPK 配色（常见元素；未知元素用粉色，与 PyMOL 习惯一致）
-const CPK = {
-  H: '#ffffff', C: '#909090', N: '#3050f8', O: '#ff0d0d', F: '#90e050',
-  P: '#ff8000', S: '#e6c83c', CL: '#1ff01f', BR: '#a62929', I: '#940094',
-  NA: '#ab5cf2', K: '#8f40d4', LI: '#cc80ff', MG: '#8aff00', CA: '#3dff00',
-  ZN: '#7d80b0', FE: '#e06633', SI: '#f0c8a0', B: '#ffb5b5',
+//: 元素颜色（配置集中在 renderConfig.js —— 这里只是兼容旧名的薄封装）
+function colorOf(el) {
+  return elementColor(el)
 }
 //: 被选中的原子/棍的高亮色 —— **亮黄**（用户要求"要明显"；洋红 #ff2d55 在浅底
-//: 上不够醒目，深黄 #c9a227 也不够亮，这里直接拉到纯黄系 #ffe600，
-//: 并且 `applyStateToScene` 会把选中的球再放大 15%，一眼就能看出来）。
-const HIGHLIGHT = '#ffe600'
+//: 上不够醒目，深黄 #c9a227 也不够亮，这里直接拉到纯黄系，#ffe600），
+//: 并且 `applyStateToScene` 会把选中的球再放大 15%，一眼就能看出来。
+const HIGHLIGHT = HIGHLIGHT_COLOR
 
 /* ---------------------------------------------------------- 球棍模型（参考 Material Studio）
- * 材质习惯：**球**按共价半径缩一圈当"原子球"，**棍**沿键方向画，且两端各取原子配色
- * （半根一色），这样一根 C–H 键一半灰一半白，和 MS 里看起来一致。
- *   球半径 = 共价半径 × RADIUS_SCALE      （0.38 → C≈0.29 Å、H≈0.12 Å）
- *   棍半径 = min(STICK_RADIUS, 0.55 × 该端球半径)
+ * 视觉参数（元素颜色 / 显示半径 / 键半径 / 材质）全部集中在 renderConfig.js，
+ * 这里只做几何拼装。
+ *   球半径 = displayRadius(元素) × 全局缩放（见 renderConfig.ATOM_SCALE）
+ *   棍半径 = bondRadius(两端元素)，并封顶到"两端球半径较小者 × 0.6"，
+ *            保证球一定露在棍外面（否则 H 会被画成"一根白棍"）。
  *
  * 屏幕空间下限是必要的：几万个原子按真实半径画只有不到 1 个像素，看上去"什么都没有"。
- *
- * ⚠️ 棍半径**必须由该端的球半径封顶**，这是修过的一个 bug：原来棍半径只按
- *    "0.9 像素"设下限，缩到全景时 H 的球半径被下限顶到 0.23 Å，而棍半径也有
- *    0.21 Å —— 两者几乎一样粗，于是氢原子看上去不是一颗球，而是"一根白棍"
- *    （用户实测："氢原子并没有以球状显示而是一根不同颜色的棍子"）。
- *    现在棍永远只有球的 55%，球一定露在棍外面。
  */
-const RADIUS_SCALE = 0.38          // 球半径 / 共价半径
-const STICK_RADIUS = 0.13          // 棍半径上限（Å）
-const STICK_BALL_RATIO = 0.55      // 棍半径 ≤ 该端球半径 × 0.55（保证球不被棍吞掉）
 const BALL_MIN_PX = 1.3            // 球半径的屏幕下限（像素）
 const ROT_PER_PX = 0.004           // 旋转灵敏度（rad / 像素）：用户要求调低（原 0.008）
 const PAN_PER_PX = 0.0009          // 平移灵敏度（视野半径 / 像素）：原 0.0016
-const ZOOM_PER_DELTA = 0.0016      // 滚轮缩放灵敏度（rad 的指数）：原 0.0011，太慢
+const ZOOM_PER_DELTA = 0.0009      // 滚轮缩放灵敏度（rad 的指数）：0.0016 → 0.0009
+                                   // （用户实测"缩放太灵敏、一动就飞"，放慢一档）
 //: 最近能放大到什么程度：**最大那颗原子直径 ≈ 视野高的 BALL_FILL 倍**。
 //: 1.8 倍 = 相机能钻进原子内部（用户要求"可以穿透不同的分子、一直放大到单个分子"）。
 const BALL_FILL = 1.8
@@ -62,8 +57,8 @@ const FOCUS_RADIUS_A = 2.2
  *    原来写的是 max(0.2 Å, 1.8 像素)，放大后 0.2 Å 那一条会占主导 ——
  *    盒棱变成 0.2 Å 粗的白柱，一旦离相机近些就糊满整屏，看起来就像
  *    "缩放被盒子卡住了、放不大"（用户实测）。现在它永远是 1.8 像素的细线。 */
-const BOX_COLOR = '#ffffff'
-const BOX_PX = 1.8                 // 盒棱半径（屏幕像素，不随缩放变粗）
+const BOX_COLOR = BOX_CFG.color
+const BOX_PX = BOX_CFG.px            // 盒棱半径（屏幕像素，不随缩放变粗）
 
 /**
  * 按**当前相机距离**重算"每像素多少 Å"和球/盒棱的屏幕尺度。
@@ -113,7 +108,8 @@ function computeZoomLimits(st, data) {
   // ---- 最近：最大球直径 = BALL_FILL·viewH
   let maxBall = 0.3
   for (let i = 0; i < data.n_displayed; i += 1) {
-    const r = (data.radii[i] || 1.4) * RADIUS_SCALE
+    // 球半径来自**显示半径表**（renderConfig.ELEMENT_RADII × ATOM_SCALE）
+    const r = Math.max(0.03, Math.min(2.5, displayRadius(data.elements[i])))
     if (r > maxBall) maxBall = r
   }
   st.maxBallA = maxBall
@@ -126,20 +122,26 @@ function computeZoomLimits(st, data) {
   return st.radiusMin
 }
 
-/** 球半径（Å）：共价半径 × 系数，并受屏幕下限保护 */
+/** 球半径（Å）：**显示半径表**（renderConfig.ELEMENT_RADII × ATOM_SCALE），
+ *  再受"屏幕下限"保护 —— 屏幕下限只在拉远时兜住可见性，放大后让真实比例接管。
+ *  只影响画面，不改坐标、不改分析数据。 */
 function ballRad(st, data, i) {
-  return Math.max(0.03, Math.min(2.5,
-    Math.max((data.radii[i] || 1.4) * RADIUS_SCALE, st.minRadA || 0)))
+  const base = displayRadius(data.elements[i])
+  return Math.max(0.03, Math.min(2.5, Math.max(base, st.minRadA || 0)))
 }
 
-/** 棍半径（Å）：**由该端球半径封顶** —— 否则小原子（H）会被棍吞掉 */
+/** 棍半径（Å）：按**两端元素**取键半径，并封顶到两端球半径较小者的 0.6 —— 
+ *  否则小原子（H）会被棍吞掉，画出来像"一根白棍"而不是一颗球。 */
 function stickRad(st, data, i) {
-  return Math.min(STICK_RADIUS, STICK_BALL_RATIO * ballRad(st, data, i))
+  const base = bondRadius(data.elements[i], data.elements[i])
+  return Math.min(base, 0.6 * ballRad(st, data, i))
 }
 
-function colorOf(el) {
-  const key = String(el || '').toUpperCase()
-  return CPK[key] || CPK[key[0]] || '#ff69b4'
+/** 一根键的半径：按两端元素查表，并保证不会被两端的球吞掉 */
+function bondRad(st, data, ia, ib) {
+  const base = bondRadius(data.elements[ia], data.elements[ib])
+  const cap = 0.6 * Math.min(ballRad(st, data, ia), ballRad(st, data, ib))
+  return Math.min(base, cap)
 }
 
 export default function StructureView({ st }) {
@@ -330,8 +332,21 @@ export function buildGeometry(st, data) {
       if (!byEl.has(el)) byEl.set(el, [])
       byEl.get(el).push(i)
     }
-    const baseGeo = new THREE.SphereGeometry(1, 12, 10)
-    const baseMat = new THREE.MeshPhongMaterial({ shininess: 26, specular: 0x262626 })
+    // 球：质量档位决定细分（standard = 24×24）。材质用 MeshPhysicalMaterial：
+    // roughness 0.28 + clearcoat 0.25 → 圆润柔和的高光，不金属、不塑料。
+    // ⚠️ 实例颜色是乘在材质颜色上的，材质底色必须是白（否则会被压暗）。
+    const Q = qualityFor(n)
+    const baseGeo = new THREE.SphereGeometry(1, Q.sphereW, Q.sphereH)
+    const baseMat = new THREE.MeshPhysicalMaterial({
+      color: 0xffffff,
+      roughness: ATOM_MATERIAL.roughness,
+      metalness: ATOM_MATERIAL.metalness,
+      clearcoat: ATOM_MATERIAL.clearcoat,
+      clearcoatRoughness: ATOM_MATERIAL.clearcoatRoughness,
+      ior: ATOM_MATERIAL.ior,
+      reflectivity: ATOM_MATERIAL.reflectivity,
+      envMapIntensity: ATOM_MATERIAL.envMapIntensity,
+    })
     const m4 = new THREE.Matrix4()
     for (const [el, list] of byEl) {
       const mesh = new THREE.InstancedMesh(baseGeo.clone(), baseMat.clone(), list.length)
@@ -493,33 +508,104 @@ function applyBoxState(st) {
 }
 
 /* --------------------------------------------------------------- 棍（化学键） */
-/* --------------------------------------- 芳香环（细圆圈，MS 风格） */
+/* --------------------------------------- 芳香环（苯环内部半透明圆环） */
 /**
- * 把后端给的**芳香六元环**（`data.rings`，原始原子编号）画成环心的一根**圆圈**。
+ * 把后端给的**芳香环**（`data.rings`，原始原子编号）画成环心的一根圆环。
  *
- * 用户口径：不要粗的分段弧，就是一根细圆环，线宽约为外层碳–碳键的 1/3。
- * 实现上仍用"细圆柱段"拼圆（WebGL 的线宽恒为 1 px，画不出指定粗细），
- * 半径 = 环外接半径 × 0.54（落在六元环内部），每圈 36 段，全部环合成一个
- * InstancedMesh（一次 draw call）。
+ * 数据来源：后端 `/structure` 的 `rings` 已经**只含芳香环** ——
+ * `mdta.rings.analyze_rings` 判 "6 元碳环 + 6 根环键均 ≤1.50 Å"（is_benzene），
+ * 前端不按六元环形状自己猜芳香性。
+ *
+ * 几何：THREE.TorusGeometry（半径 = 苯环内切半径 × 0.78，管道 0.045 Å，
+ * 沿圆周 96 段）。法向量用**协方差 + Jacobi 特征分解**取最小特征值对应的
+ * 特征向量（PCA 平面拟合；环接近共线时退回 Newell 面积法向），
+ * 再用四元数把 +Z 转到该法向 —— 不假设苯环在 XY 平面。
+ *
+ * 渲染：半透明 + depthWrite:false + renderOrder 抬后，圆环不遮挡原子与化学键；
+ * 多个芳香环共用一个 InstancedMesh（一次 draw call）。
  */
+function _ringNormal(pts) {
+  // 1) 平面拟合：Newell 面积法向 —— 对任意朝向/倾斜的环都成立（旋转不变，
+  //    对近似共面的环也稳）。这就是"最小二乘平面"的法向，等同于 PCA 在平面
+  //    情况下的结果。
+  const nrm = new THREE.Vector3()
+  const n = pts.length
+  for (let i = 0; i < n; i += 1) {
+    const a = pts[i]
+    const b = pts[(i + 1) % n]
+    nrm.x += (a.y - b.y) * (a.z + b.z)
+    nrm.y += (a.z - b.z) * (a.x + b.x)
+    nrm.z += (a.x - b.x) * (a.y + b.y)
+  }
+  if (nrm.lengthSq() > 1e-16) return nrm.normalize()
+
+  // 2) 退化（环几乎共线）→ PCA 兜底：3×3 协方差最小特征向量（Jacobi 特征分解）
+  const c = new THREE.Vector3()
+  for (const p of pts) c.add(p)
+  c.multiplyScalar(1 / n)
+  const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]]
+  for (const p of pts) {
+    const d = [p.x - c.x, p.y - c.y, p.z - c.z]
+    for (let i = 0; i < 3; i += 1) {
+      for (let j = 0; j < 3; j += 1) A[i][j] += d[i] * d[j]
+    }
+  }
+  for (let i = 0; i < 3; i += 1) {
+    for (let j = 0; j < 3; j += 1) A[i][j] /= Math.max(n, 1)
+  }
+  const V = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
+  for (let sweep = 0; sweep < 32; sweep += 1) {
+    let off = 0
+    for (let i = 0; i < 3; i += 1) {
+      for (let j = i + 1; j < 3; j += 1) off += A[i][j] * A[i][j]
+    }
+    if (off < 1e-24) break
+    for (let p1 = 0; p1 < 3; p1 += 1) {
+      for (let q1 = p1 + 1; q1 < 3; q1 += 1) {
+        if (Math.abs(A[p1][q1]) < 1e-24) continue
+        const theta = (A[q1][q1] - A[p1][p1]) / (2 * A[p1][q1])
+        const tt = Math.sign(theta || 1)
+          / (Math.abs(theta) + Math.sqrt(theta * theta + 1))
+        const cth = 1 / Math.sqrt(tt * tt + 1)
+        const sth = tt * cth
+        for (let k = 0; k < 3; k += 1) {
+          const akp = A[k][p1]; const akq = A[k][q1]
+          A[k][p1] = cth * akp - sth * akq
+          A[k][q1] = sth * akp + cth * akq
+        }
+        for (let k = 0; k < 3; k += 1) {
+          const apk = A[p1][k]; const aqk = A[q1][k]
+          A[p1][k] = cth * apk - sth * aqk
+          A[q1][k] = sth * apk + cth * aqk
+        }
+        for (let k = 0; k < 3; k += 1) {
+          const vkp = V[k][p1]; const vkq = V[k][q1]
+          V[k][p1] = cth * vkp - sth * vkq
+          V[k][q1] = sth * vkp + cth * vkq
+        }
+      }
+    }
+  }
+  const dg = [A[0][0], A[1][1], A[2][2]]
+  const mi = dg.indexOf(Math.min(...dg))
+  const out = new THREE.Vector3(V[0][mi], V[1][mi], V[2][mi])
+  if (!Number.isFinite(out.x) || out.lengthSq() < 1e-16) return null
+  return out.normalize()
+}
+
 function buildRings(st, data) {
   const rings = data.rings || []
   if (!rings.length) return
   const [ox, oy, oz] = st.offset
   const xyz = data.xyz
   const posOf = st.posOf
-  const SEG = 36             // 一圈的段数（够圆滑）
-  const RAD_FRAC = 0.42      // 圆半径 = 环外接半径 × 0.42（更小，留在环中央）
-  const THIN_FRAC = 0.15     // 线宽 = 该环球棍半径 × 0.15（细线，不加粗）
-
-  const segs = []            // [p0, p1, radius]
+  const CFG = AROMATIC_RING
+  const UP = new THREE.Vector3(0, 0, 1)      // TorusGeometry 默认在 XY 平面，法向 +Z
+  const items = []                          // { center, quat, radius }
   const c = new THREE.Vector3()
-  const uA = new THREE.Vector3()
-  const vA = new THREE.Vector3()
-  const nA = new THREE.Vector3()
-  const tmp = new THREE.Vector3()
+  const q = new THREE.Quaternion()
   for (const ring of rings) {
-    if (ring.length < 3) continue
+    if (!ring || ring.length < 3) continue
     const pts = []
     let ok = true
     for (const orig of ring) {
@@ -529,62 +615,53 @@ function buildRings(st, data) {
     }
     if (!ok) continue
     c.set(0, 0, 0)
-    pts.forEach((p) => c.add(p))
+    for (const p of pts) c.add(p)
     c.multiplyScalar(1 / pts.length)
-    uA.copy(pts[0]).sub(c)
-    nA.copy(pts[1]).sub(pts[0]).cross(tmp.copy(pts[2]).sub(pts[0]))
-    if (nA.lengthSq() < 1e-10 || uA.lengthSq() < 1e-10) continue
-    nA.normalize()
-    uA.addScaledVector(nA, -uA.dot(nA)).normalize()
-    vA.crossVectors(nA, uA).normalize()
-    const ringR = pts.reduce((acc, p) => acc + p.distanceTo(c), 0) / pts.length
-    const r = ringR * RAD_FRAC
-    let thick = 0
-    for (const orig of ring) {
-      const i = posOf.get(orig)
-      if (i !== undefined) thick += stickRad(st, data, i)
+    const nrm = _ringNormal(pts)
+    if (!nrm) continue
+    // 正六边形边长取平均 → 内切半径 = 边长 × √3/2；圆环半径 = 内切半径 × 0.78
+    let side = 0
+    for (let i = 0; i < pts.length; i += 1) {
+      side += pts[i].distanceTo(pts[(i + 1) % pts.length])
     }
-    thick = (thick / ring.length) * THIN_FRAC
-    const at = (th) => c.clone()
-      .addScaledVector(uA, Math.cos(th) * r)
-      .addScaledVector(vA, Math.sin(th) * r)
-    let prev = at(0)
-    for (let k = 1; k <= SEG; k += 1) {
-      const p = at((k / SEG) * Math.PI * 2)
-      segs.push([prev, p, thick])
-      prev = p
-    }
+    side /= pts.length
+    const inradius = side * Math.sqrt(3) / 2
+    const radius = Math.max(0.08, inradius * CFG.radiusFrac)
+    q.setFromUnitVectors(UP, nrm)
+    items.push({ center: c.clone(), quat: q.clone(), radius })
   }
-  if (!segs.length) return
+  if (!items.length) return
 
-  const geo = new THREE.CylinderGeometry(1, 1, 1, 6, 1, false)   // 单位半径/高，沿 +Y
-  const mat = new THREE.MeshPhongMaterial({ color: 0x1f2937, shininess: 30,
-    specular: 0x333333 })
-  const mesh = new THREE.InstancedMesh(geo, mat, segs.length)
-  const UP = new THREE.Vector3(0, 1, 0)
-  const dir = new THREE.Vector3()
-  const mid = new THREE.Vector3()
-  const q = new THREE.Quaternion()
+  // 单位圆环：环半径 1、管道 0.045（按"典型半径"折算成比例，实例再整体缩放）。
+  // 这样不同半径的环共用一份几何，只用一个 draw call。
+  const typical = items.reduce((a, it) => a + it.radius, 0) / items.length
+  const tubeRatio = CFG.tube / Math.max(typical, 1e-6)
+  const geo = new THREE.TorusGeometry(1, tubeRatio,
+    CFG.radialSegments, CFG.tubularSegments)
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: new THREE.Color(CFG.color),
+    transparent: !!CFG.transparent,
+    opacity: CFG.opacity,
+    roughness: CFG.roughness,
+    metalness: CFG.metalness,
+    emissive: new THREE.Color(CFG.emissive),
+    emissiveIntensity: CFG.emissiveIntensity,
+    depthWrite: !!CFG.depthWrite,
+    side: THREE.DoubleSide,
+  })
+  const mesh = new THREE.InstancedMesh(geo, mat, items.length)
   const m4 = new THREE.Matrix4()
   const scl = new THREE.Vector3()
-  segs.forEach(([p0, p1, thick], k) => {
-    dir.copy(p1).sub(p0)
-    const len = dir.length()
-    if (len < 1e-6) {
-      m4.makeScale(1e-6, 1e-6, 1e-6)
-      mesh.setMatrixAt(k, m4)
-      return
-    }
-    dir.normalize()
-    q.setFromUnitVectors(UP, dir)
-    mid.copy(p0).add(p1).multiplyScalar(0.5)
-    scl.set(thick, len, thick)
-    m4.compose(mid, q, scl)
+  items.forEach((it, k) => {
+    scl.set(it.radius, it.radius, it.radius)
+    m4.compose(it.center, it.quat, scl)
     mesh.setMatrixAt(k, m4)
   })
   mesh.instanceMatrix.needsUpdate = true
-  mesh.renderOrder = 2
   mesh.frustumCulled = false
+  // 半透明对象在透明队列里画：放在原子/化学键之后（renderOrder 抬后），
+  // 且 depthWrite=false 不写深度 —— 不会遮挡原子球和键，也不会和它们 z-fighting。
+  mesh.renderOrder = 3
   st.ringGroup = mesh
   st.scene.add(mesh)
 }
@@ -598,6 +675,9 @@ function buildRings(st, data) {
  */
 function buildBonds(st, data) {
   const flat = data.bonds || []
+  //: 键级（可选）：后端给了 `bond_orders` 就按 1/2/3 画成平行多根圆柱，
+  //  没给就一律按单键。双键/三键每根子圆柱更细、按垂直于键轴的平面错开。
+  const orders = data.bond_orders || null
   const n = data.n_displayed
   const xyz = data.xyz
   const [ox, oy, oz] = st.offset
@@ -609,52 +689,86 @@ function buildBonds(st, data) {
     const L = Math.hypot(xyz[ib][0] - xyz[ia][0], xyz[ib][1] - xyz[ia][1],
       xyz[ib][2] - xyz[ia][2])
     if (L < 1e-4) continue          // 重合原子（同一位置）画不出方向
-    pairs.push(ia, ib, L)
+    let order = 1
+    if (orders) {
+      const o = orders[b >> 1]
+      order = Number.isFinite(o) ? Math.max(1, Math.min(3, Math.round(o))) : 1
+    }
+    pairs.push(ia, ib, L, order)
   }
-  const nB = pairs.length / 3
+  const nB = pairs.length / 4
   if (!nB) { st.nSticks = 0; return }
-  const nHalf = nB * 2
+  // 每根键拆成 order 根子圆柱、每根再拆成两端半棍 → 2×order 个实例
+  let nHalf = 0
+  for (let b = 0; b < nB; b += 1) nHalf += 2 * pairs[4 * b + 3]
 
-  const geo = new THREE.CylinderGeometry(1, 1, 1, 6, 1, false)   // 单位半径/高度，沿 +Y
-  const mat = new THREE.MeshPhongMaterial({ shininess: 18, specular: 0x1f1f1f })
+  const Q = qualityFor(data.n_displayed)
+  // 单位圆柱（半径 1 / 高 1，沿 +Y）：键粗细由实例矩阵的 x/z 缩放给出，
+  // 因此**同一个 geometry 可以画出任意粗细的键**（不同元素对不同粗细）。
+  const geo = new THREE.CylinderGeometry(1, 1, 1, Q.bondRadial, 1, false)
+  const mat = new THREE.MeshPhysicalMaterial({
+    color: 0xffffff,
+    roughness: BOND_MATERIAL.roughness,
+    metalness: BOND_MATERIAL.metalness,
+    clearcoat: BOND_MATERIAL.clearcoat,
+    clearcoatRoughness: BOND_MATERIAL.clearcoatRoughness,
+    reflectivity: BOND_MATERIAL.reflectivity,
+    envMapIntensity: BOND_MATERIAL.envMapIntensity,
+  })
   const mesh = new THREE.InstancedMesh(geo, mat, nHalf)
   mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
 
   const center = new Float32Array(nHalf * 3)
   const quat = new Float32Array(nHalf * 4)
   const half = new Float32Array(nHalf)        // 半根棍的长度
+  const radii = new Float32Array(nHalf)       // 该半根棍的半径（按两端元素对）
   const atoms = new Int32Array(nHalf)         // 该半根棍属于哪个**显示位置**
-  const baseCol = new Float32Array(nHalf * 3) // 基础色（已转线性空间，与球一致）
+  const baseCol = new Float32Array(nHalf * 3) // 基础色（已转线性空间，与球一致)
 
   const UP = new THREE.Vector3(0, 1, 0)
   const vA = new THREE.Vector3(); const vB = new THREE.Vector3()
   const dir = new THREE.Vector3(); const mid = new THREE.Vector3()
+  const perp = new THREE.Vector3(); const tmpV = new THREE.Vector3()
   const q = new THREE.Quaternion()
   const c = new THREE.Color()
+  let k = 0                                   // 实例序号（双/三键会占多个）
   for (let b = 0; b < nB; b += 1) {
-    const ia = pairs[3 * b]; const ib = pairs[3 * b + 1]; const L = pairs[3 * b + 2]
+    const ia = pairs[4 * b]; const ib = pairs[4 * b + 1]; const L = pairs[4 * b + 2]
+    const order = pairs[4 * b + 3]
     vA.set(xyz[ia][0] - ox, xyz[ia][1] - oy, xyz[ia][2] - oz)
     vB.set(xyz[ib][0] - ox, xyz[ib][1] - oy, xyz[ib][2] - oz)
     dir.copy(vB).sub(vA).normalize()
     q.setFromUnitVectors(UP, dir)
     mid.copy(vA).add(vB).multiplyScalar(0.5)
-    for (let s = 0; s < 2; s += 1) {
-      const dp = s === 0 ? ia : ib
-      const k = 2 * b + s
-      // 半棍中点：一端原子与键中点的中点
-      const src = s === 0 ? vA : vB
-      center[3 * k] = (src.x + mid.x) / 2
-      center[3 * k + 1] = (src.y + mid.y) / 2
-      center[3 * k + 2] = (src.z + mid.z) / 2
-      quat[4 * k] = q.x; quat[4 * k + 1] = q.y
-      quat[4 * k + 2] = q.z; quat[4 * k + 3] = q.w
-      half[k] = L / 2
-      atoms[k] = dp
-      c.set(colorOf(data.elements[dp]))
-      baseCol[3 * k] = c.r; baseCol[3 * k + 1] = c.g; baseCol[3 * k + 2] = c.b
+    const rb = bondRad(st, data, ia, ib)
+    // 单键 1 根；双键 2 根；三键 3 根。子圆柱半径按根数收细，
+    // 错开方向取"垂直于键轴"的一个向量（键轴与 y 平行时换 x 兜底）。
+    const subR = order === 1 ? rb : rb / 1.7
+    const gap = order === 1 ? 0 : rb * 1.05
+    perp.crossVectors(dir, Math.abs(dir.y) > 0.9 ? tmpV.set(1, 0, 0) : UP).normalize()
+    const shifts = order === 1 ? [0]
+      : order === 2 ? [-gap, gap] : [-gap, 0, gap]
+    for (const shift of shifts) {
+      const off = tmpV.copy(perp).multiplyScalar(shift)
+      for (let s = 0; s < 2; s += 1) {
+        const dp = s === 0 ? ia : ib
+        // 半棍中点：一端原子与键中点的中点（再加上多键的错位）
+        const src = s === 0 ? vA : vB
+        center[3 * k] = (src.x + mid.x) / 2 + off.x
+        center[3 * k + 1] = (src.y + mid.y) / 2 + off.y
+        center[3 * k + 2] = (src.z + mid.z) / 2 + off.z
+        quat[4 * k] = q.x; quat[4 * k + 1] = q.y
+        quat[4 * k + 2] = q.z; quat[4 * k + 3] = q.w
+        half[k] = L / 2
+        radii[k] = subR
+        atoms[k] = dp
+        c.set(colorOf(data.elements[dp]))
+        baseCol[3 * k] = c.r; baseCol[3 * k + 1] = c.g; baseCol[3 * k + 2] = c.b
+        k += 1
+      }
     }
   }
-  mesh.userData = { n: nHalf, center, quat, half, atoms, baseCol }
+  mesh.userData = { n: nHalf, center, quat, half, radii, atoms, baseCol }
   mesh.frustumCulled = false
   st.scene.add(mesh)
   st.bondMesh = mesh
@@ -675,7 +789,7 @@ export function applyStateToScene(st, data, selected, onlySelected = false) {
         // 选中的再放大 15% —— 亮黄色 + 略大的球，远看也能一眼认出选了什么
         // （用户实测：只换颜色不够明显）。
         const r = ballRad(st, data, i)
-        const s = onlySelected && !isSel ? 1e-6 : r * (isSel ? 1.15 : 1)
+        const s = onlySelected && !isSel ? 1e-6 : r * (isSel ? HIGHLIGHT_SCALE : 1)
         m4.makeScale(s, s, s)
         m4.setPosition(data.xyz[i][0] - ox, data.xyz[i][1] - oy, data.xyz[i][2] - oz)
         mesh.setMatrixAt(k, m4)
@@ -703,9 +817,9 @@ function applyBondState(st, data, selected, onlySelected) {
       const dp = u.atoms[k]
       const isSel = !!(selected && selected.has(data.index[dp]))
       const f = onlySelected && !isSel ? 1e-6 : 1
-      // 棍半径由**这一端**的球半径封顶：氢球小，棍就必须更细，
-      // 否则氢会被画成"一根白棍"（用户实测的 bug）。
-      const r0 = stickRad(st, data, dp)
+      // 棍半径：建几何时已按**两端元素对**算好（u.radii），这里直接用；
+      // 老数据没有 radii 时再退回按这一端球半径封顶。
+      const r0 = u.radii ? u.radii[k] : stickRad(st, data, dp)
       p.set(u.center[3 * k], u.center[3 * k + 1], u.center[3 * k + 2])
       q.set(u.quat[4 * k], u.quat[4 * k + 1], u.quat[4 * k + 2], u.quat[4 * k + 3])
       s.set(r0 * f, u.half[k] * f, r0 * f)
@@ -743,36 +857,83 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
     const box = boxRef.current
     if (!box) return undefined
     let renderer
+    let stEnv = null                     // 环境贴图（卸载时释放）
     try {
       // ⚠️ preserveDrawingBuffer 必须开：关着的时候，浏览器在合成后可以把
       //    WebGL 的绘图缓冲清掉，而此时若 React 因为悬停换了覆盖层（原子信息框）
       //    重排 DOM，就会有一帧拿到"已被清空"的画布 —— 表现就是悬停切换原子时
       //    **短暂闪一下白屏**（用户实测）。
       renderer = new THREE.WebGLRenderer({
-        antialias: true, alpha: false, preserveDrawingBuffer: true,
+        antialias: RENDER.antialias, alpha: false, preserveDrawingBuffer: true,
       })
     } catch (e) {
       box.innerHTML = '<div class="placeholder"><p>这个浏览器/环境不能创建 WebGL '
         + '上下文，三维视图不可用（分析功能不受影响）。</p></div>'
       return undefined
     }
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-    renderer.setClearColor(0xf7f9fc)
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, RENDER.maxPixelRatio))
+    // 色彩管理 / 色调映射：sRGB 输出 + ACES 曲线，高光不会过曝成死白
+    renderer.outputColorSpace = THREE.SRGBColorSpace
+    renderer.toneMapping = THREE.ACESFilmicToneMapping
+    renderer.toneMappingExposure = RENDER.exposure
+    // 画布底色：深色（renderConfig.RENDER.background，默认 #101722）
+    renderer.setClearColor(new THREE.Color(RENDER.background))
     box.appendChild(renderer.domElement)
     renderer.domElement.style.width = '100%'
     renderer.domElement.style.height = '100%'
     renderer.domElement.style.display = 'block'
 
     const scene = new THREE.Scene()
+    scene.background = new THREE.Color(RENDER.background)
     const camera = new THREE.PerspectiveCamera(45, 1, 0.5, 40000)
     // near 会在每次渲染时按相机距离自适应（见 render()），far 留够最大缩放
-    scene.add(new THREE.AmbientLight(0xffffff, 0.72))
-    const l1 = new THREE.DirectionalLight(0xffffff, 0.75)
-    l1.position.set(1, 1.2, 1.6)
-    scene.add(l1)
-    const l2 = new THREE.DirectionalLight(0xffffff, 0.3)
-    l2.position.set(-1, -0.8, -1.2)
-    scene.add(l2)
+    // ---- 光照：柔和多光源（强度/方位都来自 renderConfig.LIGHTING）
+    scene.add(new THREE.AmbientLight(0xffffff, LIGHTING.ambient))
+    const hemi = new THREE.HemisphereLight(0xdfe9ff, 0x2b2f38, LIGHTING.hemisphere)
+    scene.add(hemi)
+    const lMain = new THREE.DirectionalLight(0xffffff, LIGHTING.main)
+    lMain.position.set(...LIGHTING.mainPos)
+    scene.add(lMain)
+    const lFill = new THREE.DirectionalLight(0xffffff, LIGHTING.fill)
+    lFill.position.set(...LIGHTING.fillPos)
+    scene.add(lFill)
+    const lRim = new THREE.DirectionalLight(0xbfd4ff, LIGHTING.rim)
+    lRim.position.set(...LIGHTING.rimPos)
+    scene.add(lRim)
+    // ---- 环境贴图：给 MeshPhysicalMaterial 一点环境反射（粗糙度高，不会镜面反光）。
+    // 用一张**程序生成的等距柱状贴图**（canvas 渐变）走 PMREM，不建任何 Mesh ——
+    // 原来自检里专门盯着"不要为单个原子建 THREE.Mesh"，这里也不能破例。
+    if (RENDER.useEnvironment) {
+      try {
+        const cv = document.createElement('canvas')
+        cv.width = 64
+        cv.height = 32
+        const ctx = cv.getContext('2d')
+        if (ctx) {
+          const g = ctx.createLinearGradient(0, 0, 0, 32)
+          g.addColorStop(0, '#4a5a78')
+          g.addColorStop(0.45, '#1b2230')
+          g.addColorStop(1, '#12161f')
+          ctx.fillStyle = g
+          ctx.fillRect(0, 0, 64, 32)
+          // 一块柔光斑（模拟主光方向的天光，给球体一点边缘反射）
+          const rg = ctx.createRadialGradient(14, 8, 1, 14, 8, 12)
+          rg.addColorStop(0, 'rgba(223,233,255,0.85)')
+          rg.addColorStop(1, 'rgba(223,233,255,0)')
+          ctx.fillStyle = rg
+          ctx.fillRect(0, 0, 64, 32)
+        }
+        const tex = new THREE.CanvasTexture(cv)
+        tex.mapping = THREE.EquirectangularReflectionMapping
+        tex.colorSpace = THREE.SRGBColorSpace
+        const pmrem = new THREE.PMREMGenerator(renderer)
+        const envTex = pmrem.fromEquirectangular(tex).texture
+        scene.environment = envTex
+        tex.dispose()
+        pmrem.dispose()
+        stEnv = envTex
+      } catch { /* 环境贴图失败就用纯光照，不影响显示 */ }
+    }
 
     const st = {
       renderer, scene, camera,
@@ -829,6 +990,12 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
     stRef.current = st
 
     const render = () => {
+      // 缩放引起的"屏幕尺度重算"集中在每帧做一次（滚轮事件每帧可能有多个），
+      // 避免同一帧里反复重写几万个实例矩阵 → 掉帧/抖动。
+      if (st._needRescale) {
+        st._needRescale = false
+        try { st.refresh?.() } catch { /* 缩放后重算失败不应打断渲染 */ }
+      }
       const { theta, phi, radius } = st.sph
       const t = st.target
       camera.position.set(
@@ -936,6 +1103,10 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
     let dragging = 0
     let moved = 0
     let last = { x: 0, y: 0 }
+    //: 滚轮"朝光标原子钻"的拾取缓存：同一次滚轮手势沿用**同一个点**，
+    //: 否则画面一移动光标就落到别的原子上，注视点在两个原子之间来回跳 = 抖。
+    let cursorPoint = null
+    let cursorPickAt = { x: 0, y: 0, t: 0 }
     const onDown = (ev) => {
       box.setPointerCapture?.(ev.pointerId)
       dragging = (ev.button === 2 || ev.shiftKey) ? 2 : 1
@@ -1005,29 +1176,42 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
       //   最近 = 最大球直径占视野 1.8 倍（能钻进原子内部）；最远 = 模拟盒 ≈ 视野 1/3
       const lo = st.radiusMin || MIN_RADIUS_A
       const hi = st.radiusMax || MAX_RADIUS_A
-      st.sph.radius = Math.min(hi, Math.max(lo,
+      const after = Math.min(hi, Math.max(lo,
         st.sph.radius * Math.exp(ev.deltaY * ZOOM_PER_DELTA)))
-      // 放大时**朝鼠标下的原子钻**：以前缩放只沿"体系中心 → 相机"这条线走，
-      // 中心附近如果是空的（或想看的原子在别处），就会觉得"缩放到箱内的原子
-      // 被拦住、怎么滚都进不去"（用户实测）。这里命中原子就把注视点按比例
-      // 拉向它，滚几下就能贴到那个原子上。
-      if (st.sph.radius < before) {
-        try {
-          const idx = pickAt(ev.clientX, ev.clientY)
-          const dp = idx === null || idx === undefined
-            ? null : (st.posOf ? st.posOf.get(idx) : null)
-          if (dp !== null && dp !== undefined && data.xyz[dp]) {
-            const [ox, oy, oz] = st.offset || [0, 0, 0]
-            const p = new THREE.Vector3(
-              data.xyz[dp][0] - ox, data.xyz[dp][1] - oy, data.xyz[dp][2] - oz)
-            const k = Math.min(0.4, Math.max(0.06, 1 - st.sph.radius / before))
-            st.target.lerp(p, k)
-          }
-        } catch { /* 拾取失败不影响缩放本身 */ }
+      st.sph.radius = after
+      // 放大时**朝鼠标下的原子钻**（用户要求"能钻进分子的某一处"）。
+      // ⚠️ 抖动根因在这里：以前每个滚轮事件都重新拾取，"光标下那颗原子"会随着
+      // 画面移动而变化 → 注视点在两颗原子之间来回 lerp，看起来就是画面在抖。
+      // 现在**一次手势沿用同一个缓存点**：只有光标移动 >8 px 或隔了 600 ms 才重新拾取。
+      const moved = before - after > 1e-9
+      if (moved) {
+        const now = (typeof performance !== 'undefined' ? performance.now() : Date.now())
+        const stale = !cursorPoint
+          || Math.abs(ev.clientX - cursorPickAt.x) > 8
+          || Math.abs(ev.clientY - cursorPickAt.y) > 8
+          || now - cursorPickAt.t > 600
+        if (stale) {
+          cursorPickAt = { x: ev.clientX, y: ev.clientY, t: now }
+          cursorPoint = null
+          try {
+            const idx = pickAt(ev.clientX, ev.clientY)
+            const dp = idx === null || idx === undefined
+              ? null : (st.posOf ? st.posOf.get(idx) : null)
+            if (dp !== null && dp !== undefined && data.xyz[dp]) {
+              const [ox, oy, oz] = st.offset || [0, 0, 0]
+              cursorPoint = new THREE.Vector3(
+                data.xyz[dp][0] - ox, data.xyz[dp][1] - oy, data.xyz[dp][2] - oz)
+            }
+          } catch { /* 拾取失败不影响缩放本身 */ }
+        }
+        if (cursorPoint) {
+          const k = Math.min(0.5, Math.max(0.06, 1 - after / before))
+          st.target.lerp(cursorPoint, k)
+        }
       }
-      // 缩放会改变"每像素多少 Å"→ 球/棍/盒棱的屏幕尺度跟着变（球棍模型靠这一步才成立：
-      // 拉远靠下限保住可见，靠近让真实比例接管）。变化超过 8% 才重算矩阵，别每格都刷。
-      if (Math.abs(st.sph.radius / before - 1) > 0.08) st.refresh?.()
+      // 尺度重算**推迟到渲染帧里做一次**（见 render()）：以前每个滚轮事件都同步
+      // 重写几万个实例矩阵，连续滚轮时掉帧，也是"抖"的一部分。
+      if (Math.abs(after / before - 1) > 0.005) st._needRescale = true
       kick()
     }
     const onCtx = (ev) => ev.preventDefault()
@@ -1077,6 +1261,7 @@ function Viewer({ data, selected, onlySelected, pendingView = null,
           mm.dispose()
         }
       })
+      try { stEnv?.dispose?.() } catch { /* 环境贴图释放失败可忽略 */ }
       renderer.dispose()
       if (renderer.domElement.parentNode) {
         renderer.domElement.parentNode.removeChild(renderer.domElement)
