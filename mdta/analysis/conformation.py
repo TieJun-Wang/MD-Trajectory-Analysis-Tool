@@ -244,6 +244,73 @@ def _apply_pbc(com: np.ndarray, box) -> np.ndarray:
         return out
 
 
+
+class _WholeCheck:
+    """缓存"每根键在组内位置"的检查器（ag.bonds 每次访问要重建键表，约 3 ms）。"""
+
+    def __init__(self, ag):
+        self.ok = False
+        self.i = self.j = None
+        try:
+            b = np.asarray(ag.bonds.indices, dtype=np.int64).reshape(-1, 2)
+            if b.size == 0:
+                return
+            order = np.asarray(ag.indices, dtype=np.int64)
+            i = np.searchsorted(order, b[:, 0])
+            j = np.searchsorted(order, b[:, 1])
+            if not (np.all(order[np.clip(i, 0, order.size - 1)] == b[:, 0])
+                    and np.all(order[np.clip(j, 0, order.size - 1)] == b[:, 1])):
+                return
+            self.i, self.j = i, j
+            self.ok = True
+        except Exception:                                     # noqa: BLE001
+            self.ok = False
+
+    def check(self, ag, box, max_bond: float = 2.2) -> bool:
+        if not self.ok or self.i is None:
+            return False
+        try:
+            pos = np.asarray(ag.positions, dtype=float)
+            d = pos[self.i] - pos[self.j]
+            if box is not None:
+                L = np.asarray(box[:3], dtype=float)
+                d -= L * np.round(d / np.where(L > 0, L, 1.0))
+            return bool(np.max(np.linalg.norm(d, axis=1)) < max_bond)
+        except Exception:                                     # noqa: BLE001
+            return False
+
+
+def coords_already_whole(ag, box, max_bond: float = 2.2) -> bool:
+    """当前帧的坐标是否**已经是完整分子**（不需要 make_whole 展开）。
+
+    判据：组内每一根键的长度都 < ``max_bond``（默认 2.2 Å，> 任何共价键）。
+    MS 的 .trj 坐标通常是展开的，``positions_for(unwrap=True)`` 里逐碎片 make_whole
+    在 1700 原子的单分子上要 24 ms/帧（实测 graphite GRA），而"坐标本来就完整"
+    时 make_whole 是恒等变换 —— 先花 ~0.1 ms 判定，能省掉这 24 ms。
+    """
+    try:
+        b = ag.bonds
+        if b is None or len(b) == 0:
+            return False
+        idx = np.asarray(b.indices, dtype=np.int64).reshape(-1, 2)
+        if not idx.size:
+            return False
+        # 向量化映射：ag.indices 升序 → searchsorted 一次搞定，避免逐键 dict 查询
+        order = np.asarray(ag.indices, dtype=np.int64)
+        i = np.searchsorted(order, idx[:, 0])
+        j = np.searchsorted(order, idx[:, 1])
+        if not (np.all(order[np.clip(i, 0, order.size - 1)] == idx[:, 0])
+                and np.all(order[np.clip(j, 0, order.size - 1)] == idx[:, 1])):
+            return False
+        pos = np.asarray(ag.positions, dtype=float)
+        d = pos[i] - pos[j]
+        if box is not None:
+            L = np.asarray(box[:3], dtype=float)
+            d -= L * np.round(d / np.where(L > 0, L, 1.0))
+        return bool(np.max(np.linalg.norm(d, axis=1)) < max_bond)
+    except Exception:                                         # noqa: BLE001
+        return False
+
 def _rg_of(pos, w):
     """给定坐标与权重算质量加权 Rg（与 :func:`compute_rg` 同一公式）。"""
     wsum = float(w.sum())
@@ -834,6 +901,9 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
     #: 快路径里被"分子尺度接近半盒"判据挑出来、改用键连通重建的分子（供说明用）
     fast_stats: dict = {}
 
+    #: "坐标是否已完整"的键表检查器（一次性缓存，循环里只做键长比较）
+    whole_chk = _WholeCheck(ag)
+
     for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
         # ---------------------------------------------------------- 快路径
         # 多分子对象用向量化展开（`rg_fast`）：它与 MDAnalysis 的逐碎片展开在
@@ -858,7 +928,13 @@ def analyze_rg(mdt, ag, selection: FrameSelection, *,
                     rg_system[k] = rg_total
                 continue
         # ---- 精确路径（单分子 / 快路径也修不了时）----------------------------
-        pos = positions_for(ag, unwrap=unwrap)
+        # 坐标本来就是完整分子时，positions_for(unwrap=True) 的 make_whole 是
+        # 恒等变换，却要逐碎片写 Python 循环（实测 1700 原子单分子 24 ms/帧）。
+        # 先用一次向量化的键长检查判定，能省就省（结果完全一致）。
+        if unwrap and whole_chk.check(ag, u.dimensions):
+            pos = np.asarray(ag.positions, dtype=float)
+        else:
+            pos = positions_for(ag, unwrap=unwrap)
         if want_mol:
             if slices:
                 for j, sl in enumerate(slices):
