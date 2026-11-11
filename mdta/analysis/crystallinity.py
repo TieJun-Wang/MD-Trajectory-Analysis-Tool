@@ -254,14 +254,23 @@ def _pair_unit_vectors(mdt, ag, pairs: np.ndarray, selection: FrameSelection,
     out = np.full((n_f, pairs.shape[0], 3), np.nan, dtype=float)
     if pairs.size == 0:
         return out
-    abs_to_local = {int(a): i for i, a in enumerate(np.asarray(ag.indices))}
-    try:
-        i0 = np.array([abs_to_local[int(x)] for x in pairs[:, 0]])
-        i1 = np.array([abs_to_local[int(x)] for x in pairs[:, 1]])
-    except KeyError as exc:
-        raise ValueError(f"链段原子 {exc} 不在所选链内") from exc
+    order = np.asarray(ag.indices, dtype=np.int64)
+    i0 = np.searchsorted(order, pairs[:, 0])
+    i1 = np.searchsorted(order, pairs[:, 1])
+    if not (np.all(order[np.clip(i0, 0, order.size - 1)] == pairs[:, 0])
+            and np.all(order[np.clip(i1, 0, order.size - 1)] == pairs[:, 1])):
+        raise ValueError("链段原子不在所选链内")
+    # 坐标本来就完整时，positions_for(unwrap=True) 的 make_whole 是恒等变换，
+    # 却要逐碎片 Python 循环（大体系实测 3~24 ms/帧）→ 用缓存的键表检查跳过。
+    from .conformation import _WholeCheck
+
+    whole = _WholeCheck(ag)
+    u = mdt.universe
     for k, (frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
-        pos = positions_for(ag, unwrap=True)
+        if whole.check(ag, u.dimensions):
+            pos = np.asarray(ag.positions, dtype=float)
+        else:
+            pos = positions_for(ag, unwrap=True)
         v = pos[i1] - pos[i0]
         out[k] = v
     return out
