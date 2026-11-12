@@ -231,8 +231,27 @@ def repair_fragmented_bonds(universe, fudge_factor: float | None = None,
     fudge = DEFAULT_FUDGE if fudge_factor is None else float(fudge_factor)
     max_r = float(radii[radii > 0].max()) if np.any(radii > 0) else 1.8
     cutoff = max(0.9, 2.0 * max_r * fudge)
-    pairs = capped_distance(pos, pos, max_cutoff=cutoff, box=u.dimensions,
-                            return_distances=True)
+    # ⚠️ 没有周期盒时 MDAnalysis 的 capped_distance 会退化成**暴力 N² 两两比较**
+    # （实测 47681 原子的 .tpr 在这里跑了 98 s 还没完，内存也暴涨 —— 用户报告的
+    # "单独读取 adk_oplsaa.tpr 卡死 + OOM" 就是这一处）。
+    # 补键只对小体系的"碎片链"有意义，所以：
+    #   · 原子数 > 30,000 → 一律跳过；
+    #   · 没有周期盒 → 只对 ≤8,000 原子做（8k 的暴力搜索 ~数千万对，仍在秒级），
+    #     更大的无盒体系直接跳过（宁可少补键，也不能卡死/OOM）。
+    box = u.dimensions
+    if int(n) > 30_000:
+        info["skipped"] = (f"原子数 {n:,} 超过补键上限 30,000，"
+                           f"不做按距离补键（避免 O(N²) 卡死）")
+        info["components_after"] = int(comps0)
+        return info
+    box_ok = box is not None and bool(np.all(np.asarray(box[:3], dtype=float) > 0))
+    if not box_ok and int(n) > 8_000:
+        info["skipped"] = (f"没有周期盒且原子数 {n:,} > 8,000："
+                           f"距离搜索会退化成 O(N²)，跳过按距离补键")
+        info["components_after"] = int(comps0)
+        return info
+    pairs = capped_distance(pos, pos, max_cutoff=cutoff,
+                            box=box if box_ok else None, return_distances=True)
     pairs_idx = np.asarray(pairs[0]) if isinstance(pairs, tuple) else np.asarray(pairs)
     dists = np.asarray(pairs[1]) if isinstance(pairs, tuple) else None
     if pairs_idx.size == 0:

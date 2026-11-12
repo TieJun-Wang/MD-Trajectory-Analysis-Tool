@@ -863,6 +863,15 @@ class MDTrajectory:
         几个碎片（实测 20PE30-10PS20：5547 原子本应是 30 条链，却被切成 48 个碎片、
         还有 8 个孤立原子，苯环一个也认不出来）。分量内部一根都不新增，
         所以不会凭空造出环。
+
+        ⚠️ 这一步**绝不能在大体系上跑**（用户实测：单独打开 47681 原子的
+        ``adk_oplsaa.tpr`` 会"卡死 + 内存暴涨"）。原因在 ``repair_fragmented_bonds``
+        里的 ``capped_distance``：没有周期盒时 MDAnalysis 退化成**暴力 N² 两两比较**
+        （47k 原子 ≈ 2.3e9 对，实测 98 s、内存也顶不上去）。所以这里先设三道闸：
+          ① 力场拓扑（``.tpr/.psf/.dms``）键表来自力场参数，**本就权威**，不补；
+          ② 原子数超过 ``AUTO_GUESS_MAX_ATOMS`` 的体系直接跳过（补键只对小体系
+             的"碎片链"有意义）；
+          ③ 没有周期盒时也不做（§ 见 ``repair_fragmented_bonds`` 内部的兜底）。
         """
         import numpy as np
 
@@ -871,6 +880,12 @@ class MDTrajectory:
             return
         if getattr(self, "guess_bonds", None) is False:
             return                    # 用户显式要求「按拓扑原样」→ 不自动补键
+        suf = Path(self.topology or "").suffix.lower()
+        if suf in FORCE_FIELD_BOND_SUFFIXES:
+            # 力场拓扑的"孤立原子"常常是 TIP4P 的 M 位点 / 约束粒子，是正常的。
+            return
+        if int(u.atoms.n_atoms) > 30_000:
+            return                    # 大体系不补键（暴力距离搜索会 OOM/卡死）
         try:
             nb = len(u.bonds)
         except Exception:                                     # noqa: BLE001
@@ -898,12 +913,11 @@ class MDTrajectory:
             return
         n_comp = len({find(i) for i in range(n)})
         n_res = int(u.residues.n_residues)
-        # 判据：连通分量数 > 残基数（每条分子至少 1 个残基），或存在孤立原子
-        isolated = int(np.sum(np.bincount(
-            np.asarray([int(b[0].index) for b in u.bonds]
-                       + [int(b[1].index) for b in u.bonds]),
-            minlength=n) == 0)) if nb else n
-        if n_comp <= max(n_res, 1) and isolated == 0:
+        # 判据：连通分量数 > 残基数（每条分子至少 1 个残基）。
+        # ⚠️ 不再要求"没有孤立原子"：孤立原子本身就是一个分量，已经被 n_comp 算进去了；
+        #    而力场拓扑里的 M 位点/约束粒子常常是孤立原子（AdK 的 .tpr 有 11084 个），
+        #    以前它们会把每个正常体系都拖进"按距离补键"的重活里。
+        if n_comp <= max(n_res, 1):
             return
         try:
             from .topology import repair_fragmented_bonds
@@ -914,10 +928,12 @@ class MDTrajectory:
             return
         if info.get("added"):
             self.load_notes.append(
-                f"拓扑键表不全（孤立原子 {isolated} 个，{n_comp} 个连通分量 > "
-                f"{n_res} 个残基）：已在**不同分量之间**补 {info['added']} 根键，"
+                f"拓扑键表不全（{n_comp} 个连通分量 > {n_res} 个残基）："
+                f"已在**不同分量之间**补 {info['added']} 根键，"
                 f"连通分量 {info['components_before']} → "
                 f"{info['components_after']}（分子划分按补后的键表）")
+        elif info.get("skipped"):
+            self.load_notes.append(f"拓扑键表疑似不全，但未补键：{info['skipped']}")
 
     def _maybe_guess_bonds(self) -> None:
         """按共价半径补/修键表，把分子与链的划分弄对。
