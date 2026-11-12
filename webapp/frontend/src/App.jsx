@@ -91,7 +91,9 @@ export default function App() {
     density_mode: 'mass',
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
     // 「分子质心」会大一圈（分子内振动/转动被去掉），两边不能直接比。
-    rdf_mode: 'inter', rdf_nbins: 120, msd_object: 'atom',
+    // RDF 设置只留三项（用户要求）：最大 r / 分箱数 / 配对模式；
+    // 默认 12 / 120 / 总体（total）。
+    rdf_mode: 'total', rdf_nbins: 120, msd_object: 'atom',
     rdf_distance: 'minimage', rdf_drop_overlap: '', rdf_rho_scale: '',
     // VACF 的 τ 上限（帧）；留空 = 全段（与 Forcite 一样逐 lag 全给）
     vacf_max_lag: '',
@@ -111,8 +113,24 @@ export default function App() {
     rdf2d_rmax: 70, rdf2d_nbins: 140, slab_lo: '', slab_hi: '', comdist_pbc: false,
   })
   const [primary, setPrimary] = useState({ mode: 'auto' })
+  //: **真正决定参与分析**的组分（第 4 部分「参与分析的对象」勾选）
   const [components, setComponents] = useState([])
+  //: 第 3 部分（结构选择）里**不展示**的组分：只影响第 4 部分的可选列表，
+  //: 不直接决定谁参与分析（用户实测：在第 3 部分没勾的组分，RDF 还是会跑出来）
+  const [hiddenComps, setHiddenComps] = useState([])
   // 分析集合（Set）：定义 + 后端预览（原子数 / 分子数 / 追踪方式）
+  /** 第 3 部分的组分勾选：只决定**第 4 部分是否展示**该组分；
+   *  取消展示时顺手把它从「参与分析」里摘掉（看不见的组分不该还在算）。 */
+  const toggleShownComp = (name) => {
+    const hiding = !hiddenComps.includes(name)
+    setHiddenComps((prev) => (hiding ? [...prev, name] : prev.filter((c) => c !== name)))
+    if (hiding) {
+      setComponents((prev) => prev.filter((c) => c !== name))
+      setPrimary((cur) => (cur && cur.mode === 'component' && cur.name === name
+        ? { mode: 'auto' } : cur))
+    }
+  }
+
   const [sets, setSets] = useState([])
   const [setsInfo, setSetsInfo] = useState([])
 
@@ -583,18 +601,9 @@ export default function App() {
         rdf: { rmax: Number(params.rmax),
                nbins: Math.max(2, Number(params.rdf_nbins) || 120),
                mode: params.rdf_mode,
-               // Forcite 口径（折回主盒 / 键连通分量分子 / inter+intra 可加）
-               forcite: params.rdf_forcite === true,
-               // 距离口径：minimage=周期最小镜像（默认，与 InterRDF 一致）；
-               // cluster=无周期（MK 簇模式：按原始坐标算距离）
-               distance: params.rdf_distance || 'minimage',
-               // 伪重叠分子对剔除阈值：MS 的 .trj 是展开坐标，不同分子的原子经
-               // 最小镜像可能落到 0.2~1.5 Å（物理不可能，Forcite 的分子间 RDF 里
-               // 没有）。留空=不剔除；填 1.7 即复现 Forcite 在 r<1.7 Å 为 0 的口径。
-               drop_overlap: optNum(params.rdf_drop_overlap),
-               // 归一化密度因子（g 除以它）：Forcite 的分子间曲线 =
-               // 我们的「无周期簇模式」×2.95，即 rho_scale≈0.339。
-               rho_scale: optNum(params.rdf_rho_scale) || 1 },
+               // Forcite 口径旋钮已从界面移除（后端仍保留参数，默认即
+               // MDAnalysis InterRDF 口径，不再从界面下发）。
+               forcite: false },
         // `remove_drift`：默认**关**（= Materials Studio Forcite 的口径，实测逐点一致）。
         // NPT 体系里整盒平移会把 MSD 抬起来，那时把「减去整体漂移」勾上。
         // `unwrap`：不再让用户选，按轨迹来源自动定 ——
@@ -1031,6 +1040,10 @@ export default function App() {
                                         sets={sets} setsInfo={setsInfo}
                                         onSetsChange={applySets}
                                         onRenameSet={renameSet}
+                                        shownComps={(sess?.components || [])
+                                          .map((c) => c.name)
+                                          .filter((n) => !hiddenComps.includes(n))}
+                                        onToggleShown={toggleShownComp}
                                         components={components}
                                         onToggleComponent={(name) => {
                                           // 集合的参与状态有两个入口：分析集合行里的
@@ -1062,6 +1075,7 @@ export default function App() {
                                           setPrimary={setPrimary}
                                           components={components}
                                           setComponents={setComponents}
+                                          hidden={hiddenComps}
                                           sets={sets} setsInfo={setsInfo}
                                           onSetsChange={applySets}
                                           onRenameSet={renameSet} />

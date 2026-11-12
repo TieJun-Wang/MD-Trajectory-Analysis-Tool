@@ -16,7 +16,7 @@ import { fmtSec } from '../format'
  * `onSetsChange`（变更回调），和原来的 SelectionBlock 用法一致。
  */
 export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
-                          onRenameSet = null,
+                          onRenameSet = null, shownComps = null, onToggleShown = null,
                           selectedCount = 0, onCreateFromIndices = null,
                           onHighlight = null, activeSet = '',
                           onFilterElement = null, activeElement = '',
@@ -258,21 +258,25 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
         {autoComps.length > 0 && (
           <div className="mt4">
             <div className="tree-mini dim" style={{ padding: '2px 0 3px' }}>
-              自动识别的组分（勾上就参与分析，和「分析设置 → 分析对象」是同一份选择）
+              自动识别的组分（这里只决定**下一步「分析设置」里显不显示**该组分；
+              真正决定谁参与分析的是第 4 部分「参与分析的对象」）
             </div>
             <div className="sets-list">
               {autoComps.map((c) => {
-                const on = (components || []).includes(c.name)
+                // ⚠️ 这里的勾选**不再直接参与分析**：它只控制该组分是否出现
+                //    在第 4 部分的可选列表里（用户要求：第 3 部分只是"展示判断"）。
+                const on = shownComps ? shownComps.includes(c.name) : true
                 return (
                   <div key={c.name}
                        className={`set-row${on ? '' : ' off'}`}>
                     <label className="check"
-                           title={(on ? '点此取消参与分析' : '点此参与分析')
+                           title={(on ? '点此不再展示给「分析设置」' : '点此展示给「分析设置」')
                              + `\n${Number(c.n_atoms || 0).toLocaleString()} 原子`
                              + (c.n_residues != null ? ` / ${c.n_residues} 残基` : '')
-                             + (c.n_molecules != null ? ` / ${c.n_molecules} 个分子` : '')}>
+                             + (c.n_molecules != null ? ` / ${c.n_molecules} 个分子` : '')}
+                      >
                       <input type="checkbox" checked={on}
-                             onChange={() => onToggleComponent?.(c.name)} />
+                             onChange={() => onToggleShown?.(c.name)} />
                       <b>{c.name}</b>
                     </label>
                     <span className="set-desc">
@@ -389,17 +393,33 @@ const COMPONENT_USES = [
 ]
 
 export function SelectionBlock({ sess, primary, setPrimary, components, setComponents,
-                                      sets = [], setsInfo = [], onSetsChange = null }) {
+                                      hidden = [], sets = [], setsInfo = [],
+                                      onSetsChange = null }) {
   if (!sess) return null
   const chains = sess.chains || []
-  const comps = sess.components || []
+  // 「参与分析的对象」列表 = 候选组分 − 第 3 部分里没勾选展示的
+  const comps = (sess.components || [])
+    .filter((c) => !hidden.includes(c.name))
 
+  //: 某个组分/集合现在是否「参与分析」：普通组分看 components，集合看 sets[].on
+  //  （集合的参与开关只有 `on` 一处；点胶囊时两边一起翻，否则界面上关了
+  //   开跑时又会按 sets 的 on=true 把它加回去 —— 用户实测踩过）
+  const isOn = (c) => (String(c.name).startsWith('set:')
+    ? (sets || []).find((x) => `set:${x.name}` === c.name)?.on !== false
+    : components.includes(c.name))
   const toggleComponent = (name) => {
-    setComponents(components.includes(name)
-      ? components.filter((c) => c !== name)
-      : [...components, name])
+    const nm = String(name)
+    if (nm.startsWith('set:')) {
+      const base = nm.slice(4)
+      onSetsChange?.((sets || []).map((x) => (x.name === base
+        ? { ...x, on: x.on === false } : x)))
+      return
+    }
+    setComponents(components.includes(nm)
+      ? components.filter((c) => c !== nm)
+      : [...components, nm])
   }
-  const nOn = comps.filter((c) => components.includes(c.name)).length
+  const nOn = comps.filter((c) => isOn(c)).length
   const primaryTip = '主链（分析对象）用来算这些：\n'
     + PRIMARY_USES.map(([k, v]) => `· ${k}：${v}`).join('\n')
   const compTip = '「参与分析的对象」用来算这些（一行一个功能）：\n'
@@ -483,7 +503,7 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
         <div className="chips-pick">
           {comps.map((c) => (
             <button key={c.name}
-                    className={`chip-pick ${components.includes(c.name) ? 'on' : ''}`}
+                    className={`chip-pick ${isOn(c) ? 'on' : ''}`}
                     onClick={() => toggleComponent(c.name)}
                     title={`${Number(c.n_atoms || 0).toLocaleString()} 原子`
                       + (c.n_residues != null ? ` / ${c.n_residues} 残基` : '')
@@ -763,37 +783,18 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         </span>,
         '质量密度', 5),
     ]],
+    // RDF 设置只留三项（用户要求）：最大 r / 分箱数 / 配对模式；
+    // Forcite 口径相关的三个旋钮已从界面移除（后端仍保留参数，默认 = MDAnalysis 口径）。
     ['径向分布函数 RDF', ['rdf'], [
-      F('rmax', 'RDF 最大 r (Å)', 'input', numInput('', { step: 1, ...p('rmax') })),
+      F('rmax', 'RDF 最大 r (Å)', 'input', numInput('12', { step: 1, ...p('rmax') })),
       F('rdf_nbins', 'RDF 分箱数', 'input',
         numInput('120', { step: 1, min: 1, ...p('rdf_nbins') }), '步长 = rmax/分箱数'),
-      F('rdf_forcite', 'Forcite 口径', 'check',
-        chk('rdf_forcite', '按 Forcite 口径',
-          '默认不勾（与 MDAnalysis InterRDF 逐点一致）。\n'
-          + '勾上后：① 统计前把坐标折回主盒、② 分子用键连通分量划分、'
-          + '③ inter/intra 与 total 共用分母（于是 total = inter + intra）。\n'
-          + '这三条是 Forcite 导出的实际口径，对 PE50 这类多组分体系尤其必要。'),
-        '按 Forcite 口径', 2),
       F('rdf_mode', 'RDF 配对模式', 'select', sel('rdf_mode', [
-        ['inter', '分子间（默认）'],
+        ['total', '总体（默认）'],
+        ['inter', '分子间'],
         ['intra', '分子内'],
-        ['total', '总体'],
         ['all', '三者对比'],
       ])),
-      // 三个「Forcite 口径」旋钮**挤在一格里**（同一行内联，能自动换行）：
-      // 用户实测：每个都占一整行时面板太长、还要左右滑动才能看全。
-      F('rdf_forcite_knobs', 'RDF 距离开径', 'select',
-        <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center',
-                       flexWrap: 'wrap', whiteSpace: 'normal' }}>
-          {sel('rdf_distance', [['minimage', '最小镜像'], ['cluster', '无周期']])}
-          <span style={{ color: 'var(--dim)', whiteSpace: 'nowrap' }}>伪重叠</span>
-          {numInput('关', { step: 0.1, min: 0, style: { width: 46, minWidth: 46 },
-                           ...p('rdf_drop_overlap') })}
-          <span style={{ color: 'var(--dim)', whiteSpace: 'nowrap' }}>ρ因子</span>
-          {numInput('1', { step: 0.01, min: 0.01, style: { width: 50, minWidth: 50 },
-                          ...p('rdf_rho_scale') })}
-        </span>,
-        '', 6),
     ]],
     ['二面角分析', ['dihedral'], [
       F('dihedral_mode', '二面角模式', 'select', sel('dihedral_mode', [
