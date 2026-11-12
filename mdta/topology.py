@@ -771,6 +771,158 @@ def bond_scale_report(ag, n_sample: int = 800) -> dict:
     return out
 
 
+def count_angles_dihedrals(bonds, n_atoms: int) -> tuple[int, int]:
+    """由键表**解析地**算出角与二面角的条数（不枚举，O(键数)）。
+
+    公式：角 = ``Σ_atom C(deg, 2)``；二面角 = ``Σ_bond (deg_i − 1)(deg_j − 1)``。
+    实测线形烷烃 ``C_nH_{2n+2}``：``C60H122``（181 根键）→ 360 个角 / 531 个二面角，
+    与 :func:`derive_angles_dihedrals` 实际枚举出来的条数逐项一致。
+
+    「体系信息」在拓扑没有角/二面角表（且没能派生出来）时用它兜底，
+    这样面板里的数字不会莫名其妙是 0。
+    """
+    b = np.asarray(bonds, dtype=np.int64).reshape(-1, 2)
+    if b.size == 0 or n_atoms <= 0:
+        return 0, 0
+    deg = np.bincount(b.ravel(), minlength=int(n_atoms))
+    n_ang = int(np.sum(deg * (deg - 1) // 2))
+    n_dih = int(np.sum((deg[b[:, 0]] - 1) * (deg[b[:, 1]] - 1)))
+    return n_ang, n_dih
+
+
+def derive_angles_dihedrals(universe, *, max_items: int = 3_000_000,
+                            max_atoms: int = 400_000) -> dict:
+    """由**键表**派生出角（angle）与二面角（dihedral）两张拓扑表。
+
+    为什么需要
+    ----------
+    ``.tpr`` / ``.psf`` / ``.prmtop`` 自带键、角、二面角表；而 ``.gro``（以及没有
+    ``CONECT`` 的 ``.pdb``）只有我们猜出来的键 —— MDAnalysis 的 ``angles`` /
+    ``dihedrals`` 是**独立**的拓扑属性，不会由键自动推出来，于是：
+
+    - 界面的「体系信息」里"键 / 角 / 二面角"读成 ``3620 / 0 / 0``
+      （用户实测 20 条 DP=30 的 PE：3620 根键，角与二面角都是 0）；
+    - 二面角分析的 ``mode='topology'`` 直接抛 ``NoDataError: This Universe does
+      not contain dihedrals information``，退回 0 个角、面板空白。
+
+    两张表都能从键表唯一确定（角 = 同一中心原子的邻居两两配对；二面角 =
+    一根键两端原子"除对方以外的邻居"两两配对），所以这里直接按键表枚举，
+    不依赖 MDAnalysis 已弃用的 ``topology.guessers.guess_angles/guess_dihedrals``
+    （那两个在 2.10 里是 deprecated 包装，``guess_dihedrals(bonds)`` 实测返回的是
+    三元组，与角表一模一样，不能用）。
+
+    数量校验（线形烷烃 ``C_nH_{2n+2}``）：角 = ``Σ C(deg,2)``，二面角 =
+    ``Σ_bond (deg_i−1)(deg_j−1)``。实测 1 条 C60H122：181 根键 → 360 个角 /
+    531 个二面角，与公式逐项一致。
+
+    返回 ``{"added": [...], "n_angles": int, "n_dihedrals": int, "skipped": str}``。
+    """
+    info: dict = {"added": [], "n_angles": 0, "n_dihedrals": 0, "skipped": ""}
+    u = universe
+    try:
+        bonds = np.asarray(u.bonds.indices, dtype=np.int64).reshape(-1, 2)
+    except Exception:                                        # noqa: BLE001
+        info["skipped"] = "拓扑没有键表，无法派生角/二面角"
+        return info
+    if bonds.size == 0:
+        info["skipped"] = "拓扑没有键表，无法派生角/二面角"
+        return info
+
+    for attr in ("angles", "dihedrals"):
+        try:
+            cur = getattr(u, attr, None)
+            info["n_angles" if attr == "angles" else "n_dihedrals"] = (
+                int(len(cur)) if cur is not None else 0)
+        except Exception:                                    # noqa: BLE001
+            pass
+    if info["n_angles"] and info["n_dihedrals"]:
+        info["skipped"] = "拓扑已自带角/二面角表，不重复派生"
+        return info
+
+    n_at = int(u.atoms.n_atoms)
+    if n_at > int(max_atoms):
+        info["skipped"] = (f"原子数 {n_at:,} 超过派生上限 {max_atoms:,}，"
+                           f"未派生角/二面角（「体系信息」里这两个数会显示 0）")
+        return info
+
+    # ---- 邻接表（CSR）
+    src = np.concatenate([bonds[:, 0], bonds[:, 1]])
+    dst = np.concatenate([bonds[:, 1], bonds[:, 0]])
+    order = np.argsort(src, kind="stable")
+    src_s, dst_s = src[order], dst[order]
+    deg = np.bincount(src_s, minlength=n_at)
+    starts = np.concatenate([[0], np.cumsum(deg)])
+    nbr = [dst_s[starts[i]:starts[i + 1]] for i in range(n_at)]
+
+    deg_i = deg[bonds[:, 0]]
+    deg_j = deg[bonds[:, 1]]
+    n_ang_est, n_dih_est = count_angles_dihedrals(bonds, n_at)
+    if n_ang_est + n_dih_est > int(max_items):
+        info["skipped"] = (f"预计要派生 {n_ang_est + n_dih_est:,} 条角/二面角，"
+                           f"超过上限 {max_items:,}，已跳过（避免吃内存）")
+        info["n_angles_estimate"] = n_ang_est
+        info["n_dihedrals_estimate"] = n_dih_est
+        return info
+
+    # ---- 角：按中心原子度数分组，同度数组用一次 numpy 广播算完
+    from itertools import combinations
+
+    ang_rows: list[np.ndarray] = []
+    max_deg = int(deg.max()) if deg.size else 0
+    for k in range(2, max_deg + 1):
+        ats = np.flatnonzero(deg == k)
+        if ats.size == 0:
+            continue
+        combos = np.asarray(list(combinations(range(k), 2)), dtype=np.int64)
+        base = np.stack([nbr[int(a)] for a in ats])          # (n, k)
+        a_idx = base[:, combos[:, 0]]                        # (n, m)
+        b_idx = base[:, combos[:, 1]]
+        c_idx = np.repeat(ats[:, None], combos.shape[0], axis=1)
+        ang_rows.append(np.stack([a_idx.ravel(), c_idx.ravel(),
+                                  b_idx.ravel()], axis=1))
+    angles = (np.vstack(ang_rows) if ang_rows
+              else np.zeros((0, 3), dtype=np.int64))
+
+    # ---- 二面角：按"键两端原子的度数对"分组，笛卡尔积后剔掉 a==j / b==i
+    dih_rows: list[np.ndarray] = []
+    for di in range(1, max_deg + 1):
+        for dj in range(1, max_deg + 1):
+            sel = bonds[(deg_i == di) & (deg_j == dj)]
+            if sel.size == 0:
+                continue
+            ii, jj = sel[:, 0], sel[:, 1]
+            A = np.stack([nbr[int(i)] for i in ii])           # (n, di)，含 j
+            B = np.stack([nbr[int(j)] for j in jj])           # (n, dj)，含 i
+            a2 = np.repeat(A, dj, axis=1)                     # (n, di*dj)
+            b2 = np.tile(B, (1, di))
+            i2 = np.repeat(ii[:, None], di * dj, axis=1)
+            j2 = np.repeat(jj[:, None], di * dj, axis=1)
+            keep = (a2 != j2) & (b2 != i2)        # 去掉 a==j / b==i 这两类退化的
+            dih_rows.append(np.stack([a2[keep], i2[keep], j2[keep],
+                                      b2[keep]], axis=1))
+    dihedrals = (np.vstack(dih_rows) if dih_rows
+                 else np.zeros((0, 4), dtype=np.int64))
+
+    try:
+        u.add_TopologyAttr("angles", angles)
+        info["added"].append("angles")
+        info["n_angles"] = int(angles.shape[0])
+    except Exception:                                        # noqa: BLE001
+        pass
+    try:
+        u.add_TopologyAttr("dihedrals", dihedrals)
+        info["added"].append("dihedrals")
+        info["n_dihedrals"] = int(dihedrals.shape[0])
+    except Exception:                                        # noqa: BLE001
+        pass
+    info["n_angles_estimate"] = n_ang_est
+    info["n_dihedrals_estimate"] = n_dih_est
+    if info["n_angles"] != n_ang_est or info["n_dihedrals"] != n_dih_est:
+        info["skipped"] = (f"派生数量与公式不一致：角 {info['n_angles']} vs "
+                           f"{n_ang_est}，二面角 {info['n_dihedrals']} vs {n_dih_est}")
+    return info
+
+
 def ensure_object_attrs(universe, *, verbose: bool = False) -> dict:
     """补齐**对象模型必需、但 ``.gro`` 常常不提供**的三个属性。
 

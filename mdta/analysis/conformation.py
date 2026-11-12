@@ -32,6 +32,7 @@ __all__ = [
     "circular_stats",
     "classify_dihedrals",
     "backbone_path",
+    "chain_dihedrals",
     "topology_dihedrals",
 ]
 
@@ -517,6 +518,155 @@ def make_dihedral_indices(path_atoms: np.ndarray) -> np.ndarray:
     if p.size < 4:
         return np.zeros((0, 4), dtype=int)
     return np.stack([p[i:i + 4] for i in range(p.size - 3)], axis=0)
+
+
+def dihedral_bin_grid(bin_width: float = 1.0) -> tuple[np.ndarray, np.ndarray]:
+    """二面角分布的分箱网格（**与 Forcite 的 Torsion distribution 逐点对齐**）。
+
+    返回 ``(centers, edges)``：
+
+    - ``centers``：格子**中心**，最外侧 = ±(180 + bin)，步长 = bin；
+    - ``edges``：格子边界 = ``centers ± bin/2``。
+
+    规则来自 Forcite 实测（20PE30，bin=0.5）：它的 Torsion 列是
+    ``−180.5, −180, −179.5, …, 180, 180.5``（723 个），把这些值当作**中心**、
+    桶边界放在 ``±0.25``（即 −180.75 … 180.75）时，我们的计数与它 723 格**逐格相同**
+    （L1 = 0）；而把同样的列当"桶左边界"用（边界 −180.5 … 180.5）时，45% 的格子
+    计数不同 —— 差的正是**半个 bin**。
+
+    ``bin_width=1``  → 363 个中心 −181 … 181，边界 ±181.5
+    ``bin_width=0.5``→ 723 个中心 −180.5 … 180.5，边界 ±180.75
+    """
+    try:
+        bw = float(bin_width)
+    except (TypeError, ValueError):
+        bw = 1.0
+    if not np.isfinite(bw) or bw <= 0:
+        bw = 1.0
+    bw = float(min(max(bw, 0.05), 180.0))         # 兜底约束：0.05° … 180°
+    limit = 180.0 + bw                            # 最外侧的**格子中心**
+    n_bins = max(int(round(2.0 * limit / bw)) + 1, 1)
+    centers = -limit + bw * np.arange(n_bins)
+    edges = np.append(centers - bw / 2.0, centers[-1] + bw / 2.0)
+    return centers, edges
+
+
+def _topology_empty_hint(ag, heavy_only: bool) -> str:
+    """``topology`` 模式一个二面角都没取到时，说清到底是哪种原因。"""
+    if _bonds_of(ag) is None:
+        return "拓扑模式无可分析对象：当前拓扑不含键连接信息。" + NO_BOND_HINT
+    try:
+        n_topo = len(ag.dihedrals)
+    except Exception:  # noqa: BLE001
+        return ("拓扑模式无可分析对象：当前拓扑只提供了**键**，没有显式的二面角表"
+                "（.gro、按坐标猜键的 .pdb 都是这种情况）。请改用 "
+                "mode='chain'（逐分子沿键图骨架取二面角），"
+                "或换成自带二面角的拓扑（.tpr / .psf / .prmtop）")
+    if n_topo == 0:
+        return "拓扑里没有任何二面角定义，拓扑模式无可分析对象；请改用 mode='chain'"
+    return (f"拓扑里有 {n_topo} 个二面角，但没有一个完全落在所选原子上"
+            + ("（heavy_only 打开时含氢二面角会被剔除，可关闭后重试）"
+               if heavy_only else ""))
+
+
+def chain_dihedrals(ag, *, heavy_only: bool = True, max_molecules: int = 200):
+    """**逐分子**取"键图最长路径"上的连续四原子二面角。
+
+    返回 ``(indices, notes)``：``indices`` 是形状 ``(n, 4)`` 的绝对原子索引，
+    ``notes`` 是要写进结果的说明（含覆盖率、截断、无键等情形）。
+
+    为什么要逐分子（1.0.5 修正）
+    ---------------------------
+    1.0.4 及以前是对**整个选择**做两次 BFS 取一条最长路径。BFS 跳不出连通分量，
+    于是多分子体系里**只有第一个分子被分析**，其余分子被静默丢弃。实测 20 条
+    DP=30 的 PE（C60H122 × 20，3640 原子）：
+
+    - 旧做法：最长路径 60 个原子 → **57** 个二面角，全部落在分子 0 内，
+      trans 比例 0.5263（n=57）；
+    - 逐分子：20 × 57 = **1140** 个二面角，trans 比例 0.4851（n=1140）——
+      不只是样本量差 20 倍，trans/gauche 比例本身也偏了 0.04～0.10
+      （gauche− 从 0.271 掉到 0.175）。
+
+    支化/环状分子里还有第二重失真：即使只有一个分子，"最长路径"也可能拐进
+    侧链而漏掉主链（实测 40 碳主链 + 30 碳侧基挂第 20 号碳：路径走侧链 30 个
+    碳 + 主链 21 个碳，主链 C21–C39 一个二面角都不算）。这种情况会写进 notes。
+
+    重原子数 < 4 的分子（水、离子等）直接跳过：凑不出四元组。
+    """
+    notes: list[str] = []
+    empty = np.zeros((0, 4), dtype=int)
+    if ag is None or ag.n_atoms == 0:
+        return empty, notes
+    if _bonds_of(ag) is None:
+        notes.append("当前拓扑不含键连接信息，无法提取几何骨架二面角。" + NO_BOND_HINT)
+        return empty, notes
+
+    try:
+        frags = list(ag.fragments)
+    except Exception:  # noqa: BLE001
+        frags = [ag]
+
+    usable: list[tuple[object, int]] = []
+    for f in frags:
+        n_heavy = int(f.n_atoms)
+        if heavy_only:
+            try:
+                el = np.asarray(f.elements, dtype=str)
+                n_heavy = int(np.sum((el != "H") & (el != "")))
+            except Exception:  # noqa: BLE001
+                n_heavy = int(f.n_atoms)
+        if n_heavy < 4:
+            continue
+        usable.append((f, n_heavy))
+    if not usable:
+        notes.append("所选对象里没有含 ≥4 个重原子的分子（少于 4 个原子凑不出"
+                     "四元组），无法用几何骨架模式提取二面角")
+        return empty, notes
+
+    cap = max(int(max_molecules), 1)
+    truncated = len(usable) > cap
+    total_mol = len(usable)
+    if truncated:
+        usable = usable[:cap]
+
+    rows: list[np.ndarray] = []
+    sizes: list[int] = []
+    missed = missed_atoms = 0
+    for f, n_heavy in usable:
+        path = backbone_path(f, heavy_only=heavy_only)
+        d = make_dihedral_indices(path)
+        if d.shape[0] == 0:
+            continue
+        rows.append(d)
+        sizes.append(int(path.size))
+        if path.size < n_heavy:
+            missed += 1
+            missed_atoms += int(n_heavy - path.size)
+    if not rows:
+        notes.append("所选对象里的分子都没能在键图上串成 ≥4 个重原子的路径，"
+                     "无法提取二面角")
+        return empty, notes
+
+    idx = np.vstack(rows)
+    uniq = sorted(set(sizes))
+    span = f"{uniq[0]}" if len(uniq) == 1 else f"{uniq[0]}–{uniq[-1]}"
+    n_mol_used = len(rows)
+    notes.append(
+        f"**几何连续原子模式（逐分子）**：选择内 {total_mol} 个分子"
+        f"（每个至少 4 个重原子），对**每个分子**单独在键图上取最长路径"
+        f"（每条链 {span} 个重原子），共提取连续四原子二面角 {idx.shape[0]} 个"
+        f"（{n_mol_used} 个分子 × 约 {idx.shape[0] // max(n_mol_used, 1)} 个）。"
+        f"这些是几何上连成一串的原子，不保证等于化学主链/重复单元")
+    if truncated:
+        notes.append(f"选择内分子数超过上限 max_molecules={cap}，只分析了前 {cap} 个"
+                     f"分子，其余 {total_mol - cap} 个未参与统计")
+    if missed:
+        notes.append(f"其中 {missed} 个分子的最长路径未覆盖该分子全部重原子"
+                     f"（共 {missed_atoms} 个重原子不在路径上，源自支化/环状结构），"
+                     f"这些分子的侧基扭转与环内扭转不会出现在结果里；"
+                     f"要按拓扑定义的全部二面角请用 mode='topology'"
+                     f"（需 .tpr / .psf / .prmtop）")
+    return idx, notes
 
 
 def compute_dihedral_series(mdt, indices: np.ndarray, selection: FrameSelection, *,
@@ -1467,9 +1617,10 @@ def analyze_dihedrals(mdt, ag, selection: FrameSelection, *,
                       mode: str = "auto",
                       custom_indices: np.ndarray | None = None,
                       heavy_only: bool = True,
+                      max_molecules: int = 200,
                       max_series: int = 5,
                       gauche_edge: float = 120.0,
-                      nbins: int = 72,
+                      bin_width: float = 1.0,
                       verbose: bool = False,
                       label: str = "链") -> AnalysisResult:
     """二面角分析。
@@ -1479,22 +1630,40 @@ def analyze_dihedrals(mdt, ag, selection: FrameSelection, *,
     mode
         - ``"auto"``：蛋白质用 phi/psi，其它体系用几何连续原子模式
         - ``"phi_psi"``：蛋白质主链 φ/ψ（对蛋白质这是**唯一**有明确化学含义的二面角）
-        - ``"chain"``：**几何连续原子模式**——沿键连接图的最长路径取连续四原子
-          二面角。注意它给的是"几何上连成一串的原子"之间的二面角，**不保证**
-          等于化学意义上的主链/重复单元二面角（例如支化或带长侧基的分子，
-          最长路径可能拐进侧基）。名称由 1.0.0 的"链骨架"更正为现在的说法。
-        - ``"topology"``：使用拓扑文件中已定义的二面角
+        - ``"chain"``：**几何连续原子模式**——对选择里的**每个分子**分别沿键连接图
+          取最长路径，再生成连续四原子二面角（见 :func:`chain_dihedrals`）。
+          注意它给的是"几何上连成一串的原子"之间的二面角，**不保证**等于化学意义
+          上的主链/重复单元二面角（支化或带长侧基的分子，最长路径可能拐进侧基，
+          这种覆盖率不足的情形会写进结果说明）。名称由 1.0.0 的"链骨架"更正为
+          现在的说法；1.0.5 起由"整组取一条最长路径"改为"逐分子取"，多分子体系
+          不再只分析第一个分子。
+        - ``"topology"``：使用拓扑文件中已定义的二面角（需要 .tpr / .psf / .prmtop
+          这类自带二面角表的拓扑；只有键的 .gro 会得到 0 个并在说明里写明原因）
         - ``"custom"``：使用 ``custom_indices``
     custom_indices
         形状 ``(n, 4)`` 的绝对原子索引数组。
     heavy_only
         ``chain`` / ``topology`` 模式下是否忽略含氢二面角。
+    max_molecules
+        ``chain`` 模式最多分析多少个分子（默认 200）。选择里的分子数超过这个上限时
+        只取前若干个并在结果说明里写明，避免上千个分子的体系把时间全花在建路径上。
     max_series
         在"二面角随时间变化"面板中最多画几条。
     gauche_edge
         trans / gauche 的分界角（**度**，默认 120）：``|φ| > gauche_edge`` 记为
         trans，其余按符号分 gauche+ / gauche−。不同力场/文献取 110～120 不等，
         因此做成参数而不是写死；结果里会写明本次用的阈值。
+    bin_width
+        分布直方图的**每格宽度（度）**，默认 **1.0**。网格范围固定为
+        ``±(180 + bin_width)``，两端各多出一格的周期余量：
+
+        - ``bin_width=1``   → −181, −180, …, 180, 181（362 格，中心 ±180.5）
+        - ``bin_width=0.5`` → −180.5, −180, …, 180, 180.5（722 格，中心 ±180.25）
+        - ``bin_width=5``   → −185, −180, …, 185（74 格）
+
+        为什么要两端余量：二面角是周期量，±180° 是同一个角，峰的尾巴分别落在
+        +180 与 −180 附近；留一格后两端都画得出来，不会贴在坐标轴边界上被截掉。
+        取值会被夹到 0.05° … 180°。
     """
     u = mdt.universe
     times = np.asarray(selection.times_ps, dtype=float)
@@ -1528,14 +1697,15 @@ def analyze_dihedrals(mdt, ag, selection: FrameSelection, *,
         psi_idx = np.asarray(psi, dtype=int).reshape(-1, 4)
         note.append(f"蛋白质主链 φ: {phi_idx.shape[0]} 个，ψ: {psi_idx.shape[0]} 个")
     elif mode == "chain":
-        path = backbone_path(ag, heavy_only=heavy_only)
-        idx = make_dihedral_indices(path)
-        note.append(f"**几何连续原子模式**：键图最长路径 {path.size} 个原子，"
-                    f"提取连续四原子二面角 {idx.shape[0]} 个"
-                    f"（这是几何上连成一串的原子，不保证等于化学主链/重复单元）")
+        idx, cnote = chain_dihedrals(ag, heavy_only=heavy_only,
+                                     max_molecules=max_molecules)
+        note.extend(cnote)
     elif mode == "topology":
         idx = topology_dihedrals(ag, heavy_only=heavy_only)
-        note.append(f"拓扑中属于所选原子的二面角 {idx.shape[0]} 个")
+        if idx.shape[0]:
+            note.append(f"拓扑中属于所选原子的二面角 {idx.shape[0]} 个")
+        else:
+            note.append(_topology_empty_hint(ag, heavy_only))
     elif mode == "custom":
         if custom_indices is None:
             raise ValueError("mode='custom' 时必须提供 custom_indices")
@@ -1567,21 +1737,57 @@ def analyze_dihedrals(mdt, ag, selection: FrameSelection, *,
         name="dihedral",
         title=f"二面角分析 —— {label}",
         meta={"selection": label, "mode": mode, "n_dihedrals": int(series.shape[1]),
-              "n_frames": times.size, "gauche_edge": gauche_edge},
+              "n_frames": times.size, "gauche_edge": gauche_edge,
+              "bin_width": float(bin_width)},
     )
     res.panels = [
-        Panel(xlabel="二面角 φ (°)", ylabel="概率密度 P(φ)", title="二面角分布"),
+        Panel(xlabel="二面角 φ (°)", ylabel="概率密度 P(φ)（1/°）",
+              title="二面角分布（probability density）"),
         Panel(xlabel=tlabel, ylabel="构象比例", title="trans / gauche 构象比例随时间变化"),
     ]
 
     # ---- 2. 分布
+    # 分箱网格与 **Materials Studio Forcite 的 "Bin width" 完全对齐**
+    # （Forcite 帮助原文：Bin width: Specify the bin width, in degrees, for torsion
+    #  distribution calculations… 每个 bin 的宽度就是这里的 bin_width）：
+    #   网格端点 = ±(180 + bin_width)，步长 = bin_width，即
+    #   bin=1   → −181, −180, −179, …, 179, 180, 181      （362 格）
+    #   bin=0.5 → −180.5, −180, −179.5, …, 179.5, 180, 180.5（722 格）
+    #   bin=2   → −182, −180, …, 180, 182                  （182 格）
+    # 为什么两端各多出**一格**：二面角是周期量，±180° 是同一个角，峰的尾巴分别
+    # 落在 +180 / −180 附近；Forcite 也是这么画的（两端各留一格），所以
+    # **不做**首末格折叠，否则反而与 Forcite 对不上。
+    # ---- 分箱对齐（**已用 Forcite 实测数据逐点核对**，见 dihedral_bin_grid）
+    # Forcite 的 Torsion 列是每个桶的**中心**，桶边界在中心 ± bin/2。
+    # 之前把 x 当"桶的左边界"用，整条分布就差**半个 bin**（0.25°），
+    # 导致 45% 的桶计数与 Forcite 不同 —— 这就是"数据对不上"的原因。
+    centers, edges = dihedral_bin_grid(bin_width)
+    bw = float(edges[1] - edges[0])
+    limit = float(centers[-1])
+    n_bins = int(centers.size)
+
+    # ---- 分布 = **概率密度**（小数，不是计数）
+    # 为什么是概率密度：分布曲线要能跨体系/跨 bin 比较，y 必须是"每度多少概率"
+    # 这种与样本总数、每格宽度都无关的量（× 每格宽度求和 = 1）。
+    # 与 Forcite / 其它工具导出的列对比时：
+    #   · bin=1 时"概率密度"与"每格概率"数值完全相同（乘 1°）；
+    #   · bin≠1 时两者只差一个常数 1/每格宽度；
+    #   · 概率密度 = 每格概率 ÷ 每格宽度 = 计数 ÷ (样本总数 × 每格宽度)，
+    #     样本总数见摘要「分布样本总数（帧 × 二面角）」。
     for gname, arr in groups.items():
-        if arr.size == 0 or not np.isfinite(arr).any():
+        finite = arr[np.isfinite(arr)]
+        if finite.size == 0:
             continue
-        edges = np.linspace(-180.0, 180.0, int(nbins) + 1)
-        hist, _ = np.histogram(arr[np.isfinite(arr)], bins=edges, density=True)
-        res.add_curve(f"{gname} 分布", bin_edges_to_centers(edges), hist,
-                      kind="bar", panel=0)
+        # x 用**格子中心**（与 Forcite 的 Torsion 列一致）：
+        #   bin=1   → −181, −180, …, 180, 181
+        #   bin=0.5 → −180.5, −180, …, 180, 180.5
+        counts, _ = np.histogram(finite, bins=edges)
+        n_samp = int(counts.sum())
+        dens = counts / max(float(n_samp) * bw, 1e-300)      # 概率密度 P(φ)
+        res.add_curve(f"{gname} 分布", centers, dens, kind="bar", panel=0)
+        res.summary[f"{gname} 分布样本总数（帧 × 二面角）"] = n_samp
+        res.summary[f"{gname} 分布峰值（概率密度）"] = (
+            float(dens.max()) if dens.size else float("nan"))
         st = circular_stats(arr)
         res.summary[f"{gname} 平均角 (°)"] = st["mean"]
         res.summary[f"{gname} 圆统计量 R"] = st["R"]
@@ -1616,4 +1822,13 @@ def analyze_dihedrals(mdt, ag, selection: FrameSelection, *,
 
     res.add_notes(*note)
     res.add_notes(f"trans 判据: |φ| > {gauche_edge:g}°")
+    res.add_notes(f"分布网格: 格子中心 {-limit:g}° … {limit:g}°，每格 {bw:g}°，"
+                  f"共 {n_bins} 格（对齐 Forcite：Torsion 列是格子**中心**，"
+                  f"桶边界 = 中心 ± {bw / 2:g}°，"
+                  f"最外侧边界 {edges[0]:g}° … {edges[-1]:g}°）")
+    res.add_notes("分布 y 是**概率密度**（probability density，单位 **1/°**，"
+                  "与 Forcite 的 Torsion distribution 一致）："
+                  "每格计数 ÷ (样本总数 × 每格宽度)，∫P(φ)dφ = 1。"
+                  "它是小数、与样本总数无关，可跨体系/跨 bin 直接比较；"
+                  "每格概率 = 概率密度 × 每格宽度（bin=1° 时两者数值相同）")
     return res

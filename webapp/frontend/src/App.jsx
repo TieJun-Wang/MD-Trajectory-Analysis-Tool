@@ -98,6 +98,9 @@ export default function App() {
     // VACF 的 τ 上限（帧）；留空 = 全段（与 Forcite 一样逐 lag 全给）
     vacf_max_lag: '',
     gauche_edge: 120,
+    // 二面角分布柱宽 = Forcite 的 Bin width（度）：网格端点 = ±(180 + bin)。
+    // bin=1 → −181…181，bin=0.5 → −180.5…180.5（与 Forcite 逐格一致）
+    bin_width: 1,
     // 「减去整体漂移」默认**关**：Materials Studio Forcite 的 MSD 不去漂移，
     // 默认关掉才能与它逐点对齐（实测 PE50：关掉差 0.000%，开着差 −0.01…−0.19%）。
     // NPT 体系里整盒缓慢平移会污染 MSD，那时再勾上。
@@ -616,7 +619,9 @@ export default function App() {
         vacf: { max_lag: optNum(params.vacf_max_lag) },
         contact: { cutoff: Number(params.cutoff), mode: params.contact_mode },
         dihedral: { mode: params.dihedral_mode,
-                    gauche_edge: Number(params.gauche_edge) || 120 },
+                    gauche_edge: Number(params.gauche_edge) || 120,
+                    // 分布柱宽 bin（度）：留空/非法 → 1°
+                    bin_width: Number(params.bin_width) || 1 },
         orientation: { mode: params.orient_mode,
                        stride: Number(params.orient_stride) || 1 },
         // 结构有序度的局部结构分量：留空 → g_ref=None（该分量不计入指数）

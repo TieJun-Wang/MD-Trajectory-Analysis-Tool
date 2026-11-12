@@ -377,7 +377,7 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
 const PRIMARY_USES = [
   ['Rg 回转半径', '按这个对象的全部原子算 Rg(t)；对象里有多个分子时还给出逐分子 Rg 平均'],
   ['R_ee 端到端距离', '取这个对象的两端原子（键连图里只连一根键的原子）算直线距离'],
-  ['二面角', '沿这个对象的成键关系找出所有可转二面角，给 P(φ) 与 trans/gauche 比例'],
+  ['二面角', '沿这个对象里每个分子的成键关系找出可转二面角，给 P(φ) 与 trans/gauche 比例'],
   ['取向', '把这个对象切成链段，算二阶序参数 S、P2 与链段取向角分布'],
   ['结构有序度', '这个对象每个原子的局部有序度加权成指数（按主链的近邻算）'],
   ['结晶 / 非晶识别', '用这个对象的 q6/q̄6 判固相原子，再连通成晶簇数晶区占比'],
@@ -800,11 +800,17 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       F('dihedral_mode', '二面角模式', 'select', sel('dihedral_mode', [
         ['auto', '自动（推荐）'],
         ['phi_psi', '蛋白质主链 φ/ψ'],
-        ['chain', '沿最长链'],
+        ['chain', '沿每条分子链（几何骨架）'],
         ['topology', '按拓扑定义'],
       ])),
       F('gauche_edge', 'trans/gauche 阈值 (°)', 'input',
-        numInput('', { step: 5, min: 60, max: 180, ...p('gauche_edge') })),
+        numInput('120', { step: 5, min: 60, max: 180, ...p('gauche_edge') })),
+      // 分布柱宽 = Forcite 的 "Bin width"（torsion distribution 的每格宽度，度）。
+      // 网格端点 = ±(180 + bin)：bin=1 → −181…181（362 格）、
+      // bin=0.5 → −180.5…180.5（722 格），与 Forcite 一致
+      F('bin_width', 'Bin width 柱宽 (°)', 'input',
+        numInput('1 → −181…181', { step: 0.5, min: 0.05, max: 180,
+                                   ...p('bin_width') })),
     ]],
     ['链段取向分析', ['orientation'], [
       F('orient_mode', '取向链段定义', 'select', sel('orient_mode', [

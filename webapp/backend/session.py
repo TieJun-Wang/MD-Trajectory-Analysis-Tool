@@ -294,6 +294,9 @@ class Session:
             "n_bonds": info.n_bonds,
             "n_angles": info.n_angles,
             "n_dihedrals": info.n_dihedrals,
+            # 角/二面角条数是由键表推算的（拓扑本身只带键表，如 .gro）
+            "angles_derived": bool(info.angles_derived),
+            "dihedrals_derived": bool(info.dihedrals_derived),
             "categories": dict(info.categories),
             # 结构化表格：Web 界面直接用表格渲染，不再显示定宽文本报告
             "sections": self._info_sections(info),

@@ -1179,7 +1179,11 @@ def analyze_rdf(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
             "（物理上不可能，Forcite 的分子间 RDF 里也不出现）。这里把"
             "**存在该阈值以下原子对的整对分子**从分子间统计中剔除，"
             "与 Forcite 的分子间 g(r) 口径一致。默认关闭（与 MDAnalysis "
-            "InterRDF 一致）。")
+            "InterRDF 一致）。\n"
+            "  注：Forcite 的帮助只说明「与周期镜像的相互作用会纳入计算，"
+            "且 cutoff 大于最短格矢时会出现对应格矢的峰」，没说它是否做"
+            "逐原子最小镜像；cutoff < 最短格矢时 periodic 勾/不勾本来就一样，"
+            "不能拿这一点反推它的折叠方式。")
     if float(rho_scale or 1.0) != 1.0:
         res.summary["RDF 密度因子"] = float(rho_scale)
         res.add_notes(

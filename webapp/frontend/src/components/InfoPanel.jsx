@@ -31,7 +31,8 @@ function summaryRows(info) {
     ['总质量', `${fmt(info.total_mass_amu, 1)} amu`],
     ['净电荷', info.total_charge_e !== null && info.total_charge_e !== undefined
       ? `${info.total_charge_e.toFixed(4)} e` : '—'],
-    ['键/角/二面角', `${info.n_bonds} / ${info.n_angles} / ${info.n_dihedrals}`],
+    ['键/角/二面角', `${info.n_bonds} / ${info.n_angles} / ${info.n_dihedrals}`
+      + (info.angles_derived || info.dihedrals_derived ? '（角/二面角由键表推算）' : '')],
   ]
 }
 

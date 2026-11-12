@@ -39,6 +39,9 @@ class SystemInfo:
     n_bonds: int = 0
     n_angles: int = 0
     n_dihedrals: int = 0
+    #: 角/二面角条数是由**键表推算**的（拓扑本身没有这两张表）
+    angles_derived: bool = False
+    dihedrals_derived: bool = False
     has_bonds: bool = False
     has_charges: bool = False
     has_velocities: bool = False
@@ -89,7 +92,11 @@ class SystemInfo:
         rows.append(("总质量", f"{self.total_mass_amu:,.2f} amu"))
         if self.has_charges:
             rows.append(("体系净电荷", f"{self.total_charge_e:+.4f} e"))
-        rows.append(("键/角/二面角", f"{self.n_bonds:,} / {self.n_angles:,} / {self.n_dihedrals:,}"))
+        n_b_d = (f"{self.n_bonds:,} / {self.n_angles:,} / "
+                 f"{self.n_dihedrals:,}")
+        if self.angles_derived or self.dihedrals_derived:
+            n_b_d += "（角/二面角由键表推算）"
+        rows.append(("键/角/二面角", n_b_d))
         rows.append(("原子名种类", f"{len(self.atom_names)}"))
         rows.append(("residue 名种类", f"{len(self.residue_names)}"))
         for cat, n in self.categories.items():
@@ -177,6 +184,27 @@ def describe_system(mdt_or_universe) -> SystemInfo:
             setattr(info, key, len(top) if top is not None else 0)
         except Exception:  # noqa: BLE001
             setattr(info, key, 0)
+
+    # 拓扑只带键表时（.gro / 无 CONECT 的 .pdb），MDAnalysis 的 ``angles`` /
+    # ``dihedrals`` 属性并不存在 —— 直接读就是 0/0（用户实测 20 条 DP=30 的 PE
+    # 显示 "3620 / 0 / 0"）。加载流程里已经由键表派生过一次
+    # （:func:`mdta.topology.derive_angles_dihedrals`）；万一没派生成功
+    # （超大体系被上限挡掉、或脚本自己 from_universe 建的体系），这里用**解析公式**
+    # 兜底算条数：O(键数)，不会枚举，也就不会吃内存。
+    if info.n_bonds and (not info.n_angles or not info.n_dihedrals):
+        try:
+            from .topology import count_angles_dihedrals
+
+            n_ang, n_dih = count_angles_dihedrals(
+                np.asarray(u.bonds.indices), u.atoms.n_atoms)
+            if not info.n_angles:
+                info.n_angles = n_ang
+                info.angles_derived = True
+            if not info.n_dihedrals:
+                info.n_dihedrals = n_dih
+                info.dihedrals_derived = True
+        except Exception:  # noqa: BLE001
+            pass
 
     try:
         info.has_velocities = bool(u.trajectory.ts.has_velocities)
@@ -280,7 +308,10 @@ def info_tables(info: SystemInfo, max_chain_types: int = 20) -> list[dict]:
 
     # -------------------------------------------------------- 拓扑与属性
     kv("拓扑与属性", [
-        ("键 / 角 / 二面角", f"{info.n_bonds:,} / {info.n_angles:,} / {info.n_dihedrals:,}"),
+        ("键 / 角 / 二面角",
+         f"{info.n_bonds:,} / {info.n_angles:,} / {info.n_dihedrals:,}"
+         + ("（角/二面角由键表推算）"
+            if (info.angles_derived or info.dihedrals_derived) else "")),
         ("含化学键", "是" if info.has_bonds else "否（依赖键的分析会跳过或自动猜键）"),
         ("含电荷", "是" if info.has_charges else "否"),
         ("含速度", "是" if info.has_velocities else "否"),

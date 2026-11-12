@@ -284,6 +284,8 @@ class MDTrajectory:
     bond_guess_info: dict | None = None
     #: 对象层属性补齐诊断（elements / masses / molnums）
     object_info: dict | None = None
+    #: 由键表派生角/二面角的诊断（只有 .gro 这类没有角/二面角表的拓扑才会写）
+    angle_info: dict | None = None
     #: Materials Studio 文档（``.car`` / ``.xsd`` / ``.xtd``）的解析摘要
     ms_info: dict | None = None
     #: 读取过程中值得告诉用户的话（自动配对轨迹、MS 单帧说明…）
@@ -409,6 +411,9 @@ class MDTrajectory:
             self._ensure_object_attrs()
             _progress("补齐对象属性（元素/质量/分子）",
                       **(self.object_info or {}))
+            self._ensure_angles_dihedrals()
+            _progress("由键表派生角/二面角",
+                      **(self.angle_info or {}))
             _progress("轨迹已就绪")
         return self._universe
 
@@ -1070,6 +1075,30 @@ class MDTrajectory:
                 info["note"] = (f"已忽略拓扑里原有的 {n_bonds_before:,} 个键，"
                                 f"按坐标重新猜出 {info.get('bonds', 0):,} 个")
         self.bond_guess_info = info
+
+    def _ensure_angles_dihedrals(self) -> None:
+        """拓扑只有键时，从键表派生出「角」与「二面角」两张表。
+
+        为什么放在加载流程里（而不是分析里才做）：界面的「体系信息」直接读
+        ``universe.angles`` / ``universe.dihedrals``，没有这两张表就显示
+        ``3620 / 0 / 0``（用户实测 20 条 DP=30 的 PE）；二面角分析的
+        ``mode='topology'`` 也会因为 ``NoDataError`` 退回 0 个角。
+
+        有角/二面角表的拓扑（``.tpr`` / ``.psf`` / ``.prmtop``）什么都不做。
+        """
+        from .topology import derive_angles_dihedrals
+
+        try:
+            self.angle_info = derive_angles_dihedrals(self._universe)
+        except Exception as exc:  # noqa: BLE001
+            self.angle_info = {"skipped": f"派生角/二面角失败: {exc}"}
+        info = self.angle_info or {}
+        if info.get("added"):
+            self.load_notes.append(
+                "拓扑只有键表（没有角/二面角表），已由键表派生："
+                f"角 {info.get('n_angles', 0):,} 个、二面角 "
+                f"{info.get('n_dihedrals', 0):,} 个（「体系信息」与 "
+                f"二面角分析 mode='topology' 依赖这两张表）")
 
     def _ensure_object_attrs(self) -> None:
         """补齐对象模型必需的 ``elements`` / ``masses`` / ``molnums``。
