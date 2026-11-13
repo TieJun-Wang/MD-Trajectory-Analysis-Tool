@@ -225,7 +225,11 @@ export const api = {
   /** 整表 CSV 的下载地址（服务端直接吐文件，行数再多也不占页面内存） */
   tableCsvUrl: (sid, { name, panel = 0, only = null } = {}) => {
     const q = new URLSearchParams({ name: String(name), panel: String(panel) })
-    if (Array.isArray(only) && only.length) q.set('only', only.join(','))
+    // ⚠️ `only` 用**重复参数**逐个传，不能 `join(',')`：曲线标签里本身就可能有
+    // 逗号（MSD 的 "polymer (原子, 3,640 个)"），连成一串再按逗号切会把标签切碎，
+    // 后端一条也匹配不上 → 静默退回"全部曲线"，表现就是"只看当前图例没效果"。
+    if (Array.isArray(only)) only.filter((x) => x !== '' && x != null)
+      .forEach((x) => q.append('only', String(x)))
     return `${BASE}/session/${sid}/table.csv?${q.toString()}`
   },
 
@@ -252,7 +256,9 @@ export const api = {
   table: (sid, { name, panel = 0, offset = 0, limit = 200, only = null } = {}) => {
     const q = new URLSearchParams({ name: String(name), panel: String(panel),
       offset: String(offset), limit: String(limit) })
-    if (Array.isArray(only) && only.length) q.set('only', only.join(','))
+    // 同 tableCsvUrl：`only` 逐个重复传（标签里可能有逗号）
+    if (Array.isArray(only)) only.filter((x) => x !== '' && x != null)
+      .forEach((x) => q.append('only', String(x)))
     return request(`/session/${sid}/table?${q.toString()}`)
   },
   deleteSelection: (sid, name) =>

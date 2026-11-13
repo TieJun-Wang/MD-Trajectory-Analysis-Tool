@@ -10,11 +10,22 @@
  *   「缩放 / 平移 / hover 读数 / 图例开关」四项基础交互。
  * - 对数轴（MSD 的双对数图）会自动剔除 ≤0 的点，否则 ECharts 无法画。
  */
+import { panelFileName } from './naming'
 
 const PALETTE = [
   '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
   '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#4f9dd9',
 ]
+
+/**
+ * 「保存图片」的文件名：用**面板标题**（用户要求，别再出现 `_1`/`_2` 这种编号）。
+ * 单面板 → `rg`；多面板 → `dihedral__二面角分布`。规则与后端/导出页同一套。
+ */
+function saveName(result, panel, index) {
+  const n = Number(result?.panels?.length || 1)
+  const title = panel?.title || ''
+  return panelFileName(result?.name || 'result', title, Number(index) || 0, n, '')
+}
 
 function buildPoints(curve, logX, logY) {
   const pts = []
@@ -168,7 +179,7 @@ function buildHeatmapOption(result, panel, heat) {
       right: 14, top: 8, itemSize: 14,
       feature: {
         saveAsImage: { title: '保存图片', pixelRatio: 2,
-          name: `${result.name}_${Number(panel && panel.index) + 1 || 1}_matrix` },
+          name: saveName(result, panel, panel?.index) },
         restore: { title: '重置' },
       },
     },
@@ -237,7 +248,8 @@ function buildPolarOption(result, panel, panelIndex, visible) {
     toolbox: {
       right: 14, top: 8, itemSize: 14,
       feature: {
-        saveAsImage: { title: '保存图片', pixelRatio: 2, name: `${result.name}_polar` },
+        saveAsImage: { title: '保存图片', pixelRatio: 2,
+                       name: saveName(result, panel, panelIndex) },
         restore: { title: '重置' },
       },
     },
@@ -419,7 +431,8 @@ export function buildOption(result, panelIndex, visible = null) {
       top: 8,
       itemSize: 14,
       feature: {
-        saveAsImage: { title: '保存图片', pixelRatio: 2, name: `${result.name}_${panelIndex + 1}` },
+        saveAsImage: { title: '保存图片', pixelRatio: 2,
+                       name: saveName(result, panel, panelIndex) },
         dataZoom: { title: { zoom: '框选缩放', back: '还原缩放' } },
         restore: { title: '重置' },
       },

@@ -37,7 +37,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (FileResponse, JSONResponse, PlainTextResponse,
                                 StreamingResponse)
@@ -597,19 +597,39 @@ def session_selection_delete(sid: str, name: str) -> dict:
         raise _fail(exc) from exc
 
 
+def _only_labels(only) -> list[str] | None:
+    """把 ``only`` 查询参数整理成标签列表。
+
+    **必须支持"重复参数"**（``?only=A&only=B``），且**绝不能按逗号再切**：
+    曲线标签自身就含逗号（MSD 的 ``polymer (原子, 3,640 个)``）。旧实现是前端
+    ``only.join(',')`` 拼成一串、后端 ``split(',')`` 拆开 —— 标签被切碎后一条也
+    匹配不上，于是"只勾一个图例 + 只看当前图例"静默退回全部曲线（用户实测的 bug）。
+
+    现在一个参数就是**一条完整标签**；老客户端若是自己拼了逗号，会得到一条匹配
+    不上的标签，界面会明确提示"没匹配到曲线"，而不是悄悄显示全部。
+    """
+    if only is None:
+        return None
+    vals = [str(x) for x in only] if isinstance(only, (list, tuple)) else [str(only)]
+    vals = [v for v in vals if v != ""]
+    return vals or None
+
+
 @app.get("/api/session/{sid}/table.csv")
-def session_table_csv(sid: str, name: str, panel: int = 0, only: str = ""):
+def session_table_csv(sid: str, name: str, panel: int = 0,
+                      only: list[str] | None = Query(default=None)):
     """整表 CSV（不分页）：浏览器直接下载，行数再多也不会撑爆页面。"""
     sess = _sess(sid)
-    labels = [x for x in str(only).split(",") if x]
+    labels = _only_labels(only)
     try:
         with sess.lock:
-            text = sess.table_csv(name, panel=panel, only=labels or None)
+            text = sess.table_csv(name, panel=panel, only=labels)
     except SessionError as exc:
         raise _fail(exc) from exc
     except Exception as exc:                                     # noqa: BLE001
         raise _fail(SessionError(f"导出数据表失败：{type(exc).__name__}: {exc}")) from exc
-    fname = f"{name}__panel{int(panel)}.csv"
+    # 文件名用**面板标题**（用户要求：不要再有 panel0/panel1）
+    fname = sess.table_filename(name, panel)
     return PlainTextResponse(
         text, media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
@@ -617,14 +637,14 @@ def session_table_csv(sid: str, name: str, panel: int = 0, only: str = ""):
 
 @app.get("/api/session/{sid}/table")
 def session_table(sid: str, name: str, panel: int = 0, offset: int = 0,
-                  limit: int = 200, only: str = "") -> dict:
-    """数据表分页（一页一传）：``only`` 是逗号分隔的曲线标签（只看这些）。"""
+                  limit: int = 200, only: list[str] | None = Query(default=None)) -> dict:
+    """数据表分页（一页一传）：``only`` 是**重复出现的**曲线标签（只看这些）。"""
     sess = _sess(sid)
-    labels = [x for x in str(only).split(",") if x]
+    labels = _only_labels(only)
     try:
         with sess.lock:
             return sess.table_slice(name, panel=panel, offset=offset, limit=limit,
-                                    only=labels or None)
+                                    only=labels)
     except SessionError as exc:
         raise _fail(exc) from exc
     except Exception as exc:                                     # noqa: BLE001

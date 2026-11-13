@@ -2376,19 +2376,28 @@ class Session:
         前端翻页时再取下一段 —— 传的和画的都只是一页。
 
         ``only`` 给定时只保留这些曲线（对应界面上的「只看当前图例」）。
+        **匹配不到时返回空表 + ``missed``**，而不是静默退回"全部曲线" ——
+        退回全部会让"只看当前图例"看起来毫无效果（用户实测踩过这个坑：
+        标签里带逗号被前端 join 切碎，后端一条也匹配不上）。
+        另外返回 ``panel_title`` / ``filename``：界面/下载的文件名统一用**面板标题**，
+        不再出现 ``panel0`` 这种编号（用户要求）。
         """
         res = (getattr(self, "results_json", None) or {}).get(str(name))
         if not res:
             raise SessionError(f"没有这项结果：{name}")
         curves = [c for c in (res.get("curves") or [])
                   if int(c.get("panel", 0)) == int(panel)]
+        missed: list[str] = []
         if only:
             keep = {str(x) for x in only}
             hit = [c for c in curves if str(c.get("label")) in keep]
-            curves = hit or curves
+            if not hit:
+                missed = sorted(keep)
+            curves = hit
+        meta = self._table_meta(name, panel, curves)
         if not curves:
             return {"columns": [], "rows": [], "total": 0, "offset": int(offset),
-                    "limit": int(limit)}
+                    "limit": int(limit), "missed": missed, **meta}
         labels = [str(c.get("label")) for c in curves]
         xs = curves[0].get("x") or []
         ys = [c.get("y") or [] for c in curves]
@@ -2405,7 +2414,32 @@ class Session:
         if 0 <= int(panel) < len(panels):
             xlabel = str((panels[int(panel)] or {}).get("xlabel") or "x")
         return {"columns": [xlabel, *labels], "rows": rows, "total": int(total),
-                "offset": off, "limit": lim, "panel": int(panel)}
+                "offset": off, "limit": lim, "panel": int(panel),
+                "missed": missed, **meta}
+
+    # ---------------------------------------------------------- 文件名（面板标题）
+    def _table_meta(self, name: str, panel: int, curves: list | None = None) -> dict:
+        """数据表的元信息：面板标题 + 下载用的文件名（**用面板标题，不用 panel 编号**）。"""
+        return {"panel_title": self._panel_title(name, panel),
+                "filename": self.table_filename(name, panel)}
+
+    def _panel_title(self, name: str, panel: int) -> str:
+        res = (getattr(self, "results_json", None) or {}).get(str(name)) or {}
+        panels = res.get("panels") or []
+        if 0 <= int(panel) < len(panels):
+            return str((panels[int(panel)] or {}).get("title") or "")
+        return ""
+
+    def table_filename(self, name: str, panel: int) -> str:
+        """数据表下载文件名：单面板 ``rg.csv``；多面板 ``二面角__二面角分布.csv``。"""
+        from mdta.export import panel_slug
+
+        res = (getattr(self, "results_json", None) or {}).get(str(name)) or {}
+        panels = res.get("panels") or []
+        base = str(name)
+        if len(panels) <= 1:
+            return f"{base}.csv"
+        return f"{base}__{panel_slug(self._panel_title(name, panel), int(panel))}.csv"
 
     def table_csv(self, name: str, panel: int = 0, only: list | None = None) -> str:
         """整个面板的 CSV 文本（**不分页**，给「下载 CSV」与「复制」用）。"""

@@ -10,6 +10,7 @@ import { useEffect } from 'react'
 import { api } from '../api'
 import { buildOption, formatCell } from '../chartOption'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
+import { panelFileName } from '../naming'
 
 /**
  * 这张图**当前应该显示**的曲线：
@@ -129,6 +130,9 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
     : local
   const totalRows = sid ? (slice?.total ?? rows.length) : local.rows.length
   const nPage = Math.max(1, Math.ceil(totalRows / pageSize))
+  // 后端在"只看当前图例"的标签一条也匹配不上时会返回 missed（而不是静默退回全部曲线），
+  // 这里把它显示出来 —— 否则用户只会看到"没效果"，查不出是标签对不上。
+  const missed = sid ? (slice?.missed || []) : []
 
   if (!order.length) {
     return <div className="placeholder"><p>还没有结果。</p></div>
@@ -151,7 +155,9 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    a.download = `${active.name}__p${active.index + 1}.csv`
+    // 文件名用**面板标题**（用户要求，不再有 __p1 这种编号）
+    a.download = panelFileName(active.name, result?.panels?.[active.index]?.title,
+      active.index, result?.panels?.length, 'csv')
     a.click()
     URL.revokeObjectURL(a.href)
   }
@@ -253,7 +259,10 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
                           panel: active.index, only: keepCols })
                         const a = document.createElement('a')
                         a.href = url
-                        a.download = `${active.name}__panel${active.index}.csv`
+                        // 与后端 /table.csv 的 Content-Disposition 用同一套命名
+                        a.download = panelFileName(active.name,
+                          result?.panels?.[active.index]?.title, active.index,
+                          result?.panels?.length, 'csv')
                         document.body.appendChild(a)
                         a.click()
                         a.remove()
@@ -270,6 +279,8 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
             {totalRows > pageSize
               ? ` · 第 ${Math.min(page + 1, nPage)} / ${nPage} 页（每页 ${pageSize} 行）` : ''}
             {sliceErr ? ` · ${sliceErr}` : ''}
+            {missed.length
+              ? ` · 「只看当前图例」没匹配到曲线：${missed.join('、')}` : ''}
           </span>
           <span className="charttools">
             <button className="mini" disabled={page <= 0}

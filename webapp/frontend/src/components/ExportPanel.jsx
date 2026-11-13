@@ -7,6 +7,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { groupPresent, normalizeGroups } from '../analysisGroups'
+import { panelSlug } from '../naming'
 
 const FORMATS = [
   ['csv', 'CSV 数据表'],
@@ -15,16 +16,11 @@ const FORMATS = [
 ]
 
 /**
- * 把面板标题转成文件名片段 —— **必须与后端 `mdta/export.py::panel_slug` 一致**
- * （把非字母数字/._- 的字符换成 `_`、去首尾下划线、截断 48 字符、空标题退回"图N"）。
+ * 面板标题 → 文件名片段。实现搬到了 `src/naming.js`（图表区保存图片、
+ * 数据表区下载 CSV 与导出页共用同一套规则，避免各写一遍）。上面已 import，
+ * 这里 `export { panelSlug }` 仅为兼容既有引用。
  */
-export function panelSlug(title, index = 0) {
-  const raw = String(title || '').trim()
-  if (!raw) return `图${Number(index) + 1}`
-  const out = [...raw].map((ch) => (/[\p{L}\p{N}._-]/u.test(ch) ? ch : '_'))
-    .join('').replace(/^_+|_+$/g, '').replace(/__+/g, '_')
-  return out.slice(0, 48) || `图${Number(index) + 1}`
-}
+export { panelSlug }
 
 /**
  * 列出某个分析在当前格式设置下**会产出哪些文件**。
