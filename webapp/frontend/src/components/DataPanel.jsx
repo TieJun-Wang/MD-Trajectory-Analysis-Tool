@@ -155,8 +155,8 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
-    // 文件名用**面板标题**（用户要求，不再有 __p1 这种编号）
-    a.download = panelFileName(active.name, result?.panels?.[active.index]?.title,
+    // 文件名用**短英文面板名**（用户要求；纯 ASCII，中文会让下载失败）
+    a.download = panelFileName(active.name, result?.panels?.[active.index],
       active.index, result?.panels?.length, 'csv')
     a.click()
     URL.revokeObjectURL(a.href)
@@ -261,7 +261,7 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
                         a.href = url
                         // 与后端 /table.csv 的 Content-Disposition 用同一套命名
                         a.download = panelFileName(active.name,
-                          result?.panels?.[active.index]?.title, active.index,
+                          result?.panels?.[active.index], active.index,
                           result?.panels?.length, 'csv')
                         document.body.appendChild(a)
                         a.click()

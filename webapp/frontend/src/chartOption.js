@@ -18,13 +18,13 @@ const PALETTE = [
 ]
 
 /**
- * 「保存图片」的文件名：用**面板标题**（用户要求，别再出现 `_1`/`_2` 这种编号）。
- * 单面板 → `rg`；多面板 → `dihedral__二面角分布`。规则与后端/导出页同一套。
+ * 「保存图片」的文件名：**短英文**（用户要求；纯 ASCII，中文会让浏览器下载失败）。
+ * 单面板 → `rg`；多面板 → `msd__axes` / `dihedral__dist`。与后端/导出页同一套
+ * （面板 token 来自后端下发的 `panels[i].slug`）。
  */
 function saveName(result, panel, index) {
   const n = Number(result?.panels?.length || 1)
-  const title = panel?.title || ''
-  return panelFileName(result?.name || 'result', title, Number(index) || 0, n, '')
+  return panelFileName(result?.name || 'result', panel, Number(index) || 0, n, '')
 }
 
 function buildPoints(curve, logX, logY) {

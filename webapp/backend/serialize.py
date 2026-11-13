@@ -134,9 +134,14 @@ def _heat_json(h) -> dict:
 
 def panel_to_json(result, index: int) -> dict:
     p = result.panel(index)
+    from mdta.naming import panel_slug
+
     return {
         "index": int(index),
         "title": p.title or "",
+        #: 下载文件名用的**短英文** token（纯 ASCII）——图表区「保存图片」、数据表区
+        #: 「下载 CSV」、导出板块三处共用，避免前端再抄一份命名规则
+        "slug": panel_slug(getattr(result, "name", ""), index, p.title or ""),
         "xlabel": p.xlabel or "",
         "ylabel": p.ylabel or "",
         "xscale": p.xscale or "linear",

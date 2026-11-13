@@ -20,12 +20,22 @@ from typing import Iterable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
+from .naming import safe_ascii as _safe_ascii
+
 
 def safe_name(name: str) -> str:
-    """把分析名转成安全的文件名。"""
+    """把分析名转成安全的文件名。
+
+    ⚠️ 保留中文（老调用的语义），但**下载给浏览器的文件名不要用它** ——
+    HTTP 头只能 latin-1，中文会让 ``Content-Disposition`` 编码失败。
+    要纯 ASCII 用 :func:`mdta.naming.safe_ascii`。
+    """
     keep = [c if (c.isalnum() or c in "._-") else "_" for c in str(name)]
     out = "".join(keep).strip("_")
     return out or "result"
+
+
+safe_ascii = _safe_ascii
 
 
 def result_to_frames(result) -> "OrderedDict[str, pd.DataFrame]":
@@ -33,35 +43,33 @@ def result_to_frames(result) -> "OrderedDict[str, pd.DataFrame]":
     return result.dataframes()
 
 
-def panel_slug(title: str, index: int = 0) -> str:
-    """把面板标题转成"关键信息"文件名片段（用户要求：不再用 panel0/panel1）。
+def panel_slug(title: str, index: int = 0, name: str = "") -> str:
+    """面板的**短英文**文件名片段（用户要求：英文、尽量短、纯 ASCII）。
 
-    ``"二面角分布"`` → ``二面角分布``；``"trans / gauche 构象比例随时间变化"`` →
-    ``trans_gauche_构象比例随时间变化``。标题为空时退回 ``图{index+1}``。
-    文件名长度上限 48 字符（Windows 路径限制 + 太长的名字在导出列表里读不了）。
+    委托给 :func:`mdta.naming.panel_slug`：按 ``(分析项, 面板号)`` 查短英文 token
+    （如 ``msd__axes.csv``、``dihedral__dist.csv``），查不到时用标题里的 ASCII
+    单词，最后兜底 ``p{n}``。
+
+    ⚠️ 必须是纯 ASCII：浏览器下载文件名走 ``Content-Disposition``，Starlette 按
+    latin-1 编码头字段，中文会直接抛 ``UnicodeEncodeError`` —— 表现就是"下载不了"。
     """
-    t = str(title or "").strip()
-    if not t:
-        return f"图{int(index) + 1}"
-    t = safe_name(t)
-    # 连续下划线折叠成一个（"trans / gauche …" 会变成 trans___gauche_…）
-    while "__" in t:
-        t = t.replace("__", "_")
-    return t.strip("_")[:48] or f"图{int(index) + 1}"
+    from .naming import panel_slug as _slug
+
+    return _slug(name, index, title)
 
 
 def export_csv(result, outdir: str = ".", *, prefix: str | None = None,
                long_format: bool = False) -> list[str]:
     """把结果导出为 CSV。
 
-    - 单面板结果（如 Rg）导出成一个宽表 ``Rg.csv``；
-    - 多面板结果用**面板标题**命名（用户要求，不再用 panel0/panel1）：
-      ``二面角__二面角分布.csv``、``二面角__trans_gauche_构象比例随时间变化.csv``；
-      标题重复时自动加 ``_2``、``_3`` 后缀；
+    - 单面板结果（如 Rg）导出成一个宽表 ``rg.csv``；
+    - 多面板结果用**短英文面板名**（用户要求：英文、尽量短、纯 ASCII）：
+      ``dihedral__dist.csv``、``dihedral__trans.csv``、``msd__axes.csv``；
+      重名时自动加 ``_2``、``_3`` 后缀；
     - ``long_format=True`` 时改为一个长表 ``panel, curve, x_label, y_label, x, y``。
     """
     os.makedirs(outdir, exist_ok=True)
-    base = safe_name(prefix or result.name)
+    base = safe_ascii(prefix or result.name)
     if long_format:
         return [export_csv_long(result, outdir, prefix=prefix)]
 
@@ -73,12 +81,11 @@ def export_csv(result, outdir: str = ".", *, prefix: str | None = None,
         if not multi:
             fname = f"{base}.csv"
         else:
-            # 标题优先取面板标题；取不到时用 dataframes() 的键
             try:
                 title = result.panel(i).title
             except Exception:                                   # noqa: BLE001
                 title = ""
-            slug = panel_slug(title or key, i)
+            slug = panel_slug(title, i, name=result.name)
             n = used.get(slug, 0) + 1
             used[slug] = n
             if n > 1:
@@ -135,7 +142,7 @@ def export_panel_pngs(result, outdir: str = ".", *, prefix: str | None = None,
     from .plotting import pixel_figsize, plot_panel, save_figure
 
     os.makedirs(outdir, exist_ok=True)
-    base = safe_name(prefix or result.name)
+    base = safe_ascii(prefix or result.name)
     n = max(result.panel_count, 1)
     multi = n > 1
     if figsize is None and panel_px is not None:
@@ -145,12 +152,12 @@ def export_panel_pngs(result, outdir: str = ".", *, prefix: str | None = None,
     for i in range(n):
         fig = plot_panel(result, i, figsize=figsize)
         if multi:
-            # 与 CSV 同一套命名：用**面板标题**，不再用 p1/p2（用户要求）
+            # 与 CSV 同一套命名：**短英文面板名**（用户要求）
             try:
                 title = result.panel(i).title
             except Exception:                                   # noqa: BLE001
                 title = ""
-            slug = panel_slug(title, i)
+            slug = panel_slug(title, i, name=result.name)
             c = used.get(slug, 0) + 1
             used[slug] = c
             if c > 1:

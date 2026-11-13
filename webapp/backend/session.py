@@ -2431,15 +2431,20 @@ class Session:
         return ""
 
     def table_filename(self, name: str, panel: int) -> str:
-        """数据表下载文件名：单面板 ``rg.csv``；多面板 ``二面角__二面角分布.csv``。"""
-        from mdta.export import panel_slug
+        """数据表下载文件名（**短英文、纯 ASCII**）：单面板 ``rg.csv``，
+        多面板 ``msd__axes.csv`` / ``dihedral__trans.csv``。
+
+        ⚠️ 不能出现中文：HTTP 头按 latin-1 编码，中文会让
+        ``Content-Disposition`` 直接抛 UnicodeEncodeError（用户实测"下载不了"）。
+        """
+        from mdta.naming import panel_slug, safe_ascii
 
         res = (getattr(self, "results_json", None) or {}).get(str(name)) or {}
         panels = res.get("panels") or []
-        base = str(name)
+        base = safe_ascii(name)
         if len(panels) <= 1:
             return f"{base}.csv"
-        return f"{base}__{panel_slug(self._panel_title(name, panel), int(panel))}.csv"
+        return f"{base}__{panel_slug(name, int(panel), self._panel_title(name, panel))}.csv"
 
     def table_csv(self, name: str, panel: int = 0, only: list | None = None) -> str:
         """整个面板的 CSV 文本（**不分页**，给「下载 CSV」与「复制」用）。"""
