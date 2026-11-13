@@ -84,9 +84,19 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
     if (!onlyShown || !result) return null
     // 优先用这个（分析项:面板）记住的图例选择；其次用当前图例状态；
     // 都没有才退回图表默认图例（buildOption 的 legend.selected）。
-    const key = `${active?.name || ''}:${active?.index ?? 0}`
-    const byKey = legendByKey ? legendByKey[key] : null
-    if (Array.isArray(byKey)) return byKey
+    // ⚠️ 键要**两种都试**：正常是 `分析名:面板号`；但图例事件上报时如果 `chart`
+    //    还是空的，会存成 `:0` 这种残缺键 —— 以前只查精确键，于是"只勾一个图例 +
+    //    只看当前图例"经常拿不到选择、退回"表里列全部曲线"（用户实测的 bug）。
+    const nm = active?.name || ''
+    const idx = active?.index ?? 0
+    const byKey = legendByKey || null
+    const tries = [`${nm}:${idx}`, `${nm}:`, `:${idx}`, nm]
+    if (byKey) {
+      for (const k of tries) {
+        const v = byKey[k]
+        if (Array.isArray(v)) return v
+      }
+    }
     if (Array.isArray(visible)) return visible
     try {
       const opt = buildOption(result, active.index)
@@ -94,7 +104,7 @@ export default function DataPanel({ run, groups, chart = null, setChart = null,
       if (sel) return Object.keys(sel).filter((k) => sel[k])
     } catch { /* 忽略 */ }
     return null
-  }, [onlyShown, result, active, visible])
+  }, [onlyShown, result, active, visible, legendByKey])
 
   // 没有会话（自检 / 单独渲染）：同步用本地数据建表，首帧就有表头与行
   const local = useMemo(

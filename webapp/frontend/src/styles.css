@@ -622,6 +622,16 @@ table.stats.qc td.qc-c1 { color: #374151; }
   border: 1px solid var(--line-strong); border-radius: 6px;
   background: #fff; color: var(--text); font: inherit; font-size: 12.5px;
 }
+/* ⚠️ 统一约束（用户要求）：**分析参数的所有输入框，值在框内居中显示**。
+   以前默认左对齐，数字框短、下拉框长，一排看过去值的位置参差不齐。
+   这里用一条规则管住 `.ptab` 里的 input / select / textarea：
+     · text-align 让输入的文字居中；
+     · text-align-last 管住 `<select>` 的选中项与 textarea 的最后一行
+       （部分浏览器只认这个属性，缺了会退回左对齐）。
+   提示文字（placeholder）也居中——它和值是同一个文本框。 */
+.ptab input, .ptab select, .ptab textarea {
+  text-align: center; text-align-last: center;
+}
 .ptab input:focus, .ptab select:focus {
   outline: 2px solid var(--accent-soft); border-color: var(--accent);
 }

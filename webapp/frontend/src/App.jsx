@@ -105,7 +105,9 @@ export default function App() {
     // 默认关掉才能与它逐点对齐（实测 PE50：关掉差 0.000%，开着差 −0.01…−0.19%）。
     // NPT 体系里整盒缓慢平移会污染 MSD，那时再勾上。
     msd_drift: false,
-    orient_mode: 'repeat', orient_stride: 1, contact_mode: 'inter', g_ref: '',
+    // 取向：链段定义 / 几何骨架 stride / **P₂ 参考轴**（x / y / z=默认 / xyz 三者）
+    orient_mode: 'repeat', orient_stride: 1, orient_p2_axis: 'z',
+    contact_mode: 'inter', g_ref: '',
     // Rg：「分析对象」是**二选一**（整体体系 / 分子·链，默认分子·链），程序只算
     // 选中的那种，不再同时算整组与逐分子两套。`per_molecule` 现在只归 R_ee 用。
     mass_weighted: true, rg_object: 'molecule', per_molecule: true,
@@ -113,7 +115,8 @@ export default function App() {
     // BOO / 晶体识别：邻域半径留空 = 自动（按最近邻距离中位数推定）
     boo_cutoff: '', boo_averaged: true, q6_solid: 0.5, min_cluster: 10,
     // 面内 RDF (2D) / 两组分质心距
-    rdf2d_rmax: 70, rdf2d_nbins: 140, slab_lo: '', slab_hi: '', comdist_pbc: false,
+    // 质心距默认**用最小镜像**（PBC），见 groups 里的「质心距 PBC」勾选框
+    rdf2d_rmax: 70, rdf2d_nbins: 140, slab_lo: '', slab_hi: '', comdist_pbc: true,
   })
   const [primary, setPrimary] = useState({ mode: 'auto' })
   //: **真正决定参与分析**的组分（第 4 部分「参与分析的对象」勾选）
@@ -623,7 +626,10 @@ export default function App() {
                     // 分布柱宽 bin（度）：留空/非法 → 1°
                     bin_width: Number(params.bin_width) || 1 },
         orientation: { mode: params.orient_mode,
-                       stride: Number(params.orient_stride) || 1 },
+                       stride: Number(params.orient_stride) || 1,
+                       // P2 相对哪个参考轴：x / y / z（默认）/ xyz（三者都算）
+                       p2_axis: ['x', 'y', 'z', 'xyz'].includes(params.orient_p2_axis)
+                         ? params.orient_p2_axis : 'z' },
         // 结构有序度的局部结构分量：留空 → g_ref=None（该分量不计入指数）
         order: { g_ref: String(params.g_ref).trim() === ''
           ? null : Number(params.g_ref),
@@ -643,13 +649,14 @@ export default function App() {
         crystal: { cutoff: optNum(params.boo_cutoff),
                    q6_solid: Number(params.q6_solid) || 0.5,
                    min_cluster: Number(params.min_cluster) || 10 },
-        // 面内 RDF (2D)：slab 留空 = 全盒；两组分质心距：默认包裹坐标相减(与作者一致)
+        // 面内 RDF (2D)：slab 留空 = 全盒
+        // 两组分质心距：**默认用最小镜像**（PBC），取消勾选才退回"包裹坐标相减"
         rdf2d: { plane_axis: (params.axis === 'all' ? 2 : Number(params.axis)) ?? 2,
                  rmax: Number(params.rdf2d_rmax) || 70,
                  nbins: Number(params.rdf2d_nbins) || 140,
                  slab: slabRange },
         comdist: { axis: (params.axis === 'all' ? 2 : Number(params.axis)) ?? 2,
-                   pbc: params.comdist_pbc === true },
+                   pbc: params.comdist_pbc !== false },
       },
       selection: {
         primary,
@@ -1141,10 +1148,16 @@ export default function App() {
             {tab === 'struct' && <StructureView st={struct} />}
             {tab === 'charts' && (
               <ChartPanel onVisibleChange={(vis) => {
-              const k = `${chart?.name || ''}:${chart?.index ?? 0}`
-              legendByKeyRef.current[k] = vis
-              setVisibleCurves(vis)
-            }}
+                // 记住"这张图（分析项 + 面板）"的图例选择，供数据表「只看当前图例」用。
+                // 键同时写精确键与两个残缺键：图例事件上报时 `chart` 有可能还没就位
+                // （那时 key 会变成 `:0`），两条路都留着才不会让数据表取不到选择。
+                const nm = chart?.name || ''
+                const idx = chart?.index ?? 0
+                const ref = legendByKeyRef.current
+                ref[`${nm}:${idx}`] = vis
+                if (!nm) ref[`:${idx}`] = vis
+                setVisibleCurves(vis)
+              }}
                                  run={run} chart={chart} setChart={setChart}
                           live={live} titles={titles} groups={groups}
                           current={current?.result} panelIndex={current?.panelIndex ?? 0} />

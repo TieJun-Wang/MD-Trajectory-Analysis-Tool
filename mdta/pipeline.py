@@ -51,11 +51,14 @@ DEFAULT_PARAMS: dict = {
             "distance": "minimage", "drop_overlap": 0.0, "rho_scale": 1.0,
             "forcite": False},
     "rdf2d": {"plane_axis": 2, "rmax": 70.0, "nbins": 140},
-    "comdist": {"axis": 2, "pbc": False},
+    # 质心距默认**用最小镜像**（1.0.5 起，用户要求）：两个质心常分处盒边界两侧，
+    # 直接相减会得到 ~L 的假跳变。要复现作者 COM.py 的"包裹坐标相减"再手动关掉。
+    "comdist": {"axis": 2, "pbc": True},
     "contact": {"cutoff": 5.0},
     "interface": {"axis": 2, "nbins": 120},
     # 取向链段默认取**化学重复单元**（1.0.1 起；1.0.0 为几何骨架 "backbone"）
-    "orientation": {"mode": "repeat", "stride": 1},
+    # p2_axis：P₂ 的参考轴，默认 z 轴（与 Forcite / 外部脚本口径一致）
+    "orientation": {"mode": "repeat", "stride": 1, "p2_axis": "z"},
     # trans/gauche 判据与「二面角分析」共用同一阈值：改一处两处都变，
     # 免得同一条轨迹上两个模块报出不同的"trans 构象比例"。
     # ⚠️ 每个分析项在这张表里只能出现**一次**：字典字面量里重复的键会被后者
@@ -550,8 +553,8 @@ class Analyzer:
                                     verbose=verbose, **p)
         raise KeyError(f"未知分析项: {name!r}")
 
-    #: 预估用时：探测帧数（先测 2 帧、再测 k 帧，用来分离固定开销与每帧代价）
-    ESTIMATE_PROBE_FRAMES = 4
+    #: 预估用时：**连续**探测帧数（先丢 2 帧热身，再测 m 帧与 2m 帧，两点定斜率）
+    ESTIMATE_PROBE_FRAMES = 16
     #: 帧数少于这个数就不预估 —— 预估本身要跑 ``k`` 帧，小体系里这笔开销
     #: 可能比正式分析还大（AdK 10 帧实测：预估 12 s，正式跑 18 s）。
     #: 大体系（46 体系 10001 帧）预估算 17 s，占预计总时长不到 0.2%，非常划算。
@@ -592,7 +595,22 @@ class Analyzer:
         return {"touched": touched, "n_groups": len(groups)}
 
     def _time_one(self, name: str, params: Mapping, sel) -> float:
-        """把帧选择临时换成 ``sel``，跑一次并计时（**结果丢弃**）。"""
+        """把帧选择临时换成 ``sel``，跑一次并计时（**结果丢弃**）。
+
+        ⚠️ **计时前必须清空展开坐标缓存**（``positions_for`` 的 ``_UNWRAP_CACHE``）。
+        以前不清：两次探测里 ``t1`` 先访问了前 n1 帧、``tk`` 再访问前 n1 帧（命中
+        缓存）+ 后面几帧（冷），于是 ``tk − t1`` 只量到"1 帧的冷开销"，斜率被
+        严重低估 —— 正式跑时每一帧都是冷的。实测 20PE30（301 帧）：
+
+        · rg：预估 1.34 s / 实际 10.18 s（**−87%**）
+        · dihedral：预估 2.43 s / 实际 12.67 s（**−81%**）
+        · orientation：预估 0.42 s / 实际 0.86 s（−51%）
+
+        清缓存后两次测量都是"从冷开始"，固定开销各算一次、斜率才是真实的每帧代价。
+        """
+        from .analysis.base import clear_unwrap_cache
+
+        clear_unwrap_cache()
         self.frames = sel
         t0 = time.time()
         self.run(name, params=params.get(name), verbose=False)
@@ -643,12 +661,16 @@ class Analyzer:
                     out[name] = {"probe_frames": 0, "n_frames": n, "fixed_sec": None,
                                  "per_frame_sec": None, "est_sec": None, "note": note}
                 return out
-            if n > k:
-                probe = sel_full[::max(1, int(round(n / max(k, 1))))]
-            else:
-                probe = sel_full
+            # 探测帧必须是**连续的一段**（头 2m 帧），而且先丢一小段热身：
+            #   · 正式跑是连续读帧，"跨步抽 4 帧"的每帧代价明显偏低
+            #     （实测 20PE30 上 rg：跨步 16 ms/帧 vs 连续 26–33 ms/帧）；
+            #   · 第一次 ``run`` 会带上懒初始化（分子划分/键表/首次 unwrap），
+            #     不热身就会把它算进斜率，把每帧代价压到离谱的小值
+            #     （实测 rg 曾估出 3.8 ms/帧，真实 33 ms/帧 → 预估偏小 80%）。
+            m = max(int(k), 4)
+            probe = sel_full.head(min(2 * m, n))
             pk = probe.n_frames
-            n1 = min(2, pk)
+            m = max(2, min(m, pk // 2))
             for i, name in enumerate(names):
                 if cancel is not None and cancel.is_set():
                     break
@@ -656,16 +678,17 @@ class Analyzer:
                     on_item(i, len(names), name)
                 rec = {"probe_frames": pk, "n_frames": n, "fixed_sec": None,
                        "per_frame_sec": None, "est_sec": None, "note": ""}
-                # VACF 的定义要求 ≥3 帧，探测也至少给 3 帧
-                n_probe = n1
+                m_head = m
                 if name == "vacf":
                     if pk < 3:
                         rec["note"] = "帧数太少（VACF 至少需要 3 帧），不给预估"
                         out[name] = rec
                         continue
-                    n_probe = min(3, pk)   # VACF 的定义要求 ≥3 帧
+                    m_head = max(3, min(m, pk - 3))   # VACF 的定义要求 ≥3 帧
                 try:
-                    t1 = self._time_one(name, params, probe.head(n_probe))
+                    # 热身（丢弃）：让懒初始化不落到斜率里
+                    self._time_one(name, params, probe.head(min(2, pk)))
+                    t1 = self._time_one(name, params, probe.head(m_head))
                     tk = self._time_one(name, params, probe)
                 except Exception as exc:  # noqa: BLE001
                     msg = str(exc)
@@ -676,7 +699,7 @@ class Analyzer:
                         rec["note"] = f"估不出来（{type(exc).__name__}: {exc}）"
                     out[name] = rec
                     continue
-                per_raw = (tk - t1) / max(pk - n1, 1)
+                per_raw = (tk - t1) / max(pk - m_head, 1)
                 if per_raw <= 0:
                     # 两次测量没测出差异（固定开销主导或噪声）：**不能**因此报
                     # "每帧 0 ms" 去外推 —— 那会把这一项判成最快，排到队首却跑很久。
@@ -684,13 +707,18 @@ class Analyzer:
                     per, fixed = tk / max(pk, 1), 0.0
                 else:
                     per = per_raw
-                    fixed = max(0.0, t1 - per * n1)
+                    fixed = max(0.0, t1 - per * m_head)
+                # 探测只跑 32 帧，正式跑可能持续几十秒 —— 满载后 CPU 降频会让
+                # 真实每帧代价明显变高（实测 20PE30 的 rg：探测 16 ms/帧、
+                # 正式 33 ms/帧）。所以这个数只是量级参考；跑起来之后
+                # 前端/后端会**用实测耗时在线校正**（见 session._on_result）。
                 est = fixed + per * n
                 rec["fixed_sec"] = round(fixed, 3)
                 rec["per_frame_sec"] = round(per, 6)
                 rec["est_sec"] = round(est, 2)
-                rec["note"] = (f"按 {pk} 帧实测外推：固定 {fixed:.2f}s + "
-                               f"每帧 {per * 1000:.1f}ms × {n} 帧")
+                rec["note"] = (f"按前 {pk} 帧实测外推：固定 {fixed:.2f}s + "
+                               f"每帧 {per * 1000:.1f}ms × {n} 帧"
+                               f"（长时间满载会降频，实际可能偏高 30–60%）")
                 out[name] = rec
         finally:
             self.frames, self.current = keep_frames, keep_current

@@ -15,21 +15,41 @@ const FORMATS = [
 ]
 
 /**
+ * 把面板标题转成文件名片段 —— **必须与后端 `mdta/export.py::panel_slug` 一致**
+ * （把非字母数字/._- 的字符换成 `_`、去首尾下划线、截断 48 字符、空标题退回"图N"）。
+ */
+export function panelSlug(title, index = 0) {
+  const raw = String(title || '').trim()
+  if (!raw) return `图${Number(index) + 1}`
+  const out = [...raw].map((ch) => (/[\p{L}\p{N}._-]/u.test(ch) ? ch : '_'))
+    .join('').replace(/^_+|_+$/g, '').replace(/__+/g, '_')
+  return out.slice(0, 48) || `图${Number(index) + 1}`
+}
+
+/**
  * 列出某个分析在当前格式设置下**会产出哪些文件**。
- * 命名规则与 mdta/export.py 保持一致：
- *   单面板 → ``rg.csv`` / ``rg.png``；多面板 → ``rg__panel0.csv``；
- *   每面板单独出图 → ``rg__p1.png``；汇总 → ``summary.xlsx``。
+ * 命名规则与 mdta/export.py 保持一致（用户要求：不再用 panel0/panel1）：
+ *   单面板 → ``rg.csv`` / ``rg.png``；
+ *   多面板 → ``二面角__二面角分布.csv`` / ``二面角__trans_gauche_构象比例随时间变化.png``；
+ *   汇总 → ``summary.xlsx``。
  */
 export function filesFor(res, name, formats, panelPngs) {
   const panels = res.panels || []
   const n = panels.length || 1
   const multi = n > 1
   const out = []
+  const seen = new Map()
+  const slugOf = (i) => {
+    const s = panelSlug(panels[i]?.title, i)
+    const c = (seen.get(s) || 0) + 1
+    seen.set(s, c)
+    return c > 1 ? `${s}_${c}` : s
+  }
   if (formats.includes('csv')) {
     if (multi) {
       for (let i = 0; i < n; i += 1) {
-        out.push({ file: `${name}__panel${i}.csv`, kind: 'CSV',
-                   label: panels[i]?.title || `面板 ${i + 1}` })
+        out.push({ file: `${name}__${slugOf(i)}.csv`, kind: 'CSV',
+                   label: panels[i]?.title || `图 ${i + 1}` })
       }
     } else {
       out.push({ file: `${name}.csv`, kind: 'CSV', label: '数据表' })
@@ -38,9 +58,14 @@ export function filesFor(res, name, formats, panelPngs) {
   if (formats.includes('png')) {
     out.push({ file: `${name}.png`, kind: 'PNG', label: `合并图（${n} 张面板）` })
     if (panelPngs) {
+      const seen2 = new Map()
       for (let i = 0; i < n; i += 1) {
-        out.push({ file: `${name}__p${i + 1}.png`, kind: 'PNG',
-                   label: `单图 · ${panels[i]?.title || `面板 ${i + 1}`}` })
+        const s0 = panelSlug(panels[i]?.title, i)
+        const c = (seen2.get(s0) || 0) + 1
+        seen2.set(s0, c)
+        const s = c > 1 ? `${s0}_${c}` : s0
+        out.push({ file: `${name}__${s}.png`, kind: 'PNG',
+                   label: `单图 · ${panels[i]?.title || `图 ${i + 1}`}` })
       }
     }
   }
@@ -141,9 +166,17 @@ export default function ExportPanel({ run, sid, log, groups,
     const nPanels = (res.panels || []).length || 1
     const multi = nPanels > 1
     const keep = new Set([`${focus}.png`])
-    if (multi) keep.add(`${focus}__panel${Number(focusIndex) || 0}.csv`)
-    else keep.add(`${focus}.csv`)
-    keep.add(`${focus}__p${(Number(focusIndex) || 0) + 1}.png`)
+    // 文件名用面板标题（与后端 panel_slug 一致），不再有 panel0/p1 这类编号
+    const focused = filesFor(res, focus, formats, panelPngs)
+      .filter((f) => f.label && (res.panels || [])[Number(focusIndex)] &&
+        f.label === (res.panels || [])[Number(focusIndex)].title)
+      .map((f) => f.file)
+    if (multi) {
+      if (focused.length) focused.forEach((f) => keep.add(f))
+      else keep.add(`${focus}.csv`)
+    } else {
+      keep.add(`${focus}.csv`)
+    }
     // 模块只留焦点模块（其余关掉；用户可再勾回来）
     setWhichMods(() => Object.fromEntries(
       mods.map(([label]) => [label, label === focusMod])))

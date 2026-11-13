@@ -2253,6 +2253,26 @@ class Session:
                     job.frac = max(job.frac, done / max(total, 1))
                     job.message = f"已完成 {done}/{total}：{ANALYSIS_TITLES.get(name, name)}"
                     job.last_result = name
+                    # ---- 预估**在线校正** ----
+                    # 探测只跑前 32 帧就外推，而正式跑可能持续几十秒（CPU 满载降频
+                    # 会让每帧代价翻倍）。这里用"已完成项的 实测 / 预估"之比去缩放
+                    # **还没跑的那些项**的预估，跑起来的 ETA 会自己收敛，
+                    # 不会一直停在探测阶段那个偏小的数上。
+                    if job.estimates:
+                        ratios = []
+                        for nm, t_act in job.timings.items():
+                            e0 = job.estimates.get(nm)
+                            if e0 and t_act and t_act > 0.05 and e0 > 0.05:
+                                ratios.append(float(t_act) / float(e0))
+                        if ratios:
+                            ratios.sort()
+                            k = ratios[len(ratios) // 2]      # 中位数，抗离群
+                            k = min(max(k, 0.3), 3.0)
+                            if abs(k - 1.0) > 0.05:
+                                for nm in list(job.estimates):
+                                    if nm not in job.timings:
+                                        job.estimates[nm] = round(
+                                            float(job.estimates[nm]) * k, 2)
 
             # ---- 阶段一：先跑几帧，实测每项用时并外推；按短→长排好序 -----
             estimates: dict[str, float | None] = {}

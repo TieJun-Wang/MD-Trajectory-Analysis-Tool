@@ -1537,17 +1537,18 @@ def _coordination_number(r: np.ndarray, g: np.ndarray, rmin: float | None,
 # ------------------------------------------------------------------ 接触分析
 @register("comdist", "两组分质心距")
 def analyze_com_distance(mdt, groups: Mapping[str, object], selection: FrameSelection, *,
-                         pair: tuple | None = None, axis: int = 2, pbc: bool = False,
+                         pair: tuple | None = None, axis: int = 2, pbc: bool = True,
                          verbose: bool = False) -> AnalysisResult:
     """两个组分的**质心距**随时间（作者 ``COM.py`` 的量：聚合物–膜 z 距离）。
 
-    口径（默认与文献一致，可切换）：
+    口径（**1.0.5 起默认用最小镜像**，用户要求）：
 
     - ``pair`` 默认取**原子数最多**的两个组分（作者：聚合物 vs 膜）；
     - ``axis`` 给"沿该轴的分量"，同时输出总距离；
-    - ``pbc=False``（默认）按**包裹坐标直接相减**，与 ``COM.py`` 的
-      ``z_poly - z_mem`` 完全一致；``pbc=True`` 时对质心差取**最小镜像**，
-      适合质心本身跨越盒边界的体系。
+    - ``pbc=True``（**默认**）：对质心差取**最小镜像** —— 两个质心可能分别落在
+      盒边界两侧（膜跨盒、体系被折回），直接相减会得到 ~L 的假跳变；
+    - ``pbc=False``：按包裹坐标直接相减，与作者 ``COM.py`` 的
+      ``z_poly - z_mem`` 一致（要逐点复现那篇的图时才用）。
 
     ⚠️ 注意：这是**质心距**，不是界面宽度，也不能用来推"某窄带内的粒子数" ——
     后者必须逐帧用**动态参考**（本函数逐帧取质心正是这个原因；实测膜质心 z 的

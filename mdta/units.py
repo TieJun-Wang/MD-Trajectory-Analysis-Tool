@@ -23,14 +23,14 @@ KB_KJ_MOL_K = 0.008314462618
 
 
 def time_axis(times_ps: np.ndarray) -> tuple[np.ndarray, str]:
-    """自动选择 ps / ns 作为时间轴单位，返回 ``(数值, 轴标签)``。"""
+    """时间轴**一律用 ps**，返回 ``(数值, 轴标签 "时间 (ps)")``。
+
+    为什么不再自动切 ns（用户要求）：同一份数据里"一半图是 ps、一半图是 ns"
+    最容易读错 —— 尤其数据表 / CSV 的列名跟着走，粘到 Excel 里就看不出单位了。
+    现在图上、表里、导出的 CSV 列名全部是 ``时间 (ps)``，数值就是 ps。
+    """
     t = np.asarray(times_ps, dtype=float)
-    if t.size == 0:
-        return t, "Time (ps)"
-    span = float(np.nanmax(t) - np.nanmin(t))
-    if span >= 1000.0:
-        return t / 1000.0, "时间 Time (ns)"
-    return t, "时间 Time (ps)"
+    return t, "时间 (ps)"
 
 
 def mass_density_to_g_cm3(density_amu_per_a3: np.ndarray) -> np.ndarray:

@@ -68,8 +68,14 @@ class SystemInfo:
         ))
 
     @property
+    def total_time_ps(self) -> float:
+        """总模拟时长（ps）。**界面/导出统一用 ps**，不再换算成 ns。"""
+        return float(self.last_time_ps - self.first_time_ps)
+
+    @property
     def total_time_ns(self) -> float:
-        return (self.last_time_ps - self.first_time_ps) / 1000.0
+        """总模拟时长（ns）—— 保留给脚本/旧调用，界面不再用它。"""
+        return self.total_time_ps / 1000.0
 
     def to_rows(self) -> list[tuple[str, str]]:
         """转成（项目, 数值）列表，供界面/文本展示。"""
@@ -82,7 +88,7 @@ class SystemInfo:
         rows.append(("帧数", f"{self.n_frames:,}"))
         rows.append(("时间间隔", f"{self.dt_ps:.4g} ps"))
         rows.append(("模拟时间", f"{self.first_time_ps:.3f} – {self.last_time_ps:.3f} ps"
-                                    f"  (共 {self.total_time_ns:.3f} ns)"))
+                                    f"  (共 {self.total_time_ps:.3f} ps)"))
         if self.box_dimensions is not None:
             a, b, c = self.box_dimensions[:3]
             rows.append(("模拟盒", f"{a:.4f} × {b:.4f} × {c:.4f} Å  ({self.box_type})"))
@@ -287,7 +293,7 @@ def info_tables(info: SystemInfo, max_chain_types: int = 20) -> list[dict]:
         ("时间间隔", f"{info.dt_ps:.4g} ps"),
         ("首帧时刻", f"{info.first_time_ps:.3f} ps"),
         ("末帧时刻", f"{info.last_time_ps:.3f} ps"),
-        ("总模拟时长", f"{info.total_time_ns:.3f} ns"),
+        ("总模拟时长", f"{info.total_time_ps:.3f} ps"),
     ])
 
     # -------------------------------------------------------------- 模拟盒

@@ -22,7 +22,8 @@ function summaryRows(info) {
     ['段 (segment)', info.n_segments],
     ['帧数', info.n_frames?.toLocaleString()],
     ['时间间隔', `${fmt(info.dt_ps, 4)} ps`],
-    ['模拟时间', `${fmt(info.total_time_ps / 1000)} ns`
+    // 时间**一律用 ps**（用户要求：不要 ns，且必须带单位）
+    ['模拟时间', `${fmt(info.total_time_ps)} ps`
       + `（${fmt(info.first_time_ps)}–${fmt(info.last_time_ps)} ps）`],
     ['模拟盒', info.box_dimensions
       ? `${fmt(info.box_dimensions)} Å（${info.box_type === 'triclinic' ? '三斜' : '正交'}）`

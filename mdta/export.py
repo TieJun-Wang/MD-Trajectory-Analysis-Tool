@@ -33,12 +33,31 @@ def result_to_frames(result) -> "OrderedDict[str, pd.DataFrame]":
     return result.dataframes()
 
 
+def panel_slug(title: str, index: int = 0) -> str:
+    """把面板标题转成"关键信息"文件名片段（用户要求：不再用 panel0/panel1）。
+
+    ``"二面角分布"`` → ``二面角分布``；``"trans / gauche 构象比例随时间变化"`` →
+    ``trans_gauche_构象比例随时间变化``。标题为空时退回 ``图{index+1}``。
+    文件名长度上限 48 字符（Windows 路径限制 + 太长的名字在导出列表里读不了）。
+    """
+    t = str(title or "").strip()
+    if not t:
+        return f"图{int(index) + 1}"
+    t = safe_name(t)
+    # 连续下划线折叠成一个（"trans / gauche …" 会变成 trans___gauche_…）
+    while "__" in t:
+        t = t.replace("__", "_")
+    return t.strip("_")[:48] or f"图{int(index) + 1}"
+
+
 def export_csv(result, outdir: str = ".", *, prefix: str | None = None,
                long_format: bool = False) -> list[str]:
     """把结果导出为 CSV。
 
     - 单面板结果（如 Rg）导出成一个宽表 ``Rg.csv``；
-    - 多面板结果（如二面角）每个面板一个文件 ``dihedral__panel0.csv`` …；
+    - 多面板结果用**面板标题**命名（用户要求，不再用 panel0/panel1）：
+      ``二面角__二面角分布.csv``、``二面角__trans_gauche_构象比例随时间变化.csv``；
+      标题重复时自动加 ``_2``、``_3`` 后缀；
     - ``long_format=True`` 时改为一个长表 ``panel, curve, x_label, y_label, x, y``。
     """
     os.makedirs(outdir, exist_ok=True)
@@ -49,8 +68,22 @@ def export_csv(result, outdir: str = ".", *, prefix: str | None = None,
     frames = result_to_frames(result)
     multi = len(frames) > 1
     written: list[str] = []
-    for i, (_key, df) in enumerate(frames.items()):
-        fname = f"{base}__panel{i}.csv" if multi else f"{base}.csv"
+    used: dict[str, int] = {}
+    for i, (key, df) in enumerate(frames.items()):
+        if not multi:
+            fname = f"{base}.csv"
+        else:
+            # 标题优先取面板标题；取不到时用 dataframes() 的键
+            try:
+                title = result.panel(i).title
+            except Exception:                                   # noqa: BLE001
+                title = ""
+            slug = panel_slug(title or key, i)
+            n = used.get(slug, 0) + 1
+            used[slug] = n
+            if n > 1:
+                slug = f"{slug}_{n}"
+            fname = f"{base}__{slug}.csv"
         path = os.path.join(outdir, fname)
         df.to_csv(path, index=False, encoding="utf-8-sig")
         written.append(path)
@@ -108,9 +141,23 @@ def export_panel_pngs(result, outdir: str = ".", *, prefix: str | None = None,
     if figsize is None and panel_px is not None:
         figsize = pixel_figsize(panel_px[0], panel_px[1], dpi)
     written: list[str] = []
+    used: dict[str, int] = {}
     for i in range(n):
         fig = plot_panel(result, i, figsize=figsize)
-        fname = f"{base}__p{i + 1}.png" if multi else f"{base}.png"
+        if multi:
+            # 与 CSV 同一套命名：用**面板标题**，不再用 p1/p2（用户要求）
+            try:
+                title = result.panel(i).title
+            except Exception:                                   # noqa: BLE001
+                title = ""
+            slug = panel_slug(title, i)
+            c = used.get(slug, 0) + 1
+            used[slug] = c
+            if c > 1:
+                slug = f"{slug}_{c}"
+            fname = f"{base}__{slug}.png"
+        else:
+            fname = f"{base}.png"
         path = os.path.join(outdir, fname)
         written.append(save_figure(fig, path, dpi=dpi))
     return written

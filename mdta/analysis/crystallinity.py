@@ -94,11 +94,25 @@ def segment_pairs(ag, mode: str = "backbone", *, custom_pairs=None,
     if mode != "backbone":
         raise ValueError(f"未知的链段模式: {mode!r}")
 
-    path = backbone_path(ag, heavy_only=heavy_only)
-    if path.size < 2:
-        return np.zeros((0, 2), dtype=int)
+    # ⚠️ **逐分子**取骨架：以前对整个 ag 只调一次 backbone_path()，而它内部是两次
+    #    BFS —— BFS 跳不出连通分量，于是多分子选择里**只有第一个分子**的链段被算
+    #    进去。实测「石墨烯 + 100 条 C12」体系：整个烷烃组分只得到 **10 个**链段
+    #    （应为 1000 个），取向参数因此完全错误（P2 从 0.0044 变成 −0.396）。
+    #    现在按连通碎片逐分子取路径，单分子选择的配对与旧实现逐位相同。
+    try:
+        frags = list(ag.fragments)
+    except Exception:                                        # noqa: BLE001
+        frags = [ag]
     s = max(1, int(stride))
-    rows = [(int(path[i]), int(path[i + s])) for i in range(path.size - s)]
+    rows: list[tuple[int, int]] = []
+    for f in frags:
+        if f.n_atoms < s + 1:
+            continue
+        path = backbone_path(f, heavy_only=heavy_only)
+        if path.size < s + 1:
+            continue
+        for i in range(path.size - s):
+            rows.append((int(path[i]), int(path[i + s])))
     return np.asarray(rows, dtype=int).reshape(-1, 2)
 
 
@@ -282,6 +296,7 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
                         mode: str = "repeat", custom_pairs=None,
                         stride: int = 1, heavy_only: bool = True,
                         reference_axis: Sequence[float] = (0.0, 0.0, 1.0),
+                        p2_axis: str = "z",
                         nbins: int = 60, verbose: bool = False,
                         label: str = "链",
                         min_segments: int = MIN_SEGMENTS_DEFAULT) -> AnalysisResult:
@@ -300,12 +315,19 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
     应传**整个组分**（例如全部 polymer 分子），而不是一条链——结果里会写明
     链段来自多少个分子，避免"只算一条链却命名整个膜"。
 
-    输出：
+    ``p2_axis``
+        P₂ 相对哪个参考轴算（``<(3cos²θ−1)/2>``）：
 
-    - 取向参数 S 随时间变化（取向张量最大本征值，无需外部参考方向）
-    - 相对参考方向的二阶序参数 P₂ = <(3cos²θ − 1)/2>
-    - 链段取向角分布（相对时间平均取向矢）
-    - 取向矢方向随时间的变化
+        - ``"z"``（默认）/ ``"x"`` / ``"y"``：只算该轴，图上是 1 条曲线；
+        - ``"xyz"``：x、y、z 三个轴各一条（同一张图上 3 条）。
+
+        给了 ``reference_axis``（任意方向向量）时以它为准，``p2_axis`` 不起作用。
+
+    输出（1.0.5 起 **S 与 P₂ 各占一张图**，用户要求）：
+
+    - 图 1「取向参数 S 随时间变化」：取向张量最大本征值 S（无需外部参考方向）
+    - 图 2「二阶序参数 P₂ 随时间变化」：相对参考轴的 P₂（可 x/y/z 或三者）
+    - 图 3「链段取向分布」：链段与时间平均取向矢的夹角分布
     """
     times = np.asarray(selection.times_ps, dtype=float)
     pairs, sinfo = resolve_segments(ag, mode=mode, custom_pairs=custom_pairs,
@@ -353,10 +375,28 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
 
     n_f = times.size
     S_t = np.full(n_f, np.nan)
-    p2_t = np.full(n_f, np.nan)
     dirs = np.full((n_f, 3), np.nan)
-    ref = np.asarray(reference_axis, dtype=float)
-    ref = ref / np.linalg.norm(ref) if np.linalg.norm(ref) > 0 else np.array([0.0, 0.0, 1.0])
+
+    # ---- P₂ 的参考轴：p2_axis 选 x/y/z 或 xyz（三者都算）
+    AXES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
+    ax_key = str(p2_axis or "z").strip().lower()
+    if ax_key not in ("x", "y", "z", "xyz"):
+        ax_key = "z"
+    ref_given = np.asarray(reference_axis, dtype=float)
+    # 调用方显式给了方向（不是默认 z）时以它为准
+    ref_is_custom = not np.allclose(ref_given, (0.0, 0.0, 1.0))
+    if ref_is_custom:
+        axes = {"ref": tuple(ref_given)}
+    elif ax_key == "xyz":
+        axes = {"x": AXES["x"], "y": AXES["y"], "z": AXES["z"]}
+    else:
+        axes = {ax_key: AXES[ax_key]}
+    refs = {}
+    for name, v in axes.items():
+        r = np.asarray(v, dtype=float)
+        n = np.linalg.norm(r)
+        refs[name] = r / n if n > 0 else np.array([0.0, 0.0, 1.0])
+    p2_series = {name: np.full(n_f, np.nan) for name in refs}
 
     for k in range(n_f):
         st = nematic_order_parameter(vecs[k])
@@ -367,8 +407,9 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         good = nrm > 1e-12
         if good.any():
             u = v[good] / nrm[good, None]
-            cos = np.clip(u @ ref, -1.0, 1.0)
-            p2_t[k] = float(np.mean(0.5 * (3.0 * cos ** 2 - 1.0)))
+            for name, ref in refs.items():
+                cos = np.clip(u @ ref, -1.0, 1.0)
+                p2_series[name][k] = float(np.mean(0.5 * (3.0 * cos ** 2 - 1.0)))
 
     mean_dir = np.nanmean(dirs, axis=0)
     if np.linalg.norm(mean_dir) > 0:
@@ -381,16 +422,29 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         meta={"selection": label, "mode": mode, "stride": int(stride),
               "n_segments": int(pairs.shape[0]), "n_frames": n_f, "n_atoms": int(ag.n_atoms),
               "n_molecules": int(n_mol), "segment_source": sinfo.get("source"),
-              "segment_fallback": bool(sinfo.get("fallback"))},
+              "segment_fallback": bool(sinfo.get("fallback")), "p2_axis": ax_key},
     )
+    # 1.0.5 起 S 与 P₂ **各占一张图**（用户要求：两条曲线挤在一起不好读）。
+    # 顺序：S → P₂ → 角度分布（角度分布固定排最后，老图号只 +1）。
     res.panels = [
-        Panel(xlabel=tlabel, ylabel="取向参数", title="取向参数随时间变化"),
+        Panel(xlabel=tlabel, ylabel="取向参数 S",
+              title="取向参数 S 随时间变化（二阶取向张量最大本征值）"),
+        Panel(xlabel=tlabel, ylabel="二阶序参数 P₂",
+              title="二阶序参数 P₂ 随时间变化（相对参考轴）"),
         # 角度分布：**普通直角坐标**（用户后续要求删掉极坐标图）
         Panel(xlabel="链段与平均取向矢的夹角 θ (°)", ylabel="概率密度 P(θ)",
               title="链段取向分布"),
     ]
     res.add_curve("S (二阶取向张量最大本征值)", tx, S_t, panel=0)
-    res.add_curve("二阶序参数 P2 (相对参考轴)", tx, p2_t, panel=0)
+    for name in refs:
+        if name == "ref":
+            clabel = "二阶序参数 P2 (相对参考轴)"
+        elif len(refs) == 1:
+            clabel = f"二阶序参数 P2 (相对 {name.upper()} 轴)"
+        else:
+            clabel = f"P2_{name} ({name.upper()} 轴)"
+        res.add_curve(clabel, tx, p2_series[name], panel=1)
+    p2_t = p2_series.get("z", next(iter(p2_series.values())))
 
     # 取向角分布（相对时间平均取向矢）
     if pairs.size:
@@ -407,7 +461,7 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
             edges = np.linspace(0.0, 90.0, int(nbins) + 1)
             hist, _ = np.histogram(theta, bins=edges, density=True)
             res.add_curve("取向角分布", bin_edges_to_centers(edges), hist,
-                          kind="bar", panel=1)
+                          kind="bar", panel=2)
             res.summary["平均夹角 θ (°)"] = float(np.mean(theta))
             res.summary["完全无序参考值 <cos²θ>"] = 1.0 / 3.0
             res.summary["实测 <cos²θ>"] = float(np.mean(cos_all ** 2))
@@ -419,7 +473,9 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
     res.summary.update(describe_array(S_t, prefix="S "))
     _bm, sem = block_average(S_t, n_blocks=min(5, max(2, n_f // 2)))
     res.summary["S 块平均标准误"] = float(sem)
-    res.summary.update(describe_array(p2_t, prefix="P2 "))
+    for name, arr in p2_series.items():
+        tag = "P2" if name == "ref" else f"P2_{name}"
+        res.summary.update(describe_array(arr, prefix=f"{tag} "))
     res.summary["平均取向矢 (director)"] = " ".join(f"{x:+.4f}" for x in mean_dir)
     res.summary["链段数"] = int(pairs.shape[0])
     if pairs.shape[0] >= 2:
@@ -427,9 +483,17 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
             np.sqrt(2.0 / (5.0 * float(pairs.shape[0]))))
     res.summary["链段来源"] = str(sinfo.get("source"))
     res.summary["链段所属分子数"] = int(n_mol)
-    res.summary["参考轴"] = " ".join(f"{x:g}" for x in ref)
+    if "ref" in refs:
+        res.summary["参考轴"] = " ".join(f"{x:g}" for x in refs["ref"])
+    else:
+        res.summary["P2 参考轴"] = " / ".join(n.upper() for n in refs)
+        res.summary["参考轴"] = " ".join(f"{x:g}" for x in refs[next(iter(refs))])
     res.add_notes("S 由取向张量 Q=<(3uuᵀ-I)/2> 的最大本征值给出；S=0 完全无序，S=1 完全取向。")
-    res.add_notes("P₂ 为相对给定参考轴的二阶序参数，便于与文献对比。")
+    res.add_notes(
+        "P₂ 为**相对参考轴**的二阶序参数 "
+        + ("（参考轴：" + " / ".join(n.upper() + " 轴" for n in refs) + "）"
+           if "ref" not in refs else "（参考轴由调用方给出）")
+        + "，便于与文献/外部工具对比；S 与 P₂ 现在各占一张图。")
     res.add_notes(f"链段定义：mode={mode}，共 {pairs.shape[0]} 个链段"
                   f"（{sinfo.get('detail') or ''}）")
     if n_mol > 1:

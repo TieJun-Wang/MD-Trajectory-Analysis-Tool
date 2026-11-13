@@ -19,6 +19,11 @@ export default function ChartView({ result, panelIndex, height = '100%',
   const chartRef = useRef(null)
   // 最近一次「可见曲线」：图例事件里直接读它，避免闭包拿到旧值
   const visibleRef = useRef(null)
+  //: 上一张图的身份（分析项名 + 面板号）。只有**真的换了图**才清掉图例筛选，
+  //: 结果对象刷新（跑分析时每算完一项都会推新结果）不能清 —— 以前每刷新一次就
+  //: `onVisibleChange(null)`，于是"数据表 → 只看当前图例"经常拿到空选择
+  //: （用户实测：MSD 只勾了一个图例，点「只看当前图例」没效果）。
+  const lastKeyRef = useRef(null)
 
   // 初始化 / 销毁
   useEffect(() => {
@@ -83,8 +88,22 @@ export default function ChartView({ result, panelIndex, height = '100%',
     chart.clear()
     chart.setOption(buildOption(result, panelIndex, null), true)
     requestAnimationFrame(() => onLayout?.())
-    visibleRef.current = null
-    onVisibleChange?.(null)   // 换图/换面板时清掉上一次的图例筛选
+    // 只有**换了图**（分析项/面板变了）才清掉图例筛选；同一张图的数据刷新
+    // （实时跑分析时每算完一项推一次）要保留用户刚才的勾选，并把勾选**重新画上**。
+    const key = `${result.name || ''}:${panelIndex}`
+    const same = lastKeyRef.current === key
+    lastKeyRef.current = key
+    const keep = same ? visibleRef.current : null
+    if (Array.isArray(keep) && keep.length) {
+      const labels = result.curves
+        .filter((c) => c.panel === panelIndex).map((c) => c.label)
+      const selected = {}
+      labels.forEach((l) => { selected[l] = keep.includes(l) })
+      chart.setOption({ legend: { selected } }, { lazyUpdate: true })
+    } else {
+      visibleRef.current = null
+      onVisibleChange?.(null)   // 换图/换面板时清掉上一次的图例筛选
+    }
   }, [result, panelIndex])
 
   // 外部（父组件）改动可见曲线时，同步坐标轴

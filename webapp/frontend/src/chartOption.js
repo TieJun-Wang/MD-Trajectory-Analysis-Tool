@@ -280,13 +280,21 @@ export function buildOption(result, panelIndex, visible = null) {
   const firstGroup = groupsInOrder.length > 1 ? groupsInOrder[0] : null
   // MSD 的「各轴分解与各向异性」：同一个对象有 5 条曲线（x/y/z/∥/⊥），
   // 一起画会互相压住 —— 默认只画第一条，其余由图例手动打开（用户要求）。
-  const onlyFirstOfPanel = String(result?.name || '') === 'msd'
-    && String(panel?.title || '').includes('各轴分解')
+  //
+  // 结晶板块：每个面板有两条"同量纲不同口径"的曲线（φ_c 与固相占比、晶簇尺寸与
+  // 个数），一起画会互相压住 —— 默认只勾第一条（用户要求）。
+  //
+  // 取向板块**不在这个集合里**：1.0.5 起 S 与 P₂ 已拆成两张图，每个面板本身只有
+  // 一条曲线；而 P₂ 选「xyz 三者」时那三条是用户**明确要一起看**的，不该被藏掉。
+  const FIRST_ONLY_ANALYSES = new Set(['crystal'])
+  const onlyFirstOfPanel = (String(result?.name || '') === 'msd'
+    && String(panel?.title || '').includes('各轴分解'))
+    || FIRST_ONLY_ANALYSES.has(String(result?.name || ''))
   const defaultSelected = {}
   for (const c of curves) {
     const g = String(c.group || '')
     if (onlyFirstOfPanel) {
-      // 各轴分解：**不管有几个组分**都只默认勾第一条（其余图例手动打开）
+      // 只默认勾**第一条**（MSD 各轴分解 / 取向 / 结晶；其余图例手动打开）
       defaultSelected[c.label] = c.label === curves[0].label
     } else {
       defaultSelected[c.label] = firstGroup ? g === firstGroup : true

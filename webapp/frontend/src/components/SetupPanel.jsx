@@ -706,8 +706,9 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
       F('slab_hi', '叶层 z 上限 (Å)', 'input',
         numInput('留空=盒顶', { step: 1, ...p('slab_hi') }), '留空=盒顶'),
       F('comdist_pbc', '质心距 PBC', 'check',
-        chk('comdist_pbc', '用最小镜像',
-          '默认按包裹坐标相减；质心可能跨盒边界时勾上'), '用最小镜像', 6),
+        chk('comdist_pbc', '用最小镜像（默认）',
+          '默认勾上：两个质心常分处盒边界两侧，直接相减会得到 ~L 的假跳变；'
+          + '取消勾选才退回"包裹坐标直接相减"（复现作者 COM.py 时用）'), '用最小镜像', 6),
     ]],
     ['键取向序 BOO / 晶体识别', ['boo', 'crystal'], [
       F('boo_cutoff', '邻域半径 (Å)', 'input',
@@ -813,13 +814,22 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
                                    ...p('bin_width') })),
     ]],
     ['链段取向分析', ['orientation'], [
+      // 这两项**各自独占一行**（用户要求）：取向链段定义决定"链段是什么"，
+      // stride 只对几何骨架生效，放同一行容易被误读成两个独立必填项。
       F('orient_mode', '取向链段定义', 'select', sel('orient_mode', [
         ['repeat', '化学重复单元（默认）'],
         ['backbone', '几何骨架'],
         ['bonds', '所有重原子键'],
-      ])),
+      ]), '', 6),
       F('orient_stride', '几何骨架 stride', 'input',
-        numInput('', { step: 1, min: 1, ...p('orient_stride') })),
+        numInput('', { step: 1, min: 1, ...p('orient_stride') }), '', 6),
+      // P₂ 相对哪个参考轴算：x / y / z（默认 z）或 xyz 三者都算（同一张图三条）
+      F('orient_p2_axis', 'P2 参考轴', 'select', sel('orient_p2_axis', [
+        ['z', 'z 轴（默认）'],
+        ['x', 'x 轴'],
+        ['y', 'y 轴'],
+        ['xyz', 'x + y + z 三者'],
+      ]), '', 6),
     ]],
     ['结构有序度分析', ['order'], [
       F('g_ref', '局部结构 g_ref', 'input', numInput('留空不计入', { step: 1, ...p('g_ref') }),
