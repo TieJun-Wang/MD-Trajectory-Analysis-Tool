@@ -50,7 +50,8 @@ PANEL_SLUGS: dict[tuple[str, int], str] = {
     # 取向与结晶
     ("orientation", 0): "s",      # 取向参数 S
     ("orientation", 1): "p2",     # 二阶序参数 P2
-    ("orientation", 2): "dist",   # 链段取向分布
+    ("orientation", 2): "angle",  # 链段与参考轴的夹角 θ(t)
+    ("orientation", 3): "dist",   # 链段取向分布
     ("order", 0): "components",   # 各有序度分量
     ("order", 1): "index",        # 多分量指数
     ("boo", 0): "qbar6",          # q̄6 随时间

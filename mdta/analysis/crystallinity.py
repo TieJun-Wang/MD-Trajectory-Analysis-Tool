@@ -323,11 +323,13 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
 
         给了 ``reference_axis``（任意方向向量）时以它为准，``p2_axis`` 不起作用。
 
-    输出（1.0.5 起 **S 与 P₂ 各占一张图**，用户要求）：
+    输出（1.0.6 起 **S / P₂ / 夹角 θ(t) 各占一张图**）：
 
     - 图 1「取向参数 S 随时间变化」：取向张量最大本征值 S（无需外部参考方向）
     - 图 2「二阶序参数 P₂ 随时间变化」：相对参考轴的 P₂（可 x/y/z 或三者）
-    - 图 3「链段取向分布」：链段与时间平均取向矢的夹角分布
+    - 图 3「链段与参考轴的夹角随时间变化」：θ̄(t) = ⟨arccos|u·ref|⟩（度，0–90°）；
+      链段无方向性所以取 |cos|，**完全无序时理论值 54.74°**（cos²θ=1/3、P₂=0）
+    - 图 4「链段取向分布」：链段与**时间平均取向矢**的夹角分布
     """
     times = np.asarray(selection.times_ps, dtype=float)
     pairs, sinfo = resolve_segments(ag, mode=mode, custom_pairs=custom_pairs,
@@ -397,6 +399,10 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         n = np.linalg.norm(r)
         refs[name] = r / n if n > 0 else np.array([0.0, 0.0, 1.0])
     p2_series = {name: np.full(n_f, np.nan) for name in refs}
+    #: 链段与参考轴的**平均夹角** θ(t)（度）。链段没有方向性（u 与 −u 等价），
+    #: 所以先取 |cos| 再 arccos → θ ∈ [0°, 90°]；完全无序时理论值 54.74°
+    #: （cos²θ = 1/3，正好对应 P₂ = 0）。
+    theta_series = {name: np.full(n_f, np.nan) for name in refs}
 
     for k in range(n_f):
         st = nematic_order_parameter(vecs[k])
@@ -410,6 +416,8 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
             for name, ref in refs.items():
                 cos = np.clip(u @ ref, -1.0, 1.0)
                 p2_series[name][k] = float(np.mean(0.5 * (3.0 * cos ** 2 - 1.0)))
+                theta_series[name][k] = float(
+                    np.degrees(np.mean(np.arccos(np.abs(cos)))))
 
     mean_dir = np.nanmean(dirs, axis=0)
     if np.linalg.norm(mean_dir) > 0:
@@ -425,12 +433,16 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
               "segment_fallback": bool(sinfo.get("fallback")), "p2_axis": ax_key},
     )
     # 1.0.5 起 S 与 P₂ **各占一张图**（用户要求：两条曲线挤在一起不好读）。
-    # 顺序：S → P₂ → 角度分布（角度分布固定排最后，老图号只 +1）。
+    # 1.0.6 起再加一张「链段与参考轴的夹角 θ(t)」（用户要求：要角度的**时间序列**，
+    # 而不只是"相对平均取向矢的夹角分布"）。
+    # 顺序：S → P₂ → 夹角 θ(t) → 角度分布（分布图固定排最后）。
     res.panels = [
         Panel(xlabel=tlabel, ylabel="取向参数 S",
               title="取向参数 S 随时间变化（二阶取向张量最大本征值）"),
         Panel(xlabel=tlabel, ylabel="二阶序参数 P₂",
               title="二阶序参数 P₂ 随时间变化（相对参考轴）"),
+        Panel(xlabel=tlabel, ylabel="平均夹角 θ (°)",
+              title="链段与参考轴的夹角随时间变化"),
         # 角度分布：**普通直角坐标**（用户后续要求删掉极坐标图）
         Panel(xlabel="链段与平均取向矢的夹角 θ (°)", ylabel="概率密度 P(θ)",
               title="链段取向分布"),
@@ -444,6 +456,14 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         else:
             clabel = f"P2_{name} ({name.upper()} 轴)"
         res.add_curve(clabel, tx, p2_series[name], panel=1)
+    for name in refs:
+        if name == "ref":
+            tlabel_c = "平均夹角 θ (相对参考轴)"
+        elif len(refs) == 1:
+            tlabel_c = f"平均夹角 θ (相对 {name.upper()} 轴)"
+        else:
+            tlabel_c = f"θ_{name} ({name.upper()} 轴)"
+        res.add_curve(tlabel_c, tx, theta_series[name], panel=2)
     p2_t = p2_series.get("z", next(iter(p2_series.values())))
 
     # 取向角分布（相对时间平均取向矢）
@@ -461,8 +481,8 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
             edges = np.linspace(0.0, 90.0, int(nbins) + 1)
             hist, _ = np.histogram(theta, bins=edges, density=True)
             res.add_curve("取向角分布", bin_edges_to_centers(edges), hist,
-                          kind="bar", panel=2)
-            res.summary["平均夹角 θ (°)"] = float(np.mean(theta))
+                          kind="bar", panel=3)
+            res.summary["平均夹角 θ (相对平均取向矢, °)"] = float(np.mean(theta))
             res.summary["完全无序参考值 <cos²θ>"] = 1.0 / 3.0
             res.summary["实测 <cos²θ>"] = float(np.mean(cos_all ** 2))
 
@@ -476,6 +496,15 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
     for name, arr in p2_series.items():
         tag = "P2" if name == "ref" else f"P2_{name}"
         res.summary.update(describe_array(arr, prefix=f"{tag} "))
+    # 夹角 θ(t) 的统计（新面板的数据；与上面"相对平均取向矢"的分布是两回事）
+    for name, arr in theta_series.items():
+        tag = "θ_夹角" if name == "ref" else f"θ_夹角_{name.upper()}"
+        res.summary.update(describe_array(arr, prefix=f"{tag} "))
+    _first_th = theta_series[next(iter(theta_series))]
+    if np.isfinite(_first_th).any():
+        res.summary["平均夹角 θ (相对参考轴, °)"] = float(np.nanmean(_first_th))
+        res.summary["完全无序参考角 θ (°)"] = float(
+            np.degrees(np.arccos(np.sqrt(1.0 / 3.0))))
     res.summary["平均取向矢 (director)"] = " ".join(f"{x:+.4f}" for x in mean_dir)
     res.summary["链段数"] = int(pairs.shape[0])
     if pairs.shape[0] >= 2:
@@ -493,7 +522,13 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         "P₂ 为**相对参考轴**的二阶序参数 "
         + ("（参考轴：" + " / ".join(n.upper() + " 轴" for n in refs) + "）"
            if "ref" not in refs else "（参考轴由调用方给出）")
-        + "，便于与文献/外部工具对比；S 与 P₂ 现在各占一张图。")
+        + "，便于与文献/外部工具对比；S / P₂ / 夹角 θ(t) 各占一张图。")
+    res.add_notes(
+        "「链段与参考轴的夹角」= 每帧对所有链段求 ⟨arccos|u·ref|⟩（度）。链段没有"
+        "方向性（u 与 −u 等价），所以先取 |cos| → θ ∈ [0°, 90°]；"
+        "**完全无序时理论值 54.74°**（cos²θ = 1/3，正好对应 P₂ = 0），"
+        "取向越强 θ 越接近 0°。它与「链段取向分布」那张图不是同一个参考："
+        "分布图的参考是**时间平均取向矢**，这条曲线的参考是**参考轴（x/y/z）**。")
     res.add_notes(f"链段定义：mode={mode}，共 {pairs.shape[0]} 个链段"
                   f"（{sinfo.get('detail') or ''}）")
     if n_mol > 1:
