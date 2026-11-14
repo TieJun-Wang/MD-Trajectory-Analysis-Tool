@@ -31,8 +31,15 @@
 | `_menu.py` | **交互菜单 + 参数规格**（一步步问：拓扑 → 轨迹 → 对象 → 帧 → 模块参数 → 输出） |
 | `rg.py` / `ree.py` / `msd.py` / `rdf.py` / `comdis.py` | Rg、末端距、MSD、RDF、两组分质心距 |
 | `rdf_mdat.py` | **RDF 的 util_rdf.py 口径**（MDTransport：逐帧全原子对 + 当场最小镜像 + 同种粒子数−1 归一化），含配位数曲线；与 `InterRDF`/引擎/原实现三方对拍 |
+| `msd_mdat.py` | **MSD/扩散系数的 util_msd.py + util_diffusion.py 口径**（增量最小镜像解包 + 去质心漂移 + FFT 全起点平均；D = β≈1 窗口的 OLS 斜率/(2·dim)）；与 `EinsteinMSD`/引擎对拍 |
 | `contact.py` | **接触分析 + 接触矩阵**（与引擎逐位一致）+ **独立复现 & 与引擎逐帧对拍**（原 `examples/contact_reproduce.py` 的包内版本：`reproduce_contacts` / `compare_engine` / `test_contact_reproduce`） |
 | `orientation.py` | **链段取向**（`allfast-3-2.py` 口径：键中点矢量 → ⟨cos²θ⟩ / 取向参数 / ⟨θ⟩(t)） |
+
+> 与第三方程序（**MDTransport**：`util_rdf.py` / `util_msd.py` + `util_diffusion.py`）
+> 能逐值互证的就是 **RDF** 与 **MSD/扩散系数** 两项，都已并入（`rdf_mdat.py` /
+> `msd_mdat.py`）。它的其余子命令是离子输运/寿命类（Nernst–Einstein、Einstein–Helfand、
+> Onsager、Stefan–Maxwell、vehicular、cage/cage_p/pcl、corr/spda），我们本来就不涉，
+> 无法互证；唯一还能顺带做的是 **COM–COM RDF**（把分子质心当粒子）。
 
 ### 两种用法（每个模块都一样）
 
