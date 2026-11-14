@@ -35,6 +35,7 @@
 | `density.py` | **1D 密度分布 + 归一化曲线**：与程序「导出板块」同口径导出 `density.csv` / `density__norm.csv`；教科书实现 + 与 `LinearDensity` 对拍 + 质量守恒自检 |
 | `contact.py` | **接触分析 + 接触矩阵**（与引擎逐位一致）+ **独立复现 & 与引擎逐帧对拍**（原 `examples/contact_reproduce.py` 的包内版本：`reproduce_contacts` / `compare_engine` / `test_contact_reproduce`） |
 | `orientation.py` | **链段取向**（`allfast-3-2.py` 口径：键中点矢量 → ⟨cos²θ⟩ / 取向参数 / ⟨θ⟩(t)） |
+| `interface.py` | **界面宽度 10–90 + erf**：参考实现（教科书剖面 + 局部 10–90 + erf 拟合）、**合成已知宽度界面**（真实 10–90 = 2.5631σ）、与引擎逐位对拍、`LinearDensity` 剖面交叉验证 |
 
 > 与第三方程序（**MDTransport**：`util_rdf.py` / `util_msd.py` + `util_diffusion.py`）
 > 能逐值互证的就是 **RDF** 与 **MSD/扩散系数** 两项，都已并入（`rdf_mdat.py` /
@@ -65,6 +66,28 @@ python test/mda_test/contact.py --help        # 看本模块的全部开关
 `MDTA_MDA_XSD` / `MDTA_MDA_TRR` / `MDTA_MDA_SELECT` / `MDTA_MDA_FRAMES` /
 `MDTA_MDA_OUT`，或命令行 `--top / --trj / --select`；不给 `--top/--trj` 就用默认体系，
 要只读单帧结构加 `--no-traj`。口径说明见仓库根 `接触分析复现指南.md`。
+
+### 界面宽度（`interface.py`）怎么对照
+
+界面宽度**没有**第三方的"一键函数"，所以 `interface.py` 做了三层对照，每层验的东西不同：
+
+1. **解析轮廓**（`check_definition()`）：直接给一条 `f(x)=½[1−erf((x−x₀)/(√2σ))]` 的
+   理想曲线，10–90 宽度必须等于 `2.5631σ`、erf 拟合必须还原 σ。这验证的是**宽度判据**
+   （不掺采样噪声）。
+2. **合成已知宽度体系**（`synth_slab_universe` / `test_synthetic`）：原子按
+   `½[1−erf((d−hw)/(√2σ))]` 的概率判给 A/B，构成两层板（两个界面），真实 10–90 宽度
+   解析等于 `2.5631σ`。单份构型 0.5 Å 分箱的统计噪声约 ±5%，多份取平均后可到 1–2%。
+3. **与引擎逐位对拍**（`compare_engine`）＋ **剖面换 `LinearDensity`**
+   （`compare_mdanalysis_interface`）：同一批帧、同一 bin 下，我们参考实现的界面位置 /
+   宽度与程序引擎的差异应在 1e-9 Å 量级。
+
+两个必须知道的细节：
+
+- **平滑会加宽窄界面**：`smooth=5`、0.5 Å 分箱时，对 σ=2 Å（真实 10–90 ≈ 5.13 Å）的界面
+  实测会到 5.6 Å 左右（**+9%**）。核对绝对宽度时用 `--smooth 1`（模块默认就是 1），
+  真实数据为压噪声才用 5。
+- **硬壁不报宽度**：石墨/晶体壁这类"一个 bin 就走完 0→1"的界面，10–90 在采样范围内
+  量不出来，程序会如实说"宽度不可直接测量"（位置照给）。这不是 bug。
 
 ---
 
