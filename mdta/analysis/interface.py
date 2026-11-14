@@ -703,6 +703,27 @@ def _atom_molnums(ag) -> np.ndarray | None:
     return m
 
 
+def _same_partition(a: np.ndarray, b: np.ndarray) -> bool:
+    """两个编号数组是否描述了**同一个划分**（只差重新编号）。
+
+    用法：判断 ``molnums`` 与键连通分量是不是同一套分子划分。不一致就说明
+    molnums 不可信（要么把分子切碎了，要么把不同分子并成了一个），
+    RDF / 接触 / 界面 / 密度的 ``inter``/``intra`` 口径必须改用键图。
+    """
+    if a.size != b.size:
+        return False
+    try:
+        n_a = int(np.unique(a).size)
+        n_b = int(np.unique(b).size)
+        if n_a != n_b:
+            return False
+        # 每个元素一个 (a,b) 组合；组合数 == 分子数 当且仅当两个划分同构
+        combos = np.unique(np.stack([a, b], axis=1), axis=0)
+        return int(combos.shape[0]) == n_a
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
 def _molnums_for_filter(ag, force_bonds: bool = False) -> np.ndarray | None:
     """用于配对过滤的分子编号；未归属残基（``-1``）给每个原子独立编号。
 
@@ -714,64 +735,127 @@ def _molnums_for_filter(ag, force_bonds: bool = False) -> np.ndarray | None:
     ``dynamics.py`` 用的是 :func:`_atom_molnums`，不受这里的修正影响 —— Rg/MSD
     已经与 Forcite 对齐，不能再动）。
 
-    退化判据（用户实测 PE50）：残基级 ``molnums`` 可能把**同一个键连通块切成几份**
-    （该体系每个分子 32 原子 = 16 个 4 原子残基，于是"相邻残基"被当成两个分子，
-    跨残基的键会算出 0.01–0.28 Å 的假距离，分子间 g(r) 在 r<2 Å 冒出 8~9，
-    而 Forcite 那边严格为 0）。检测到"一个连通块横跨多个 molnum"时改用
-    **键连通分量**作为原子级分子编号。
-    """
-    if force_bonds:
-        # Forcite 口径：不用 molnums（MS 里常是"残基级"），直接用键连通分量。
-        try:
-            from ..topology import bond_components
+    退化判据（两个方向都算退化，两种都改用**键连通分量**）：
+      · ``molnums`` 比键块**细**（用户实测 PE50）：残基级 ``molnums`` 把**同一个键
+        连通块切成几份**（每个分子 32 原子 = 16 个 4 原子残基），跨残基的键算出
+        0.01–0.28 Å 的假距离，分子间 g(r) 在 r<2 Å 冒出 8~9（Forcite 那边严格为 0）；
+      · ``molnums`` 比键块**粗**（resid 重号 / 整体系被塞进 1–2 个残基）：
+        **不同分子**的原子被并成同一个 molnum，于是 ``inter`` 口径把**跨组接触整套
+        误删** —— 实测 420 原子两相玩具：482 对 → 325 对、最小间距 0.30 → 2.41 Å，
+        而且报出来的"分子内配对占比"是 0，完全看不出是口径造成的。
 
-            u = ag.universe
-            sel = np.asarray(ag.indices, dtype=np.int64)
-            pos_of = np.full(int(u.atoms.n_atoms), -1, dtype=np.int64)
-            pos_of[sel] = np.arange(sel.size)
-            edges = np.asarray(u.bonds.indices, dtype=np.int64).reshape(-1, 2)
-            e = pos_of[edges]
-            e = e[(e[:, 0] >= 0) & (e[:, 1] >= 0)]
-            if e.size:
-                return bond_components(int(ag.n_atoms), e).astype(np.int64)
-        except Exception:                                     # noqa: BLE001
-            pass
-    m = _atom_molnums(ag)
-    if m is None:
+    ⚠️ **必须在整个体系上算、再按原子序号取子集**（见 :func:`global_molecule_ids`）。
+    按组各算一套会得到两套互不可比的编号：resid 重号时 A 组的 "molnum 0" 与 B 组的
+    "molnum 0" 其实是两个不同分子，逐组检查各自都"自洽"，跨组比较却全错。
+    """
+    return global_molecule_ids(ag.universe, force_bonds=force_bonds,
+                               _indices=np.asarray(ag.indices, dtype=np.int64))
+
+
+_GLOBAL_CACHE: dict[int, tuple] = {}
+
+
+def global_molecule_ids(universe, *, force_bonds: bool = False,
+                        _indices: np.ndarray | None = None) -> np.ndarray | None:
+    """**整个体系**的原子级分子编号（长度 = ``universe.atoms.n_atoms``）。
+
+    为什么要全局算：``molnums`` / 键连通分量都是"全体系"属性，按组切片后再各自
+    纠偏，A、B 两组的编号就不可比了（resid 重号是这个坑的典型：两条链 resid 1、2，
+    水也是 1、2 → A 组看 molnum 0 是"链 1"、B 组看 molnum 0 是"水 1"，而
+    ``inter`` 只做相等比较，于是把这两个不同分子的接触判成"分子内"删掉）。
+
+    ``_indices`` 只用于内部取子集（避免多取一次 ``ag.indices``）。
+    """
+    u = universe
+    n_u = int(u.atoms.n_atoms)
+    key = id(u)
+    hit = _GLOBAL_CACHE.get(key)
+    if hit is not None and hit[0] == n_u and hit[1] == bool(force_bonds):
+        ids = hit[2]
+    else:
+        ids = _compute_global_ids(u, force_bonds=bool(force_bonds))
+        if len(_GLOBAL_CACHE) > 8:
+            _GLOBAL_CACHE.clear()
+        _GLOBAL_CACHE[key] = (n_u, bool(force_bonds), ids)
+    if ids is None:
         return None
-    # ---- 连通块 vs molnum 交叉检查（只有这种退化才切换，正常体系完全不变）
+    if _indices is None:
+        return ids
+    return np.asarray(ids, dtype=np.int64)[_indices]
+
+
+def _compute_global_ids(universe, *, force_bonds: bool = False) -> np.ndarray | None:
+    u = universe
+    n_u = int(u.atoms.n_atoms)
+    if n_u == 0:
+        return None
+    # 键连通分量（全体系，一次）
+    comp = None
     try:
         from ..topology import bond_components
 
-        u = ag.universe
-        sel = np.asarray(ag.indices, dtype=np.int64)
-        pos_of = np.full(int(u.atoms.n_atoms), -1, dtype=np.int64)
-        pos_of[sel] = np.arange(sel.size)
         edges = np.asarray(u.bonds.indices, dtype=np.int64).reshape(-1, 2)
-        e = pos_of[edges]
-        e = e[(e[:, 0] >= 0) & (e[:, 1] >= 0)]
-        if e.size:
-            comp = bond_components(int(ag.n_atoms), e)
-            n_comp = int(np.unique(comp).size)
-            fine = False
-            if n_comp > 1:
-                order = np.argsort(comp, kind="stable")
-                cs = comp[order]
-                starts = np.flatnonzero(np.r_[True, cs[1:] != cs[:-1]])
-                ends = np.r_[starts[1:], order.size]
-                for s, t in zip(starts.tolist(), ends.tolist()):
-                    if np.unique(m[order[s:t]]).size > 1:
-                        fine = True
-                        break
-            if fine:
-                m = comp.astype(np.int64)
+        if edges.size:
+            comp = bond_components(n_u, edges).astype(np.int64)
+            if int(np.unique(comp).size) < 2:
+                comp = None
     except Exception:                                        # noqa: BLE001
-        pass
+        comp = None
+    if force_bonds and comp is not None:
+        return comp                      # Forcite 口径：直接按键图分子
+    m = _atom_molnums(u.atoms)
+    if m is None:
+        return comp
+    if comp is not None and _molnums_unreliable(m, comp):
+        m = comp
     neg = m < 0
     if neg.any():
         m = m.copy()
         m[neg] = -(np.arange(m.size, dtype=np.int64)[neg] + 1)
     return m
+
+
+def _molnums_unreliable(m: np.ndarray, comp: np.ndarray) -> bool:
+    """``molnums`` 的划分与键图**不一致到必须弃用**吗？
+
+    两个方向都可能坏，但**不能**一见不一致就换成键图 —— 4 点水模型（TIP4P）
+    就是这样：一个分子 = 键块 {O,H1,H2} + **孤立的 M 虚位点**，molnums 把 4 个
+    原子算一个分子（正确），键图却给出两个块（一个是单原子）。实测若一律信键图，
+    水的「分子内邻居数」会从 3.000 掉到 1.500（自检当场失败）。
+
+    所以只认这两种"真的坏了"：
+      ① **键块横跨多个 molnum**（molnums 比键图细）：同一分子被切碎，跨碎片的键
+         算出 0.01–0.28 Å 的假距离（PE50 实测，分子间 g(r) 在 r<2 Å 冒出 8~9）；
+      ② **一个 molnum 里含 ≥2 个"有实质"的键块**（每块 ≥2 原子）：不同分子被并成
+         一个 molnum —— resid 重号或 MS 导出把整个体系塞进 1–2 个残基时就是这样，
+         ``inter`` 口径会把**跨组接触整套误删**（实测 482 对 → 325 对、最小间距
+         0.30 Å → 2.41 Å，且"分子内配对占比"仍显示 0，完全看不出是口径问题）。
+    单原子块（虚位点 / 离子 / M 位点）不算"实质"，因此不会触发 ②。
+    """
+    try:
+        if m.size != comp.size or int(np.unique(m).size) == int(np.unique(comp).size) \
+                and _same_partition(m, comp):
+            return False
+        # ① 键块横跨多个 molnum
+        order = np.argsort(comp, kind="stable")
+        cs, ms = comp[order], m[order]
+        starts = np.flatnonzero(np.r_[True, cs[1:] != cs[:-1]])
+        ends = np.r_[starts[1:], order.size]
+        for s, t in zip(starts.tolist(), ends.tolist()):
+            if np.unique(ms[s:t]).size > 1:
+                return True
+        # ② 一个 molnum 里含 ≥2 个"有实质"的键块
+        order = np.argsort(m, kind="stable")
+        ms, cs = m[order], comp[order]
+        starts = np.flatnonzero(np.r_[True, ms[1:] != ms[:-1]])
+        ends = np.r_[starts[1:], order.size]
+        for s, t in zip(starts.tolist(), ends.tolist()):
+            _, cnt = np.unique(cs[s:t], return_counts=True)
+            if int(np.sum(cnt >= 2)) >= 2:
+                return True
+        return False
+    except Exception:                                        # noqa: BLE001
+        return False
 
 
 def mode_pair_counts(ga, gb, same: bool) -> tuple[dict[str, float] | None, str]:
