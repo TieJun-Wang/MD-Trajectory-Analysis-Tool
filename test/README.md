@@ -29,6 +29,7 @@
 |---|---|
 | `_common.py` | 加载体系（`.xsd`/`.xtr`…）、补质量、帧窗口、分子编号、最小镜像距离、导出 CSV |
 | `rg.py` / `ree.py` / `msd.py` / `rdf.py` / `comdis.py` | Rg、末端距、MSD、RDF、两组分质心距 |
+| `rdf_mdat.py` | **RDF 的 util_rdf.py 口径**（MDTransport：逐帧全原子对 + 当场最小镜像 + 同种粒子数−1 归一化），含配位数曲线；与 `InterRDF`/引擎/原实现三方对拍 |
 | `contact.py` | **接触分析 + 接触矩阵**（与引擎逐位一致） |
 | `orientation.py` | **链段取向**（`allfast-3-2.py` 口径：键中点矢量 → ⟨cos²θ⟩ / 取向参数 / ⟨θ⟩(t)） |
 
