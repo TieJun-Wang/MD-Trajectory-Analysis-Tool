@@ -414,9 +414,7 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
                 res.summary[f"{tag} {name} 平均密度"] = float(np.nanmean(y))
                 try:
                     ga = groups[name]
-                    num = (float(np.sum(np.asarray(ga.masses, dtype=float)))
-                           if str(mode) == "mass" else float(ga.n_atoms))
-                    rho_bar = num / vbox if vbox > 0 else float("nan")
+                    rho_bar = _rho_bar_in_profile_units(ga, vbox, mode)
                 except Exception:                         # noqa: BLE001
                     rho_bar = float("nan")
                 res.summary[f"{tag} {name} 整盒平均密度 ρ̄"] = rho_bar
@@ -426,9 +424,12 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
                               panel=1, group=name)
         res.add_notes("三个方向一次算出（C100=a / C010=b / C001=c），"
                       "与 Forcite Concentration Profile 的方向一一对应。")
-        res.add_notes("归一化曲线 = ρ/ρ_bulk（体相密度取上四分位区中位数）；"
-                      "Forcite 的 Relative concentration 用的是另一个基准，"
-                      "两者差一个常数因子（PE50/ETH 实测 15.5）。")
+        res.add_notes(
+            "归一化曲线（面板 2）= ρ/ρ̄，ρ̄ = **整盒平均密度**（与 Forcite 的 "
+            "`Relative concentration` 同口径）：数密度口径下 ρ̄ = N/V，可直接与 "
+            "Forcite 逐箱对比；质量密度口径下 ρ̄ = Σm/V（g/cm³），曲线无量纲、均值 1。\n"
+            "摘要里的「体相密度」是另一回事（上四分位区中位数），只用来判断 plateau。")
+
         return res
 
     centers, prof, dmeta = density_profile(mdt, groups, selection, axis=axis,
@@ -466,11 +467,7 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
         try:
             ga = groups[name]
             vbox_mean = float(dmeta.get("mean_box_volume") or 0.0)
-            if str(mode) == "mass":
-                num = float(np.sum(np.asarray(ga.masses, dtype=float)))
-            else:
-                num = float(ga.n_atoms)
-            rho_bar = num / vbox_mean if vbox_mean > 0 else float("nan")
+            rho_bar = _rho_bar_in_profile_units(ga, vbox_mean, mode)
         except Exception:                                     # noqa: BLE001
             rho_bar = float("nan")
         res.summary[f"{name} 整盒平均密度 ρ̄"] = rho_bar
@@ -506,6 +503,26 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
         f"各组分的「体相密度」「平均密度」都按这个口径给出（质量密度与数密度"
         f"相差一个摩尔质量量级，不可直接互比）。用 mode=\"number\"/\"mass\" 切换。")
     return res
+
+
+def _rho_bar_in_profile_units(ga, vbox: float, mode) -> float:
+    """整盒平均密度 ρ̄，**与密度剖面的单位一致**（Forcite 的 ρ/ρ̄ 基准）。
+
+    ⚠️ 这里以前是个真 bug：剖面在 ``mode="mass"`` 时是 **g/cm³**，但 ρ̄ 用的是
+    ``Σm[amu] / V[Å³]``（= amu/Å³），两者差 **1.66054** 倍 —— 于是"归一化密度"
+    面板整体被乘了 1.66（实测 1000water：均值 1.660539 而不是 1.0），
+    摘要里"平均密度 1.0"和"整盒平均密度 ρ̄ 0.602"也自相矛盾。
+    数密度口径下两者单位相同（1/Å³），所以只有质量密度出错。
+
+    返回：mass → ρ̄[g/cm³]；number → ρ̄[1/Å³]。
+    """
+    v = float(vbox or 0.0)
+    if not np.isfinite(v) or v <= 0:
+        return float("nan")
+    if str(mode) == "mass":
+        m = float(np.sum(np.asarray(ga.masses, dtype=float)))   # amu
+        return m / v * AMU_PER_A3_TO_G_CM3                      # g/cm³
+    return float(ga.n_atoms) / v                                # 1/Å³
 
 
 def _safe_ratio(y: np.ndarray, denom: float) -> np.ndarray:
