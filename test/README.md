@@ -22,19 +22,38 @@
 
 ## 一·五、`test/mda_test/` —— 用 MDAnalysis 独立复现（对拍用）
 
-按分析模块拆成一个个小脚本，每个都能单独跑（`python test/mda_test/contact.py`），
-也支持 `python test/mda_test/run_all.py` 一次跑完：
+按分析模块拆成一个个小脚本，每个都能单独跑，也支持 `python test/mda_test/run_all.py`
+一次跑完：
 
 | 脚本 | 复现什么 |
 |---|---|
-| `_common.py` | 加载体系（`.xsd`/`.xtr`…）、补质量、帧窗口、分子编号、最小镜像距离、导出 CSV |
+| `_common.py` | 加载体系（`.xsd/.xtd/.pdb/.gro/.tpr` + `.trj/.trr/.xtc`）、补质量、帧窗口、分子编号、最小镜像距离、导出 CSV |
+| `_menu.py` | **交互菜单 + 参数规格**（一步步问：拓扑 → 轨迹 → 对象 → 帧 → 模块参数 → 输出） |
 | `rg.py` / `ree.py` / `msd.py` / `rdf.py` / `comdis.py` | Rg、末端距、MSD、RDF、两组分质心距 |
 | `rdf_mdat.py` | **RDF 的 util_rdf.py 口径**（MDTransport：逐帧全原子对 + 当场最小镜像 + 同种粒子数−1 归一化），含配位数曲线；与 `InterRDF`/引擎/原实现三方对拍 |
 | `contact.py` | **接触分析 + 接触矩阵**（与引擎逐位一致） |
 | `orientation.py` | **链段取向**（`allfast-3-2.py` 口径：键中点矢量 → ⟨cos²θ⟩ / 取向参数 / ⟨θ⟩(t)） |
 
-数据与输出全部用环境变量控制：`MDTA_MDA_XSD` / `MDTA_MDA_TRR` / `MDTA_MDA_SELECT`
-/ `MDTA_MDA_FRAMES` / `MDTA_MDA_OUT`。定位说明见仓库根 `接触分析复现指南.md`。
+### 两种用法（每个模块都一样）
+
+```powershell
+# ① 交互菜单：不带参数，一步步问
+python test/mda_test/contact.py
+#    ① 拓扑文件 ② 轨迹文件 ③ 分析对象（列组分让你选）④ 帧选择 ⑤ 模块参数 ⑥ 输出 → 确认
+
+# ② 命令行：带参数，适合批处理
+python test/mda_test/contact.py --top a.xtd --trj a.trj --frames 100 ^
+       --cutoff 5 --mode inter --select-b "" --prefix contact_a -y
+python test/mda_test/contact.py --help        # 看本模块的全部开关
+```
+
+菜单里的「分析对象」会**列出体系里有哪些组分**（各多少原子/分子），可以按序号选、
+也可以直接敲 MDAnalysis 选择串（如 `"element O"`）；「帧选择」支持全部 / 均匀取 N 帧 /
+指定 `start/stop/step`。挑出来的帧保证是**等差**的，这样 `InterRDF` / `EinsteinMSD`
+这类只认 `start/stop/step` 的分析类跑的帧和菜单里选的完全一致。
+
+数据与输出也可以用环境变量控制：`MDTA_MDA_XSD` / `MDTA_MDA_TRR` / `MDTA_MDA_SELECT`
+/ `MDTA_MDA_FRAMES` / `MDTA_MDA_OUT`。口径说明见仓库根 `接触分析复现指南.md`。
 
 ---
 
