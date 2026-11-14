@@ -629,7 +629,7 @@ export function FrameBlock({ frames, setFrames }) {
 
 /** 分析参数：按分析项分组，**只显示已选分析项的参数**（which=null → 全显示）。 */
 export function ParamBlock({ params, setParams, which = null, primaryMolecules = null,
-                            nAtoms = 0, primaryAtomInfo = null }) {
+                            nAtoms = 0, primaryAtomInfo = null, components = [] }) {
   const p = (key) => ({
     value: params[key] ?? '',
     onChange: (e) => setParams({ ...params, [key]: e.target.value }),
@@ -783,7 +783,18 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
                              style: { width: 56, minWidth: 56 }, ...p('nbins') })}
         </span>,
         '质量密度', 5),
-    ]],
+      // ---- 界面宽度：**A/B 组**（只勾 interface 时才出现）
+      // 以前固定"原子数最多的两个组分"→ 三元及以上共混里永远只算最大的那一对，
+      // 换体系还是老的一对（用户实测）。这里给出两个下拉，留空 = 自动。
+      show(['interface']) && F('iface_a', '界面 A 组', 'select',
+        sel('iface_a', [['', '自动（原子数最多）'],
+                        ...(components || []).map((n) => [String(n), String(n)])]),
+        '自动', 3),
+      show(['interface']) && F('iface_b', '界面 B 组', 'select',
+        sel('iface_b', [['', '自动（次多，且≠A）'],
+                        ...(components || []).map((n) => [String(n), String(n)])]),
+        '自动', 3),
+    ].filter(Boolean)],
     // RDF 设置只留三项（用户要求）：最大 r / 分箱数 / 配对模式；
     // Forcite 口径相关的三个旋钮已从界面移除（后端仍保留参数，默认 = MDAnalysis 口径）。
     ['径向分布函数 RDF', ['rdf'], [

@@ -498,19 +498,56 @@ class Analyzer:
             return res
         if name == "interface":
             if len(self.components) < 2:
-                self.skip_reason = "界面宽度分析需要至少勾选 2 个组分"
+                names = list(self.components)
+                self.skip_reason = (
+                    f"界面宽度分析需要至少 **2 个组分**，当前只有 {len(self.components)} 个"
+                    f"（{names}）。如果体系其实是多物种混合、但被识别成了一个组分"
+                    f"（典型情形：resname 全一样的中文/自定义拓扑，例如 PE/PP/MAPE 共混"
+                    f"10 条链都叫 ETH），请到「分析集合」里按**原子数 / 元素 / 链长**"
+                    f"把各物种拆成独立集合，再勾选它们参与分析。")
                 return None
             # 默认取**原子数最多的两个组分**当作界面两侧：分层体系里这两相
             # 才是真正的界面两侧；若按字典序取前两个，可能取到"溶解在里面的
-            # 小分子 + 基体"，那对组合没有平界面。可用 params 显式指定 pair。
+            # 小分子 + 基体"，那对组合没有平界面。
+            #
+            # ⚠️ 但"最大的两个"对三元/多元共混是不够的（用户实测：勾了 3 个组分，
+            #    界面分析永远只算最大的那两个，换体系还是老的一对）→ 现在支持
+            #    params["pair"] 显式指定 A/B，并且**失效时回退**而不是直接报错。
             ordered = sorted(self.components.items(), key=lambda kv: -kv[1].n_atoms)
-            pair = p.pop("pair", None) or (ordered[0][0], ordered[1][0])
-            for nm in pair:
-                if nm not in self.components:
-                    raise SelectionError(f"界面分析指定的组分 {nm!r} 不存在")
-            return ifc.analyze_interface_width(self.trajectory, self.components, sel,
-                                               pair=tuple(pair),
-                                               verbose=verbose, **p)
+            auto_pair = (ordered[0][0], ordered[1][0])
+            want, pair_note = None, ""
+            raw = p.pop("pair", None)
+            if raw:
+                try:
+                    cand = tuple(str(x) for x in raw)[:2]
+                except TypeError:
+                    cand = ()
+                if len(cand) == 2 and cand[0] != cand[1]:
+                    missing = [n for n in cand if n not in self.components]
+                    if missing:
+                        pair_note = (f"指定的界面组分 {missing} 不在当前勾选的组分里"
+                                     f"（现有：{list(self.components)}），"
+                                     f"已回退到原子数最多的 {auto_pair[0]} × {auto_pair[1]}。")
+                    else:
+                        want = cand
+                else:
+                    pair_note = (f"界面 A/B 组必须是不相同的两个组分名（收到 {raw!r}），"
+                                 f"已回退到原子数最多的 {auto_pair[0]} × {auto_pair[1]}。")
+            pair = want or auto_pair
+            res = ifc.analyze_interface_width(self.trajectory, self.components, sel,
+                                              pair=pair, verbose=verbose, **p)
+            if res is not None:
+                if pair_note:
+                    res.add_notes("⚠️ " + pair_note)
+                if len(self.components) > 2:
+                    others = [n for n in self.components if n not in pair]
+                    res.add_notes(
+                        f"当前勾选了 {len(self.components)} 个组分，本项**每次只比较一对**："
+                        f"{pair[0]} × {pair[1]}"
+                        + ("（自动取原子数最多的两个）" if not want else "（按参数指定）")
+                        + f"。未参与的是 {others}；要换组合请在参数里设置"
+                          f"「界面 A 组 / 界面 B 组」。")
+            return res
         if name == "orientation":
             ag, lab = self._orientation_target()
             return cry.analyze_orientation(self.trajectory, ag, sel,

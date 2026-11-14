@@ -87,6 +87,8 @@ export default function App() {
   })
   const [params, setParams] = useState({
     cutoff: 5.0, axis: 'all', nbins: '', rmax: 12, dihedral_mode: 'auto',
+    // 界面宽度分析的 A/B 两组：留空 = 自动（原子数最多的两个）
+    iface_a: '', iface_b: '',
     // 密度口径：mass = 质量密度 g/cm³（Forcite 默认）/ number = 数密度 1/Å³
     density_mode: 'mass',
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
@@ -601,7 +603,12 @@ export default function App() {
                    nbins: params.nbins ? Number(params.nbins) : null,
                    mode: params.density_mode === 'number' ? 'number' : 'mass' },
         interface: { axis: (params.axis === 'all' ? 2 : Number(params.axis)),
-                     nbins: Math.max(Number(params.nbins), 60) },
+                     nbins: Math.max(Number(params.nbins), 60),
+                     // 界面两侧的 A/B 组：留空 = 自动取原子数最多的两个组分；
+                     // 三元及以上共混里必须能自己选（用户实测：以前永远只算最大的那对）
+                     pair: (params.iface_a && params.iface_b
+                       && String(params.iface_a) !== String(params.iface_b))
+                       ? [String(params.iface_a), String(params.iface_b)] : null },
         // RDF 分箱数以前写死 120 —— Forcite 是按「间隔(Å)」给的（如 20 Å / 0.02 Å
         // = 1000 箱），界面能设分箱数，两边才能逐 bin 对比。
         rdf: { rmax: Number(params.rmax),
@@ -1110,6 +1117,7 @@ export default function App() {
                                          estimates={live?.estimates} />
                           <ParamBlock params={params} setParams={setParams}
                                       which={which}
+                                      components={components}
                                       primaryMolecules={primaryMolecules}
                                       nAtoms={Number(sess?.primary_atoms) || 0}
                                       primaryAtomInfo={primaryAtoms} />
