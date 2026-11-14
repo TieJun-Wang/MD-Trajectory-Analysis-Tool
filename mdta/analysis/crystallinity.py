@@ -291,12 +291,71 @@ def _pair_unit_vectors(mdt, ag, pairs: np.ndarray, selection: FrameSelection,
 
 
 # ------------------------------------------------------------------ 取向分析
+def _segment_molecule_index(ag, pairs: np.ndarray) -> np.ndarray | None:
+    """每个链段（= 原子对）所属的**分子序号**；拿不到分子信息时返回 ``None``。
+
+    用 ``molecule_slices`` 的原子级分子编号，把 ``pairs[:, 0]``（全体系原子下标）
+    先映射成"组内下标"，再取编号。``pairs`` 里的原子必须都在 ``ag`` 内
+    （:func:`segment_pairs` 就是这么造的）。
+    """
+    if pairs.size == 0:
+        return None
+    try:
+        from .conformation import molecule_slices
+
+        ms = molecule_slices(ag)
+        if ms is None:
+            return None
+        m_atom, _slices, _labels = ms
+        order = np.asarray(ag.indices, dtype=np.int64)
+        loc = np.searchsorted(order, np.asarray(pairs[:, 0], dtype=np.int64))
+        loc = np.clip(loc, 0, max(order.size - 1, 0))
+        ok = order[loc] == np.asarray(pairs[:, 0], dtype=np.int64)
+        out = np.full(pairs.shape[0], -1, dtype=np.int64)
+        out[ok] = np.asarray(m_atom, dtype=np.int64)[loc[ok]]
+        return out
+    except Exception:  # noqa: BLE001 - 没有分子信息就用链段加权
+        return None
+
+
+def _molecule_equal_weights(mol_of_pair: np.ndarray | None) -> tuple[np.ndarray | None, bool, np.ndarray | None]:
+    """"每条链等权"的链段权重：每条链的总权重相同（= 1/该链链段数）。
+
+    返回 ``(weights, ok, per_mol_counts)``；``ok=False`` 表示算不了
+    （没有分子信息、或有链段落在分子外），此时调用方应退回链段加权。
+    """
+    if mol_of_pair is None or mol_of_pair.size == 0:
+        return None, False, None
+    if np.any(mol_of_pair < 0):
+        return None, False, None
+    uniq, counts = np.unique(mol_of_pair, return_counts=True)
+    if uniq.size < 2:
+        return None, False, counts
+    w = np.zeros(mol_of_pair.size, dtype=float)
+    for mol, c in zip(uniq, counts):
+        w[mol_of_pair == mol] = 1.0 / float(c)
+    return w, True, counts
+
+
+def _weighted_mean(vals: np.ndarray, w: np.ndarray | None) -> float:
+    """加权平均；``w=None`` 就是普通算术平均。"""
+    v = np.asarray(vals, dtype=float)
+    if w is None:
+        return float(np.mean(v)) if v.size else float("nan")
+    ww = np.asarray(w, dtype=float)
+    s = float(np.sum(ww))
+    if ww.size != v.size or s <= 0:
+        return float(np.mean(v)) if v.size else float("nan")
+    return float(np.sum(ww * v) / s)
+
+
 @register("orientation", "链段取向分析")
 def analyze_orientation(mdt, ag, selection: FrameSelection, *,
                         mode: str = "repeat", custom_pairs=None,
                         stride: int = 1, heavy_only: bool = True,
                         reference_axis: Sequence[float] = (0.0, 0.0, 1.0),
                         p2_axis: str = "z",
+                        weighting: str = "segment",
                         nbins: int = 60, verbose: bool = False,
                         label: str = "链",
                         min_segments: int = MIN_SEGMENTS_DEFAULT) -> AnalysisResult:
@@ -314,6 +373,19 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
     取向是**集成量**：传入的原子组里有多少分子就应平均多少分子。因此调用方
     应传**整个组分**（例如全部 polymer 分子），而不是一条链——结果里会写明
     链段来自多少个分子，避免"只算一条链却命名整个膜"。
+
+    ``weighting``（1.0.7 起）
+        S / P₂ / θ 在分子之间怎么加权：
+
+        - ``"segment"``（**默认**）：**链段加权** —— 所有分子的所有链段放进
+          一个池子平均，长链链段多、权重自然更大（等价于"按链段数加权"，
+          也是 ⟨P₂⟩ 的标准定义）；
+        - ``"molecule"``：**每条链等权** —— 先对每条链内部求平均，再在链之间
+          等权平均。链长不一的**多分散**体系（例如 C6–C50 混油）里这与默认值
+          明显不同：短链与长链对结果的贡献一样大。
+
+        单分散体系（所有分子链长相同）两种权重完全相同；体系有多个分子且
+        链段数不一时，摘要里会**同时列出另一种权重的值**并提示差异。
 
     ``p2_axis``
         P₂ 相对哪个参考轴算（``<(3cos²θ−1)/2>``）：
@@ -341,6 +413,24 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         n_mol = len(ms[1]) if ms is not None else 1
     except Exception:  # noqa: BLE001
         n_mol = 1
+
+    # ---- 统计权重（1.0.7）：segment = 链段加权（默认） / molecule = 每条链等权
+    wt_key = str(weighting or "segment").strip().lower()
+    if wt_key not in ("segment", "molecule"):
+        wt_key = "segment"
+    mol_of_pair = _segment_molecule_index(ag, pairs)
+    eq_w, eq_ok, per_mol_counts = _molecule_equal_weights(mol_of_pair)
+    if wt_key == "molecule" and not eq_ok:
+        wt_key = "segment"          # 没有分子信息 / 只有 1 个分子 → 退回链段加权
+    w_main = eq_w if wt_key == "molecule" else None
+    #: 另一种权重的权重（用来在摘要里给出对照值）：
+    #: 选了逐链等权 → 另一种就是"链段加权"（= None，普通平均）；
+    #: 选了链段加权 → 另一种是"每条链等权"（= eq_w）。
+    w_other = eq_w if wt_key == "segment" else None
+    has_alt = bool(eq_ok)                      # 两种权重都可算（分子之间可区分）
+    poly = bool(eq_ok and per_mol_counts is not None and per_mol_counts.size > 1
+                and int(per_mol_counts.max()) != int(per_mol_counts.min()))
+
 
     # ---------------------------------------------------------- 可用性判据
     # 取向参数 S 是取向张量 Q=<(3uuᵀ-I)/2> 的最大本征值：只有 **1 个链段** 时
@@ -403,9 +493,13 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
     #: 所以先取 |cos| 再 arccos → θ ∈ [0°, 90°]；完全无序时理论值 54.74°
     #: （cos²θ = 1/3，正好对应 P₂ = 0）。
     theta_series = {name: np.full(n_f, np.nan) for name in refs}
+    #: **另一种权重**下的同样两条曲线（只在"分子间链段数不一致"时才有意义）：
+    #: 多分散体系里，链段加权与每条链等权给出的 P₂/θ 不一样，摘要里把另一组也报出来。
+    p2_alt = {name: np.full(n_f, np.nan) for name in refs}
+    S_alt = np.full(n_f, np.nan)
 
     for k in range(n_f):
-        st = nematic_order_parameter(vecs[k])
+        st = nematic_order_parameter(vecs[k], weights=w_main)
         S_t[k] = st["S"]
         dirs[k] = st["director"]
         v = vecs[k]
@@ -413,11 +507,19 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         good = nrm > 1e-12
         if good.any():
             u = v[good] / nrm[good, None]
+            wg = None if w_main is None else np.asarray(w_main, dtype=float)[good]
             for name, ref in refs.items():
                 cos = np.clip(u @ ref, -1.0, 1.0)
-                p2_series[name][k] = float(np.mean(0.5 * (3.0 * cos ** 2 - 1.0)))
-                theta_series[name][k] = float(
-                    np.degrees(np.mean(np.arccos(np.abs(cos)))))
+                p2v = 0.5 * (3.0 * cos ** 2 - 1.0)
+                thv = np.degrees(np.arccos(np.abs(cos)))
+                p2_series[name][k] = _weighted_mean(p2v, wg)
+                theta_series[name][k] = _weighted_mean(thv, wg)
+                if has_alt:
+                    wa = None if w_other is None else np.asarray(
+                        w_other, dtype=float)[good]
+                    p2_alt[name][k] = _weighted_mean(p2v, wa)
+            if has_alt:
+                S_alt[k] = nematic_order_parameter(vecs[k], weights=w_other)["S"]
 
     mean_dir = np.nanmean(dirs, axis=0)
     if np.linalg.norm(mean_dir) > 0:
@@ -430,7 +532,8 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         meta={"selection": label, "mode": mode, "stride": int(stride),
               "n_segments": int(pairs.shape[0]), "n_frames": n_f, "n_atoms": int(ag.n_atoms),
               "n_molecules": int(n_mol), "segment_source": sinfo.get("source"),
-              "segment_fallback": bool(sinfo.get("fallback")), "p2_axis": ax_key},
+              "segment_fallback": bool(sinfo.get("fallback")), "p2_axis": ax_key,
+              "weighting": wt_key},
     )
     # 1.0.5 起 S 与 P₂ **各占一张图**（用户要求：两条曲线挤在一起不好读）。
     # 1.0.6 起再加一张「链段与参考轴的夹角 θ(t)」（用户要求：要角度的**时间序列**，
@@ -512,6 +615,25 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
             np.sqrt(2.0 / (5.0 * float(pairs.shape[0]))))
     res.summary["链段来源"] = str(sinfo.get("source"))
     res.summary["链段所属分子数"] = int(n_mol)
+    # ---- 统计权重（1.0.7）：明确写清这张图用的是哪种权重
+    res.summary["统计权重"] = (
+        "每条链等权（先按分子平均，再在分子间平均）" if wt_key == "molecule"
+        else "链段加权（全部链段等权，长链贡献更多链段）")
+    if eq_ok and per_mol_counts is not None and per_mol_counts.size > 1:
+        res.summary["每条链的链段数"] = (f"{int(per_mol_counts.min())}–"
+                                       f"{int(per_mol_counts.max())}"
+                                       + ("（**多分散**）" if poly else ""))
+    if poly and has_alt:
+        # 多分散：把另一种权重的值也报出来，免得用户以为是"算错了"
+        _p = p2_series.get("z", next(iter(p2_series.values())))
+        _pa = p2_alt.get("z", next(iter(p2_alt.values())))
+        _other = "链段加权" if wt_key == "molecule" else "每条链等权"
+        if np.isfinite(_p).any() and np.isfinite(_pa).any():
+            res.summary[f"P2 平均（另一种权重：{_other}）"] = float(
+                np.nanmean(_pa))
+            if np.isfinite(S_alt).any():
+                res.summary[f"S 平均（另一种权重：{_other}）"] = float(
+                    np.nanmean(S_alt))
     if "ref" in refs:
         res.summary["参考轴"] = " ".join(f"{x:g}" for x in refs["ref"])
     else:
@@ -535,6 +657,28 @@ def analyze_orientation(mdt, ag, selection: FrameSelection, *,
         res.add_notes(
             f"该结果是**{n_mol} 个分子的集合平均**（链段来自全部这些分子），"
             f"不是单条链的结果。取向是集成量：分子数越多，S 的统计意义越强。")
+    if wt_key == "molecule":
+        res.add_notes(
+            "统计权重 = **每条链等权**：先对每条分子的链段求平均，再在分子之间"
+            "等权平均（S / P₂ / θ 都是这样算的）。链长不一的体系里，这与默认的"
+            "「链段加权」（长链链段多、权重大）不同。")
+    else:
+        res.add_notes(
+            "统计权重 = **链段加权**（默认）：所有分子的链段放进一个池子平均 —— "
+            "长链链段多、对结果的贡献自然更大，这也是 ⟨P₂⟩ 的标准定义。"
+            "若想「每条链一样重要」，把参数 `weighting` 改成 `molecule`。")
+    if poly:
+        _other = "链段加权" if wt_key == "molecule" else "每条链等权"
+        _p = p2_series.get("z", next(iter(p2_series.values())))
+        _pa = p2_alt.get("z", next(iter(p2_alt.values())))
+        if np.isfinite(_p).any() and np.isfinite(_pa).any():
+            res.add_notes(
+                f"⚠️ 该组分是**多分散**的（每条链的链段数 "
+                f"{int(per_mol_counts.min())}–{int(per_mol_counts.max())}）："
+                f"本图用「{res.summary['统计权重']}」→ P₂ 平均 "
+                f"{float(np.nanmean(_p)):+.4f}；若改用「{_other}」则为 "
+                f"{float(np.nanmean(_pa)):+.4f}。两种权重都对，只是问的问题不同"
+                f"（前者回答「整批链段的取向」，后者回答「平均一条链有多取向」）。")
     if sinfo.get("fallback"):
         res.add_notes(
             "⚠️ 该组分识别不出化学重复单元，本次结果用的是**几何骨架法**，"

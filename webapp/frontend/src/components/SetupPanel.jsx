@@ -634,8 +634,9 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     value: params[key] ?? '',
     onChange: (e) => setParams({ ...params, [key]: e.target.value }),
   })
-  const sel = (key, opts) => (
+  const sel = (key, opts, { wide = false } = {}) => (
     <select value={params[key]}
+            style={wide ? { width: '100%', minWidth: 0 } : undefined}
             onChange={(e) => setParams({ ...params, [key]: e.target.value })}>
       {opts.map(([v, t]) => <option key={v} value={v}>{t}</option>)}
     </select>
@@ -669,14 +670,21 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     </span>
   )
 
-  /** 「一次只比较一对」的分析共用的 A/B 两组下拉（留空 = 自动）。 */
+  /** 「一次只比较一对」的分析共用的 A/B 两组下拉（留空 = 自动）。
+   *
+   * **A 组、B 组各占一整行**（用户要求）：两者文字长度本来就不一样
+   * （"自动（原子数最多）" vs "自动（次多，且≠A）"），并排放会一个宽一个窄；
+   * 分两行 + 下拉撑满所在格后，两个框宽度完全相同。
+   */
   const pairFields = (key, autoA, autoB) => [
     F(`${key}_a`, "A 组", "select",
       sel(`${key}_a`, [autoA,
-        ...(components || []).map((n) => [String(n), String(n)])]), "自动", 3),
+        ...(components || []).map((n) => [String(n), String(n)])], { wide: true }),
+      "自动", 6),
     F(`${key}_b`, "B 组", "select",
       sel(`${key}_b`, [autoB,
-        ...(components || []).map((n) => [String(n), String(n)])]), "自动", 3),
+        ...(components || []).map((n) => [String(n), String(n)])], { wide: true }),
+      "自动", 6),
   ]
 
   const show = (mods) => {
@@ -851,6 +859,12 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         ['x', 'x 轴'],
         ['y', 'y 轴'],
         ['xyz', 'x + y + z 三者'],
+      ]), '', 6),
+      // 统计权重：链长不一的体系里两种权重给出不同的 S / P₂ / θ（用户实测
+      // 310K 的 C6–C50 混油：链段加权 P₂ ≈ −0.13，每条链等权 P₂ ≈ −0.09）
+      F('orient_weight', '统计权重', 'select', sel('orient_weight', [
+        ['segment', '链段加权（默认，长链权重大）'],
+        ['molecule', '每条链等权'],
       ]), '', 6),
     ]],
     ['结构有序度分析', ['order'], [

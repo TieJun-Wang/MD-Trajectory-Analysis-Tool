@@ -58,7 +58,10 @@ DEFAULT_PARAMS: dict = {
     "interface": {"axis": 2, "nbins": 120},
     # 取向链段默认取**化学重复单元**（1.0.1 起；1.0.0 为几何骨架 "backbone"）
     # p2_axis：P₂ 的参考轴，默认 z 轴（与 Forcite / 外部脚本口径一致）
-    "orientation": {"mode": "repeat", "stride": 1, "p2_axis": "z"},
+    # weighting：统计权重，segment = 链段加权（默认，长链权重大）/
+    #            molecule = 每条链等权（链长不一的体系才看得出差别）
+    "orientation": {"mode": "repeat", "stride": 1, "p2_axis": "z",
+                    "weighting": "segment"},
     # trans/gauche 判据与「二面角分析」共用同一阈值：改一处两处都变，
     # 免得同一条轨迹上两个模块报出不同的"trans 构象比例"。
     # ⚠️ 每个分析项在这张表里只能出现**一次**：字典字面量里重复的键会被后者

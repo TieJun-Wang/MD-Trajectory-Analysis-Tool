@@ -117,6 +117,8 @@ export default function App() {
     msd_drift: false,
     // 取向：链段定义 / 几何骨架 stride / **P₂ 参考轴**（x / y / z=默认 / xyz 三者）
     orient_mode: 'repeat', orient_stride: 1, orient_p2_axis: 'z',
+    // 统计权重：segment = 链段加权（默认）/ molecule = 每条链等权
+    orient_weight: 'segment',
     contact_mode: 'inter', g_ref: '',
     // Rg：「分析对象」是**二选一**（整体体系 / 分子·链，默认分子·链），程序只算
     // 选中的那种，不再同时算整组与逐分子两套。`per_molecule` 现在只归 R_ee 用。
@@ -643,7 +645,10 @@ export default function App() {
                        stride: Number(params.orient_stride) || 1,
                        // P2 相对哪个参考轴：x / y / z（默认）/ xyz（三者都算）
                        p2_axis: ['x', 'y', 'z', 'xyz'].includes(params.orient_p2_axis)
-                         ? params.orient_p2_axis : 'z' },
+                         ? params.orient_p2_axis : 'z',
+                       // 统计权重：segment（链段加权，默认）/ molecule（每条链等权）
+                       weighting: params.orient_weight === 'molecule'
+                         ? 'molecule' : 'segment' },
         // 结构有序度的局部结构分量：留空 → g_ref=None（该分量不计入指数）
         order: { g_ref: String(params.g_ref).trim() === ''
           ? null : Number(params.g_ref),
