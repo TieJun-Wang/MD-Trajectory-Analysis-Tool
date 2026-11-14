@@ -424,6 +424,10 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
                               panel=1, group=name)
         res.add_notes("三个方向一次算出（C100=a / C010=b / C001=c），"
                       "与 Forcite Concentration Profile 的方向一一对应。")
+        res.summary["归一化基准"] = ("ρ/ρ̄，ρ̄ = 整盒平均密度"
+                              + ("（Σm/V，g/cm³）" if str(mode) == "mass"
+                                 else "（N/V，1/Å³）"))
+        res.summary["体相密度的用途"] = "只用于判断 plateau / 界面，不作归一化基准"
         res.add_notes(
             "归一化曲线（面板 2）= ρ/ρ̄，ρ̄ = **整盒平均密度**（与 Forcite 的 "
             "`Relative concentration` 同口径）：数密度口径下 ρ̄ = N/V，可直接与 "
@@ -485,9 +489,18 @@ def analyze_density(mdt, groups: Mapping[str, object] | None = None,
     res.summary["密度口径"] = ("质量密度 (g/cm³)" if str(mode) == "mass"
                           else "数密度 (1/Å³)")
     res.summary["密度单位"] = "g/cm³" if str(mode) == "mass" else "1/Å³"
+    # 明确写清：面板 2 的归一化基准是 ρ̄（整盒平均），不是「体相密度」
+    res.summary["归一化基准"] = ("ρ/ρ̄，ρ̄ = 整盒平均密度"
+                          + ("（Σm/V，g/cm³）" if str(mode) == "mass"
+                             else "（N/V，1/Å³）"))
+    res.summary["体相密度的用途"] = "只用于判断 plateau / 界面，不作归一化基准"
     res.add_notes("方向按模拟盒矢量的分数坐标计算，对三斜盒同样成立；"
                   "密度用时间窗口内的平均盒尺寸归一化。")
-    res.add_notes("体相密度取分布上四分位区的中位数，作为归一化基准。")
+    res.add_notes(
+        "归一化曲线（面板 2）= ρ/ρ̄，ρ̄ = **整盒平均密度**（数密度口径 N/V、质量密度口径 Σm/V），"
+        "与 Forcite 的 `Relative concentration` 同口径。\n"
+        "「体相密度」（分布上四分位区的中位数）**不是**归一化基准 —— 它只用来判断 plateau / 找界面。\n"
+        "两者数值并不相同（20PE30 实测：ρ̄ = 0.0970、体相 = 0.1131，差 14%），拿体相密度去核对 norm 列会得到 ~0.86 的假偏差。")
     res.add_notes(
         "Forcite 的 Relative concentration 是**按原子数**归一化的（= 数密度口径），"
         "要与它逐箱对比请把密度口径选「数密度」；选「质量密度」时 ρ/ρ̄ 用质量加权，"
