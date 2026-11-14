@@ -85,10 +85,18 @@ export default function App() {
   const [frames, setFrames] = useState({
     start_ps: '', stop_ps: '', equil_ps: '', interval_ps: '', max_frames: '',
   })
+  /** 一次只比较一对的分析：两个都选了且不相同才下发 pair，否则 null（后端自动）。 */
+  const pairOf = (a, b) => (a && b && String(a) !== String(b))
+    ? [String(a), String(b)] : null
   const [params, setParams] = useState({
     cutoff: 5.0, axis: 'all', nbins: '', rmax: 12, dihedral_mode: 'auto',
-    // 界面宽度分析的 A/B 两组：留空 = 自动（原子数最多的两个）
+    // 一次只比较一对的分析（界面宽度 / 接触 / 两组分质心距）：
+    // A/B 两组留空 = 自动（界面与质心距取原子数最多的两个；接触按"最大 +
+    // 与它不同分子的最大组分"）。三元及以上共混里必须能自己选，否则第三个
+    // 组分永远不参与、换体系看到的还是老的一对（用户实测）。
     iface_a: '', iface_b: '',
+    contact_a: '', contact_b: '',
+    comdist_a: '', comdist_b: '',
     // 密度口径：mass = 质量密度 g/cm³（Forcite 默认）/ number = 数密度 1/Å³
     density_mode: 'mass',
     // MSD 默认按**原子**追踪（= Forcite / MDAnalysis EinsteinMSD 口径）；
@@ -606,9 +614,7 @@ export default function App() {
                      nbins: Math.max(Number(params.nbins), 60),
                      // 界面两侧的 A/B 组：留空 = 自动取原子数最多的两个组分；
                      // 三元及以上共混里必须能自己选（用户实测：以前永远只算最大的那对）
-                     pair: (params.iface_a && params.iface_b
-                       && String(params.iface_a) !== String(params.iface_b))
-                       ? [String(params.iface_a), String(params.iface_b)] : null },
+                     pair: pairOf(params.iface_a, params.iface_b) },
         // RDF 分箱数以前写死 120 —— Forcite 是按「间隔(Å)」给的（如 20 Å / 0.02 Å
         // = 1000 箱），界面能设分箱数，两边才能逐 bin 对比。
         rdf: { rmax: Number(params.rmax),
@@ -627,7 +633,8 @@ export default function App() {
                unwrap: !/\.trj$/i.test(String(sess?.info?.trajectory || '')) },
         // VACF：max_lag 留空（null）= 用满整条轨迹
         vacf: { max_lag: optNum(params.vacf_max_lag) },
-        contact: { cutoff: Number(params.cutoff), mode: params.contact_mode },
+        contact: { cutoff: Number(params.cutoff), mode: params.contact_mode,
+                   pair: pairOf(params.contact_a, params.contact_b) },
         dihedral: { mode: params.dihedral_mode,
                     gauche_edge: Number(params.gauche_edge) || 120,
                     // 分布柱宽 bin（度）：留空/非法 → 1°
@@ -663,7 +670,8 @@ export default function App() {
                  nbins: Number(params.rdf2d_nbins) || 140,
                  slab: slabRange },
         comdist: { axis: (params.axis === 'all' ? 2 : Number(params.axis)) ?? 2,
-                   pbc: params.comdist_pbc !== false },
+                   pbc: params.comdist_pbc !== false,
+                   pair: pairOf(params.comdist_a, params.comdist_b) },
       },
       selection: {
         primary,

@@ -481,21 +481,54 @@ class Analyzer:
                                            verbose=verbose, **p2)
         if name == "comdist":
             if len(self.components) < 2:
-                self.skip_reason = "两组分质心距需要至少勾选 2 个组分"
+                self.skip_reason = ("两组分质心距需要至少勾选 2 个组分"
+                                    f"（当前 {len(self.components)} 个）。")
                 return None
-            return ifc.analyze_com_distance(self.trajectory, self.components, sel,
-                                            verbose=verbose, **p)
+            ordered = sorted(self.components.items(), key=lambda kv: -kv[1].n_atoms)
+            pair, pair_note, explicit = self._pair_from_params(
+                p, (ordered[0][0], ordered[1][0]), what="质心距")
+            res = ifc.analyze_com_distance(self.trajectory, self.components, sel,
+                                           pair=pair, verbose=verbose, **p)
+            if res is not None:
+                if pair_note:
+                    res.add_notes("⚠️ " + pair_note)
+                if len(self.components) > 2:
+                    others = [n for n in self.components if n not in pair]
+                    res.add_notes(
+                        f"当前勾选了 {len(self.components)} 个组分，本项**每次只比较一对**："
+                        f"{pair[0]} × {pair[1]}。未参与的是 {others}；"
+                        f"要换组合请在参数里设置「质心距 A 组 / B 组」。")
+            return res
+
         if name == "contact":
-            a, b, la, lb = self._contact_pair()
-            if a is None:
+            if not self.components:
                 self.skip_reason = "接触分析需要至少勾选 1 个组分"
                 return None
+            # 自动的 A/B：A = 最大组分，B = 与 A 不同分子的最大组分
+            auto_a, auto_b, auto_na, auto_nb = self._contact_pair()
+            pair, pair_note, explicit = self._pair_from_params(
+                p, (auto_na, auto_nb), what="接触分析")
+            a, b = self.components.get(pair[0]), self.components.get(pair[1])
+            if a is None or b is None:          # 组分刚被清空/改名
+                a, b = auto_a, auto_b
+                pair = (auto_na, auto_nb)
             res = ifc.analyze_contacts(self.trajectory, a, b, sel, verbose=verbose, **p)
-            if res is not None and la:
-                res.add_notes(f"配对对象：{la} × {lb}"
-                              f"（A={a.n_atoms} 原子，B={b.n_atoms} 原子）。"
-                              f"选组规则：A 取最大组分，B 取与 A 不同分子的最大组分。")
+            if res is not None:
+                if pair_note:
+                    res.add_notes("⚠️ " + pair_note)
+                res.add_notes(
+                    f"配对对象：{pair[0]} × {pair[1]}"
+                    f"（A={a.n_atoms} 原子，B={b.n_atoms} 原子）。"
+                    + ("按参数指定。" if explicit else
+                       "选组规则：A 取最大组分，B 取与 A 不同分子的最大组分。"))
+                if len(self.components) > 2:
+                    others = [n for n in self.components if n not in pair]
+                    res.add_notes(
+                        f"当前勾选了 {len(self.components)} 个组分，本项**每次只比较一对**："
+                        f"{pair[0]} × {pair[1]}。未参与的是 {others}；"
+                        f"要换组合请在参数里设置「接触 A 组 / B 组」。")
             return res
+
         if name == "interface":
             if len(self.components) < 2:
                 names = list(self.components)
@@ -506,34 +539,9 @@ class Analyzer:
                     f"10 条链都叫 ETH），请到「分析集合」里按**原子数 / 元素 / 链长**"
                     f"把各物种拆成独立集合，再勾选它们参与分析。")
                 return None
-            # 默认取**原子数最多的两个组分**当作界面两侧：分层体系里这两相
-            # 才是真正的界面两侧；若按字典序取前两个，可能取到"溶解在里面的
-            # 小分子 + 基体"，那对组合没有平界面。
-            #
-            # ⚠️ 但"最大的两个"对三元/多元共混是不够的（用户实测：勾了 3 个组分，
-            #    界面分析永远只算最大的那两个，换体系还是老的一对）→ 现在支持
-            #    params["pair"] 显式指定 A/B，并且**失效时回退**而不是直接报错。
             ordered = sorted(self.components.items(), key=lambda kv: -kv[1].n_atoms)
-            auto_pair = (ordered[0][0], ordered[1][0])
-            want, pair_note = None, ""
-            raw = p.pop("pair", None)
-            if raw:
-                try:
-                    cand = tuple(str(x) for x in raw)[:2]
-                except TypeError:
-                    cand = ()
-                if len(cand) == 2 and cand[0] != cand[1]:
-                    missing = [n for n in cand if n not in self.components]
-                    if missing:
-                        pair_note = (f"指定的界面组分 {missing} 不在当前勾选的组分里"
-                                     f"（现有：{list(self.components)}），"
-                                     f"已回退到原子数最多的 {auto_pair[0]} × {auto_pair[1]}。")
-                    else:
-                        want = cand
-                else:
-                    pair_note = (f"界面 A/B 组必须是不相同的两个组分名（收到 {raw!r}），"
-                                 f"已回退到原子数最多的 {auto_pair[0]} × {auto_pair[1]}。")
-            pair = want or auto_pair
+            pair, pair_note, explicit = self._pair_from_params(
+                p, (ordered[0][0], ordered[1][0]), what="界面分析")
             res = ifc.analyze_interface_width(self.trajectory, self.components, sel,
                                               pair=pair, verbose=verbose, **p)
             if res is not None:
@@ -544,10 +552,11 @@ class Analyzer:
                     res.add_notes(
                         f"当前勾选了 {len(self.components)} 个组分，本项**每次只比较一对**："
                         f"{pair[0]} × {pair[1]}"
-                        + ("（自动取原子数最多的两个）" if not want else "（按参数指定）")
+                        + ("（按参数指定）" if explicit else "（自动取原子数最多的两个）")
                         + f"。未参与的是 {others}；要换组合请在参数里设置"
                           f"「界面 A 组 / 界面 B 组」。")
             return res
+
         if name == "orientation":
             ag, lab = self._orientation_target()
             return cry.analyze_orientation(self.trajectory, ag, sel,
@@ -1021,7 +1030,39 @@ class Analyzer:
             out[name] = ag
         return out
 
-    def _contact_pair(self):
+    def _pair_from_params(self, p: dict, auto_pair, *, what: str) -> tuple:
+        """从参数里取"要比较的 A/B 两组"；失效时回退到 ``auto_pair`` 并返回说明。
+
+        为什么单独抽出来：**接触 / 界面 / 质心距**这三项都是"一次只比较一对"，
+        以前各自写死"取原子数最多的两个"，界面上没有入口 —— 三元共混里第三个组分
+        永远不参与，换体系看到的还是老的一对（用户实测）。现在统一支持
+        ``params["pair"] = [A, B]``，并且**任何失效都回退 + 说明**，不抛异常。
+
+        返回 ``(pair, note, explicit)``：``note`` 为空表示没出岔子，
+        ``explicit=True`` 表示这次用的是用户指定的那一对。
+        """
+        raw = p.pop("pair", None)
+        if not raw:
+            return tuple(auto_pair), "", False
+        auto = (auto_pair[0], auto_pair[1]) if auto_pair else ("", "")
+        try:
+            cand = tuple(str(x) for x in raw)[:2]
+        except TypeError:
+            cand = ()
+        if len(cand) != 2:
+            return auto, (f"{what}的 A/B 组必须给两个组分名（收到 {raw!r}），"
+                          f"已回退到 {auto[0]} × {auto[1]}。"), False
+        if cand[0] == cand[1]:
+            return auto, (f"{what}的 A/B 组必须是不相同的两个组分名（收到 {raw!r}），"
+                          f"已回退到 {auto[0]} × {auto[1]}。"), False
+        missing = [n for n in cand if n not in self.components]
+        if missing:
+            return auto, (f"指定的{what}组分 {missing} 不在当前勾选的组分里"
+                          f"（现有：{list(self.components)}），"
+                          f"已回退到 {auto[0]} × {auto[1]}。"), False
+        return cand, "", True
+
+    def _contact_pair(self, explicit=None):
         """接触分析的 A/B 两组。
 
         选法：A = 原子数最多的组分；B = **与 A 不在同一批分子里**的、原子数最多的
@@ -1031,13 +1072,20 @@ class Analyzer:
         组分"的糖蛋白（protein + sugar 共价相连）时，A/B 会选成一对**同分子**的
         组分，inter 口径下接触恒为 0 —— 实测 md_biopolymer_nowater 报出的
         "平均接触对数 = 0" 而最小原子间距只有 1.39 Å（N-糖苷键长），是个毫无意义
-        的数。返回 ``(group_a, group_b, name_a, name_b)``。
+        的数。
+
+        ``explicit`` 给 ``(name_a, name_b)`` 时按它取（用户显式指定）；
+        返回 ``(group_a, group_b, name_a, name_b)``。
         """
         from .analysis.interface import shares_one_molecule
 
         items = sorted(self.components.items(), key=lambda kv: -kv[1].n_atoms)
         if not items:
             return None, None, "", ""
+        if explicit:
+            a_name, b_name = str(explicit[0]), str(explicit[1])
+            a, b = self.components[a_name], self.components[b_name]
+            return a, b, a_name, b_name
         name_a, a = items[0]
         for name_b, b in items[1:]:
             if not shares_one_molecule(a, b):

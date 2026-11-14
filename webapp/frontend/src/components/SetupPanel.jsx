@@ -669,6 +669,16 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     </span>
   )
 
+  /** 「一次只比较一对」的分析共用的 A/B 两组下拉（留空 = 自动）。 */
+  const pairFields = (key, autoA, autoB) => [
+    F(`${key}_a`, "A 组", "select",
+      sel(`${key}_a`, [autoA,
+        ...(components || []).map((n) => [String(n), String(n)])]), "自动", 3),
+    F(`${key}_b`, "B 组", "select",
+      sel(`${key}_b`, [autoB,
+        ...(components || []).map((n) => [String(n), String(n)])]), "自动", 3),
+  ]
+
   const show = (mods) => {
     if (mods === null) return true
     if (which === null || !Array.isArray(which)) return true
@@ -705,6 +715,10 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         numInput('留空=全盒', { step: 1, ...p('slab_lo') }), '留空=全盒'),
       F('slab_hi', '叶层 z 上限 (Å)', 'input',
         numInput('留空=盒顶', { step: 1, ...p('slab_hi') }), '留空=盒顶'),
+      // 质心距的 A/B 两组（同一个"只比较一对"问题；只勾 comdist 时出现）
+      ...(show(['comdist'])
+        ? pairFields('comdist', ['', '自动（原子数最多）'],
+                     ['', '自动（次多）']) : []),
       F('comdist_pbc', '质心距 PBC', 'check',
         chk('comdist_pbc', '用最小镜像（默认）',
           '默认勾上：两个质心常分处盒边界两侧，直接相减会得到 ~L 的假跳变；'
@@ -766,6 +780,10 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
         ['intra', '分子内'],
         ['total', '总体（含分子内）'],
       ])),
+      // A/B 两组：以前固定"最大组分 + 与它不同分子的最大组分"，三元共混里
+      // 第三个组分永远不参与（用户实测）→ 现在可指定，留空 = 自动
+      ...pairFields('contact', ['', '自动（最大组分）'],
+                    ['', '自动（不同分子的最大组分）']),
     ]],
     ['密度分布 / 界面宽度', ['density', 'interface'], [
       // 方向**独占第一行**（span 6）；口径与分箱数排第二行（2+2）。
@@ -783,17 +801,10 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
                              style: { width: 56, minWidth: 56 }, ...p('nbins') })}
         </span>,
         '质量密度', 5),
-      // ---- 界面宽度：**A/B 组**（只勾 interface 时才出现）
-      // 以前固定"原子数最多的两个组分"→ 三元及以上共混里永远只算最大的那一对，
-      // 换体系还是老的一对（用户实测）。这里给出两个下拉，留空 = 自动。
-      show(['interface']) && F('iface_a', '界面 A 组', 'select',
-        sel('iface_a', [['', '自动（原子数最多）'],
-                        ...(components || []).map((n) => [String(n), String(n)])]),
-        '自动', 3),
-      show(['interface']) && F('iface_b', '界面 B 组', 'select',
-        sel('iface_b', [['', '自动（次多，且≠A）'],
-                        ...(components || []).map((n) => [String(n), String(n)])]),
-        '自动', 3),
+      // ---- 界面宽度的 A/B 组（只勾 interface 时出现）
+      ...(show(["interface"])
+        ? pairFields("iface", ["", "自动（原子数最多）"],
+                     ["", "自动（次多，且≠A）"]) : []),
     ].filter(Boolean)],
     // RDF 设置只留三项（用户要求）：最大 r / 分箱数 / 配对模式；
     // Forcite 口径相关的三个旋钮已从界面移除（后端仍保留参数，默认 = MDAnalysis 口径）。
