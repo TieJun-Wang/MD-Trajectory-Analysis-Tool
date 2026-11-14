@@ -611,6 +611,10 @@ class Analyzer:
         from .analysis.base import clear_unwrap_cache
 
         clear_unwrap_cache()
+        # 每一次探测前问一次取消：3 次探测 × 各 2m 帧在大体系上也要好几十秒
+        from .cancel import check as _cancel_check
+
+        _cancel_check()
         self.frames = sel
         t0 = time.time()
         self.run(name, params=params.get(name), verbose=False)
@@ -646,7 +650,19 @@ class Analyzer:
         n = sel_full.n_frames
         keep_frames, keep_current = self.frames, self.current
         out: dict[str, dict] = {}
+        # 预估阶段也必须能取消：原先这里**没挂**取消令牌，于是"点了取消没效果"
+        # （每项要跑 3 次探测、每次 2m 帧，4.7 万原子体系上一项就好几分钟）。
+        from .cancel import AnalysisCancelled
+        from .cancel import bind as _cancel_bind
+        from .cancel import clear as _cancel_clear
+        from .cancel import check as _cancel_check
+
+        _cancel_bind(cancel)
         try:
+            # 预热同样可能很慢（分子划分 / 键表 / 首次 unwrap），先查一次
+            _cancel_check()
+            if cancel is not None and cancel.is_set():
+                raise AnalysisCancelled("用户取消了本次分析")
             # 先预热：否则"第一个被探测的项"会把一次性初始化算进自己的预估里，
             # 排序就会因此跑偏
             try:
@@ -690,6 +706,8 @@ class Analyzer:
                     self._time_one(name, params, probe.head(min(2, pk)))
                     t1 = self._time_one(name, params, probe.head(m_head))
                     tk = self._time_one(name, params, probe)
+                except AnalysisCancelled:
+                    raise                       # 用户取消：明确向上报，别当"估不出来"
                 except Exception as exc:  # noqa: BLE001
                     msg = str(exc)
                     if "没有速度" in msg:
@@ -722,6 +740,7 @@ class Analyzer:
                 out[name] = rec
         finally:
             self.frames, self.current = keep_frames, keep_current
+            _cancel_clear()          # 预估结束后把令牌摘掉，避免影响后续 run_all
         return out
 
     def _annotate_frames(self, res, sel):
@@ -829,12 +848,25 @@ class Analyzer:
         #: 单项分析内部判断"这项做不了"时写的原因（供 :attr:`skips` 使用）
         self.skip_reason: str = ""
         self.run_order: list[str] = list(names)
+        # 取消令牌挂到模块级：分析内部的长循环（逐帧 / 帧内分块）会检查它，
+        # 于是「取消」不必等当前这一项算完（用户要求立即生效）。
+        # ⚠️ 必须在**热身之前**挂上：热身要建分子划分 / 键图 / 首次解包裹，
+        #    4.7 万原子体系上本身就要几秒到几十秒，之前这段是完全不可中断的。
+        from .cancel import AnalysisCancelled
+        from .cancel import bind as _cancel_bind
+        from .cancel import clear as _cancel_clear
+
+        _cancel_bind(cancel)
         # 预热放在计时之前：一次性初始化（分子编号展开/键图/解包裹）不该算进
         # 队首那一项的耗时里（否则改个开关就能让同一项"看起来变慢"）
         if progress:
             progress(0.0, "预热（一次性初始化：分子编号 / 键图 / 解包裹）…")
         try:
             self.warmup()
+        except AnalysisCancelled:
+            self.cancelled = True
+            _cancel_clear()
+            return self.results
         except Exception:  # noqa: BLE001
             pass
         sel = self.require_frames()
@@ -844,13 +876,6 @@ class Analyzer:
                 print(f"          {n}")
         total = max(len(names), 1)
         self.cancelled = False
-        # 取消令牌挂到模块级：分析内部的长循环（逐帧/逐粒子）会检查它，
-        # 于是「取消」不必等当前这一项算完（用户要求立即生效）。
-        from .cancel import AnalysisCancelled
-        from .cancel import bind as _cancel_bind
-        from .cancel import clear as _cancel_clear
-
-        _cancel_bind(cancel)
         self.current = ""
         for i, name in enumerate(names):
             if cancel is not None and cancel.is_set():

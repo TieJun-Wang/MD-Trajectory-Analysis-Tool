@@ -92,6 +92,11 @@ def positions_for(ag, unwrap: bool = True, compound: str = "fragments") -> np.nd
         return hit.copy()
 
     out = saved
+    # 解包裹是每帧的一大段活（4.7 万原子主链实测 0.1–0.5 s/帧，深键图更久）：
+    # 进去前问一次取消，避免"点了取消还要等这一帧算完"。
+    from ..cancel import check as _cancel_check
+
+    _cancel_check()
     for kwargs in ({"compound": compound, "reference": "com"},
                    {"compound": compound, "reference": "cog"},
                    {"compound": compound, "reference": None},

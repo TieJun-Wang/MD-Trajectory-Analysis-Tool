@@ -2231,6 +2231,7 @@ class Session:
         job = self._job
         if job is None:
             return
+        from mdta.cancel import AnalysisCancelled
         try:
             def _progress(frac, message):
                 with self._lock:
@@ -2307,6 +2308,16 @@ class Session:
                         job.phase = "run"
                         job.message = ("预估完成，按用时短 → 长依次计算…"
                                        if job.estimates else "开始计算…")
+                except AnalysisCancelled:
+                    # 预估阶段也可能是几十秒（每项 3 次探测 × 2m 帧）：用户在这里
+                    # 点取消就是**真的取消**，不能接着开跑（以前会被下面那条
+                    # `except Exception` 吞成"预估失败，直接开跑"→ 取消看起来没效果）。
+                    with self._lock:
+                        job.status = "cancelled"
+                        job.frac = 0.0
+                        job.message = "已取消（预估阶段就中断了，没有产生新结果）"
+                        job.finished = time.time()
+                    return
                 except Exception as exc:  # noqa: BLE001 - 估不出来不该阻断分析
                     with self._lock:
                         job.estimate_note = f"预估失败，直接开跑（{exc}）"
@@ -2506,14 +2517,21 @@ class Session:
             }
 
     def cancel_run(self) -> dict:
-        """请求取消：会在**当前这项算完后**停下，已完成的结果保留。"""
+        """请求取消：**正在算的这一项会在一个分块内停下**（不等到算完），已完成的结果保留。
+
+        取消令牌挂在 ``mdta.cancel`` 上，逐帧循环、邻居搜索、球谐、直方图、
+        解包裹、MSD 的各个滞后块里都会检查（见 ``mdta/cancel.py::tick``），
+        所以实测延迟是**几十毫秒**，而不是以前的一整帧 / 一整项。
+        """
         # 注意：不能在持锁的情况下调用 run_progress()——它会再次获取同一把锁，
         # 而 threading.Lock 不可重入，会直接死锁（实测卡死在这里）。
         with self._lock:
             job = self._job
             if job is not None and job.status == "running":
                 job.cancel.set()
-                job.message = "已请求取消，等当前这项算完…"
+                # 说清楚"正在中断"而不是"等算完"：用户实测最在意的就是
+                # "点了取消还在算、界面还锁着"。
+                job.message = "正在中断当前计算（已完成的结果会保留）…"
         return self.run_progress(0)
 
     # ----------------------------------------------------------------- 导出

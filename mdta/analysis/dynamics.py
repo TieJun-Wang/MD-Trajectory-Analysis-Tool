@@ -147,6 +147,9 @@ def msd_numerator_by_group(A, *, groups=None, batch: int | None = None,
             if verbose:
                 print(f"  [MSD] 多进程不可用（{type(exc).__name__}: {exc}），退回串行")
     for lo in range(0, n_col, batch):
+        from ..cancel import tick as _cancel_tick
+
+        _cancel_tick(lo, max(batch, 1))      # MSD 的完整 FFT 路径：每批问一次取消
         hi = min(lo + batch, n_col)
         num += _one(lo, hi)
         if verbose:
@@ -213,7 +216,10 @@ def msd_numerator_by_group_segmented(A, *, groups=None, max_lag: int,
     num = np.zeros((n_lag, n_grp), dtype=np.float64)
     origins = np.zeros(n_lag, dtype=np.float64)
 
+    from ..cancel import tick as _cancel_tick
+
     for lo in range(0, n - max_lag, step):
+        _cancel_tick(lo, max(step, 1))      # 每过一个滚动块问一次取消
         hi = min(lo + L, n)
         blk_frames = hi - lo
         if blk_frames <= max_lag:
@@ -476,7 +482,10 @@ def _unwrap_series(series, boxes, *, verbose: bool = False, inplace: bool = Fals
     out[0] = series[0]
     n_big = 0
     n_tot = 0
+    from ..cancel import tick as _cancel_tick
+
     for k in range(1, n):
+        _cancel_tick(k, 8)          # 逐帧解包裹（大体系每帧几十 ms）
         # 必须**拷贝**（np.array 默认 copy）：dtype 相同时 asarray 会返回视图，
         # 而 `out[k] = ...` 马上就会覆盖 memmap 的同一块内存 → 视图变脏
         raw = np.array(series[k], dtype=np.float64)
@@ -1215,7 +1224,10 @@ def _vacf_raw(mdt, abs_idx, selection, chunk_atoms: int, verbose: bool = False):
     raw = np.zeros(n, dtype=np.float64)
     nfft = 1 << int(np.ceil(np.log2(max(2, 2 * n))))
     chunk_atoms = int(max(1, min(chunk_atoms, n_at)))
+    from ..cancel import tick as _cancel_tick
+
     for start in range(0, n_at, chunk_atoms):
+        _cancel_tick(start // max(chunk_atoms, 1))   # 每块问一次取消
         sub = np.asarray(abs_idx[start:start + chunk_atoms], dtype=int)
         v = np.empty((n, sub.size, 3), dtype=np.float64)
         for k, (fi, _t) in enumerate(frame_iterator(mdt, selection, verbose=False)):

@@ -299,9 +299,15 @@ def compute_ql(positions: np.ndarray, box, cutoff: float,
         except Exception:                            # noqa: BLE001 - 退回自带实现
             if backend == "freud":
                 raise
+    # 大体系上"邻居搜索"和"球谐"各自都是几百毫秒到秒级的一段重活：
+    # 两段之间各问一次取消，用户点取消就不用等整帧算完。
+    from ..cancel import check as _cancel_check
+
+    _cancel_check()
     pos = pos_in
     n = pos.shape[0]
     pairs = _neighbor_lists(pos, box, cutoff)
+    _cancel_check()
 
     d = pos[pairs[:, 1]] - pos[pairs[:, 0]] if pairs.size else np.zeros((0, 3))
     if pairs.size and box is not None:
@@ -329,9 +335,11 @@ def compute_ql(positions: np.ndarray, box, cutoff: float,
     # ---- 球谐：**实分量**一次算好（P_l^m 递推），各 l 复用，不再逐 m 调 scipy
     l_max = int(max(l_list))
     P, cos_m, sin_m = _ylm_real_parts(dirs, l_max)
+    _cancel_check()                     # 球谐（O(邻居对 × l²)）之后再看一次
     cnt = n_nb.astype(float)
     nz = cnt > 0
     for l in l_list:
+        _cancel_check()
         # 分量按 m=0..l 组织：c_m = K·P_l^m·cos(mφ)、s_m = K·P_l^m·sin(mφ)
         # （m=0 只有 c）。|⟨Y_lm⟩|² 拆成这两组实数的平方和，完全等价于复数版：
         #   Σ_m |⟨Y_lm⟩|² = c_0² + 2 Σ_{m≥1} (c_m² + s_m²)

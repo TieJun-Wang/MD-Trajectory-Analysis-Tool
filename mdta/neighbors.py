@@ -193,6 +193,11 @@ def self_pairs(pos, box, cutoff: float, *, cache: bool = True,
     pa = np.asarray(pos, dtype=np.float32)
     if pa.shape[0] < 2 or float(cutoff) <= 0:
         return np.zeros((0, 2), dtype=np.int64), (np.zeros(0, dtype=float) if want_dist else None)
+    # 一次邻居搜索本身是 scipy/MDAnalysis 的**单次调用**（中途无法打断），
+    # 大体系上可达 0.1–2 s；至少在进去前问一次取消。
+    from .cancel import check as _cancel_check
+
+    _cancel_check()
     if cache:
         hit = _cache_get("self", pa, None, box, float(cutoff))
         if hit is not None:
@@ -266,6 +271,9 @@ def cross_pairs(pa, pb, box, cutoff: float, *, cache: bool = True):
     b = np.asarray(pb, dtype=np.float32)
     if a.shape[0] == 0 or b.shape[0] == 0 or float(cutoff) <= 0:
         return np.zeros((0, 2), dtype=np.int64), np.zeros(0, dtype=float)
+    from .cancel import check as _cancel_check
+
+    _cancel_check()          # 同 self_pairs：进去前问一次
     if cache:
         hit = _cache_get("cross", a, b, box, float(cutoff))
         if hit is not None:

@@ -617,7 +617,10 @@ def _inplane_pair_hist(pos2d: np.ndarray, L_in: np.ndarray, rmax: float,
     r2cut = rmax * rmax
     chunk = max(64, int(3_000_000 // max(n, 1)))
     rows = np.arange(n)
+    from ..cancel import tick as _cancel_tick
+
     for s in range(0, n, chunk):
+        _cancel_tick(s // max(chunk, 1))    # 每块问一次取消（单块 ~几十 ms）
         e = min(s + chunk, n)
         a = w[s:e]
         b = w
@@ -626,6 +629,7 @@ def _inplane_pair_hist(pos2d: np.ndarray, L_in: np.ndarray, rmax: float,
             gi = s + r
             if gi + 1 >= n:
                 break
+            _cancel_tick(gi, 256)
             dx = b[gi + 1:, 0] - a[r, 0]
             dy = b[gi + 1:, 1] - a[r, 1]
             dx = np.abs(dx)
@@ -883,7 +887,10 @@ def _pairs_bruteforce(pa, pb, rmax: float, box, same: bool):
         return np.zeros((0, 2), dtype=np.int64), np.zeros(0, dtype=float)
     chunk = max(32, min(1024, int(4_000_000 // max(int(other.shape[0]), 1))))
     I, J, D = [], [], []
+    from ..cancel import tick as _cancel_tick
+
     for s in range(0, n, chunk):
+        _cancel_tick(s // max(chunk, 1))    # 每块问一次取消（分块暴力是帧内最重的活）
         d = np.asarray(distance_array(pa[s:s + chunk], other, box=box))
         if same:
             for r in range(d.shape[0]):

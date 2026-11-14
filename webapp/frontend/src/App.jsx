@@ -816,7 +816,7 @@ export default function App() {
 
   const cancelRun = async () => {
     cancelledRef.current = true
-    pushLog('已请求取消：正在算的这一项会立刻中断，已完成的结果会保留')
+    pushLog('已请求取消：正在中断当前计算（帧内分块也会检查，通常 1 秒内停下），已完成的结果会保留')
     try {
       const p = await api.runCancel(sess.sid)
       setLive((l) => (l ? { ...l, message: p.message || l.message } : l))
@@ -1100,7 +1100,7 @@ export default function App() {
                                            const removed = which.filter((n) => !next.includes(n))
                                            if (running && removed.length) {
                                              pushLog(`已取消分析项：${removed.join('、')}`
-                                               + '（当前计算会立刻中断，可重新开始）')
+                                               + '（当前计算会在 1 秒内中断，可重新开始）')
                                              cancelRun()
                                            }
                                            setWhich(next)
