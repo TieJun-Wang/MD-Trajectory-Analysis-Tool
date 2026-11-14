@@ -32,6 +32,7 @@
 | `rg.py` / `ree.py` / `msd.py` / `rdf.py` / `comdis.py` | Rg、末端距、MSD、RDF、两组分质心距 |
 | `rdf_mdat.py` | **RDF 的 util_rdf.py 口径**（MDTransport：逐帧全原子对 + 当场最小镜像 + 同种粒子数−1 归一化），含配位数曲线；与 `InterRDF`/引擎/原实现三方对拍 |
 | `msd_mdat.py` | **MSD/扩散系数的 util_msd.py + util_diffusion.py 口径**（增量最小镜像解包 + 去质心漂移 + FFT 全起点平均；D = β≈1 窗口的 OLS 斜率/(2·dim)）；与 `EinsteinMSD`/引擎对拍 |
+| `density.py` | **1D 密度分布**：教科书实现 + 与 `MDAnalysis.analysis.lineardensity.LinearDensity` 对拍 + 质量守恒自检 |
 | `contact.py` | **接触分析 + 接触矩阵**（与引擎逐位一致）+ **独立复现 & 与引擎逐帧对拍**（原 `examples/contact_reproduce.py` 的包内版本：`reproduce_contacts` / `compare_engine` / `test_contact_reproduce`） |
 | `orientation.py` | **链段取向**（`allfast-3-2.py` 口径：键中点矢量 → ⟨cos²θ⟩ / 取向参数 / ⟨θ⟩(t)） |
 
