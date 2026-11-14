@@ -294,6 +294,38 @@ export default function App() {
     }
   }
 
+  /**
+   * 删除一条分析集合：本地先摘掉，再让后端把三处一起清掉
+   * （集合定义 `sets_spec` / 已保存选择 `selections` / 组分 `set:<名字>`）。
+   *
+   * 为什么必须通知后端（用户实测的 bug）：删完再建同名的集合时，
+   * 后端如果还留着旧名字，就会把新集合命名成 `A_2`——"加序号"看起来像在
+   * 翻历史。名字是否重复只能看**现在还有没有这条集合**。
+   */
+  const deleteSet = async (name) => {
+    const sid = sess?.sid
+    if (!sid) return
+    const nm = String(name || '').trim()
+    if (!nm) return
+    // 本地先摘（界面立刻响应）：集合行、组分胶囊、主链一并处理
+    setSets((prev) => prev.filter((x) => x.name !== nm))
+    setComponents((prev) => prev.filter((c) => c !== `set:${nm}`))
+    setPrimary((cur) => (cur && cur.name === `set:${nm}` ? { mode: 'auto' } : cur))
+    try {
+      const r = await api.deleteSelection(sid, nm)
+      if (r?.selections) {
+        setSess((cur) => (cur ? { ...cur, selections: r.selections } : cur))
+      }
+      if (r?.catalog || r?.components) {
+        setSess((cur) => (cur ? { ...cur, components: r.catalog || cur.components } : cur))
+      }
+      pushLog(`已删除集合 set:${nm}`)
+      setSelSync((n) => n + 1)
+    } catch (e) {
+      setError(`删除集合失败: ${e.message}`)
+    }
+  }
+
   const applySets = (next, highlight = '') => {
     setSets(next)
     if (!sess?.sid) return
@@ -1072,6 +1104,7 @@ export default function App() {
                                         sets={sets} setsInfo={setsInfo}
                                         onSetsChange={applySets}
                                         onRenameSet={renameSet}
+                                        onDeleteSet={deleteSet}
                                         shownComps={(sess?.components || [])
                                           .map((c) => c.name)
                                           .filter((n) => !hiddenComps.includes(n))}

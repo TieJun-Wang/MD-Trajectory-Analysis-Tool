@@ -23,6 +23,7 @@ const SEC_ICON = {
 
 export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
                                         onSetsChange = null, onRenameSet = null,
+                                        onDeleteSet = null,
                                         shownComps = null, onToggleShown = null,
                                         log = null,
                                         onNext = null,
@@ -258,6 +259,7 @@ export default function StructurePanel({ sess, st, sets = [], setsInfo = [],
       <SetsBlock sess={sess} sets={sets} setsInfo={setsInfo}
                  onSetsChange={onSetsChange}
                  onRenameSet={onRenameSet}
+                 onDeleteSet={onDeleteSet}
                  shownComps={shownComps}
                  onToggleShown={onToggleShown}
                  components={components}

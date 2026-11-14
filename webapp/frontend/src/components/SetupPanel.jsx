@@ -16,7 +16,8 @@ import { fmtSec } from '../format'
  * `onSetsChange`（变更回调），和原来的 SelectionBlock 用法一致。
  */
 export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
-                          onRenameSet = null, shownComps = null, onToggleShown = null,
+                          onRenameSet = null, onDeleteSet = null,
+                          shownComps = null, onToggleShown = null,
                           selectedCount = 0, onCreateFromIndices = null,
                           onHighlight = null, activeSet = '',
                           onFilterElement = null, activeElement = '',
@@ -58,7 +59,16 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
     while (used.has(`${b}_${i}`)) i += 1
     return `${b}_${i}`
   }
-  const removeSet = (name) => emit(sets.filter((x) => x.name !== name))
+  /** 删掉一条集合：**先本地摘掉**（立刻从列表消失），再让后端把定义 /
+   *  已保存选择 / 组分一起清掉。
+   *
+   *  ⚠️ 以前只改本地状态、不通知后端 —— 后端一直留着这条集合的名字，
+   *  于是"删掉 A 之后再建一个 A"会拿到 `A_2`（用户实测：编号像在翻旧账）。
+   *  编号是否加，必须看**现在还有没有同名集合**。 */
+  const removeSet = (name) => {
+    emit(sets.filter((x) => x.name !== name))
+    onDeleteSet?.(name)
+  }
   /** 提交改名：手填的名字与已有集合重名时由后端自动加 `_2`/`_3` 序号 */
   const commitRename = (oldName) => {
     const v = String(renameDraft || '').trim()

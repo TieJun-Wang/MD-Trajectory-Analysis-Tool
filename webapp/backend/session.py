@@ -566,6 +566,9 @@ class Session:
         if "sets" in req and req.get("sets") is not None:
             self.sets_spec = [dict(x) for x in (req.get("sets") or [])
                               if isinstance(x, Mapping)]
+            # 集合列表变了 → 清掉 `selections` 里已经没有定义的旧记录（重名判断
+            # 只看"现在还有没有这条集合"，见 `_live_set_names`）
+            self._prune_selections()
         # 「可视化选择」存下来的集合：前端只回传名字（上万个索引不必来回传），
         # 索引由后端从 `self.selections` 补回 —— 否则重建时会退化成"没有筛选条件"
         # 的集合（那会选中**整个体系**，比丢还好一点的是错得更离谱）。
@@ -783,6 +786,9 @@ class Session:
         if req.get("sets") is not None:
             self.sets_spec = [dict(x) for x in (req.get("sets") or [])
                               if isinstance(x, Mapping)]
+            # 集合列表变了 → 把 `selections` 里已经没有定义的旧记录清掉，
+            # 否则"删掉 A 再建 A"会因为历史记录而拿到 A_2（用户实测）。
+            self._prune_selections()
         # 可视化选择只回传名字，索引从会话里补回来（与空闲分支同一套规则）
         for spec in self.sets_spec:
             if "indices" not in spec:
@@ -1747,6 +1753,30 @@ class Session:
             pass
         return out
 
+    # ------------------------------------------------- 集合命名的"看现在"
+    def _live_set_names(self) -> set[str]:
+        """**当前真正存在**的集合名（重名判断只能看现在，不能看历史）。
+
+        只算 ``sets_spec`` 里还活着的定义；``selections`` 里残留的旧记录
+        不算（见 :meth:`_prune_selections`）。
+        """
+        names = {str((s or {}).get("name") or "") for s in (self.sets_spec or [])}
+        names.discard("")
+        return names
+
+    def _prune_selections(self) -> None:
+        """清掉 ``selections`` 里**已经没有对应集合定义**的旧记录。
+
+        为什么必须清（用户实测的 bug）：把一条集合删掉之后再建一个**同名**的，
+        结果得到 ``A_2`` —— 老逻辑把 ``selections`` 里的历史记录也当成
+        "名字已被占用"。名字有没有重复应该只看**现在还有没有这条集合**。
+        """
+        if not self.selections:
+            return
+        live = self._live_set_names()
+        for nm in [k for k in list(self.selections) if k not in live]:
+            self.selections.pop(nm, None)
+
     def add_visual_selection(self, name: str, indices, *, save: bool = True,
                              from_meta: Mapping | None = None) -> dict:
         """把三维视图里选中的**原子索引**变成一条集合（`set:<名字>`）。
@@ -1768,8 +1798,11 @@ class Session:
         # 重名**不覆盖**：与「改名」同一套规则，自动加序号 `_2`、`_3`…
         # （用户实测要求：多建几个集合时，同名的应该变成一个"新集合"而不是
         #   悄悄顶掉原来的那一条 —— 原来的会被当成"没有变化"。）
-        existing = {str((s or {}).get("name") or "") for s in (self.sets_spec or [])}
-        existing |= set((self.selections or {}).keys())
+        # ⚠️ 判断"重名"只看**现在**存在的集合（`sets_spec`）：以前还把
+        #    `selections` 的历史记录算进来，于是"删掉 A 再建 A"会得到 `A_2`
+        #    （用户实测反馈：编号看着像在翻旧账）。
+        self._prune_selections()
+        existing = self._live_set_names()
         base = nm
         k = 2
         while nm in existing:
@@ -1851,6 +1884,10 @@ class Session:
         重名策略（用户要求）：新名字已经被别的集合占用时，不覆盖、也不报错，
         而是自动加序号 ``name_2``、``name_3``…，返回值里的 ``name`` 是最终生效的
         名字，``renamed`` 表示是否加过序号。
+
+        "重名"只看**现在还在**的集合（`:meth:`_live_set_names``）：已经删掉的
+        名字可以直接复用 —— 以前把 ``selections`` 的历史记录也算进去，
+        于是"把 A 删掉再把 B 改成 A"会得到 ``A_2``（用户实测反馈）。
         """
         o = str(old or "").strip()
         if o.startswith("set:"):
@@ -1863,8 +1900,8 @@ class Session:
         if not n:
             raise SessionError("新集合名为空")
 
-        existing = {str((s or {}).get("name") or "") for s in (self.sets_spec or [])}
-        existing |= set((self.selections or {}).keys())
+        self._prune_selections()
+        existing = self._live_set_names()
         if o not in existing:
             raise SessionError(f"没有名为 {o!r} 的集合（可先在上面添加）")
         base = n
