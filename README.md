@@ -967,6 +967,14 @@ python test/mda_test/interface.py --frames 10 --mode number --smooth 1 -y   # �
   链段数 ≥ 2 时同时给出 `S 估计标准误 (≈√(2/5N))`
 - 同时给出相对给定参考轴的二阶序参数 $P_2=\left\langle\frac{3\cos^2\theta-1}{2}\right\rangle$
 - 输出：S–Time、P₂–Time、取向角分布、取向矢 (director) 随时间变化
+- **统计权重是"链段加权"**：把所有分子、所有链段放进一个池子再平均
+  （同一条链里链段多，长链自然权重更大），角度 θ(t) 同理。
+  链长不一的**多分散**体系（例如 C6–C50 混油）里，这与"每条链先平均、再链间等权"
+  明显不同；与外部脚本对照时请看 `test/mda_test/orientation.py` 导出的
+  `*_pooled` 列（见 `test/README.md`）。
+- **跨度 `stride`**：面板里可选。`stride=1`（默认）是相邻原子对；`stride=2`
+  等价于"相邻键中点矢量"法（烷烃锯齿链上这样才得到链的走向），
+  与 allfast-3-2.py 一致。
 
 #### 结构有序度
 

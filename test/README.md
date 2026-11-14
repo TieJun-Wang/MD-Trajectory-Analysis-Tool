@@ -34,7 +34,7 @@
 | `msd_mdat.py` | **MSD/扩散系数的 util_msd.py + util_diffusion.py 口径**（增量最小镜像解包 + 去质心漂移 + FFT 全起点平均；D = β≈1 窗口的 OLS 斜率/(2·dim)）；与 `EinsteinMSD`/引擎对拍 |
 | `density.py` | **1D 密度分布 + 归一化曲线**：与程序「导出板块」同口径导出 `density.csv` / `density__norm.csv`；教科书实现 + 与 `LinearDensity` 对拍 + 质量守恒自检 |
 | `contact.py` | **接触分析 + 接触矩阵**（与引擎逐位一致）+ **独立复现 & 与引擎逐帧对拍**（原 `examples/contact_reproduce.py` 的包内版本：`reproduce_contacts` / `compare_engine` / `test_contact_reproduce`） |
-| `orientation.py` | **链段取向**（`allfast-3-2.py` 口径：键中点矢量 → ⟨cos²θ⟩ / 取向参数 / ⟨θ⟩(t)） |
+| `orientation.py` | **链段取向**（`allfast-3-2.py` 口径：键中点矢量 → ⟨cos²θ⟩ / 取向参数 / ⟨θ⟩(t)）；同时给**逐链等权**与**链段加权**（= 程序引擎）两套数，自动跳过石墨/环/支化碎片 |
 | `interface.py` | **界面宽度 10–90 + erf**：参考实现（教科书剖面 + 局部 10–90 + erf 拟合）、**合成已知宽度界面**（真实 10–90 = 2.5631σ）、与引擎逐位对拍、`LinearDensity` 剖面交叉验证 |
 
 > 与第三方程序（**MDTransport**：`util_rdf.py` / `util_msd.py` + `util_diffusion.py`）
@@ -88,6 +88,30 @@ python test/mda_test/contact.py --help        # 看本模块的全部开关
   真实数据为压噪声才用 5。
 - **硬壁不报宽度**：石墨/晶体壁这类"一个 bin 就走完 0→1"的界面，10–90 在采样范围内
   量不出来，程序会如实说"宽度不可直接测量"（位置照给）。这不是 bug。
+
+### 链段取向（`orientation.py`）怎么对照
+
+`orientation.py` 里每个量都输出**两套权重**，弄清楚该看哪一列很重要：
+
+| 列 | 含义 | 与谁对应 |
+|---|---|---|
+| `cos2_axis` / `P2` | **逐链等权**：每条链先算 ⟨cos²θ⟩，再在链之间平均 | 原 allfast 脚本（单分散体系） |
+| `cos2_pooled` / `P2_pooled` | **链段加权**：所有链的所有链段进一个池子再平均，长链权重大 | **程序引擎**（逐值一致，实测差 ~1e-17） |
+| `theta_deg` / `theta_pooled` | 同上两种权重的 ⟨θ⟩ | 引擎的角 θ(t) 面板看 `theta_pooled` |
+
+**单分散体系（122×C12、20×PE30 这类）两套权重数值相同**，所以只有多分散体系
+才会被发现"对不上"。实测 310K（C6–C50 混油 + 石墨片，96 个分子）：
+
+- 引擎 = 链段加权 P₂（如第 0 帧 −0.132838）；
+- 旧的参考脚本按**众数链长**只留下 25 条 C6，其余 71 条链全丢 → P₂ 到 +0.16。
+
+所以默认行为已改成：**不按链长过滤**、只跳过**非线性**碎片（石墨/环/支化：
+重原子子图有 3 度节点或成环），并在开头打印链长分布与"多分散"提醒。
+要按长度筛就用 `--n-atoms <整数>`（或 `chain_coordinates(..., n_atoms="mode")`
+复现旧的众数口径）。
+
+坐标系也用了解包坐标（`make_whole`）：跨周期边界的分子不会被算成
+"横穿盒子的链段"。
 
 ---
 
