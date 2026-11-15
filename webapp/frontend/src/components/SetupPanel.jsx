@@ -276,26 +276,29 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
                 // ⚠️ 这里的勾选**不再直接参与分析**：它只控制该组分是否出现
                 //    在第 4 部分的可选列表里（用户要求：第 3 部分只是"展示判断"）。
                 const on = shownComps ? shownComps.includes(c.name) : true
+                // 行内**只显示原子数/分子数**（用户要求：初步识别太占地方，
+                // 一行会被撑长；识别结果放悬浮提示里看）。
+                const m = c.molecule || {}
+                const tip = (on ? '点此不再展示给「分析设置」' : '点此展示给「分析设置」')
+                  + `\n${Number(c.n_atoms || 0).toLocaleString()} 原子`
+                  + (c.n_residues != null ? ` / ${c.n_residues} 残基` : '')
+                  + (c.n_molecules != null ? ` / ${c.n_molecules} 个分子` : '')
+                  + (m.label
+                    ? `\n初步识别：${m.label}`
+                      + (m.formula ? `\n分子式：${m.formula}` : '')
+                      + (m.detail ? `\n${m.detail}` : '')
+                    : '')
                 return (
                   <div key={c.name}
                        className={`set-row${on ? '' : ' off'}`}>
-                    <label className="check"
-                           title={(on ? '点此不再展示给「分析设置」' : '点此展示给「分析设置」')
-                             + `\n${Number(c.n_atoms || 0).toLocaleString()} 原子`
-                             + (c.n_residues != null ? ` / ${c.n_residues} 残基` : '')
-                             + (c.n_molecules != null ? ` / ${c.n_molecules} 个分子` : '')
-                             + (c.molecule?.label
-                               ? `\n初步识别：${c.molecule.label}`
-                                 + `（分子式 ${c.molecule.formula || '—'}）` : '')}
-                      >
+                    <label className="check" title={tip}>
                       <input type="checkbox" checked={on}
                              onChange={() => onToggleShown?.(c.name)} />
                       <b>{c.name}</b>
                     </label>
-                    <span className="set-desc">
+                    <span className="set-desc" title={tip}>
                       {Number(c.n_atoms || 0).toLocaleString()} 原子
                       {c.n_molecules != null ? ` · ${c.n_molecules} 分子` : ''}
-                      {c.molecule?.label ? ` · ${c.molecule.label}` : ''}
                     </span>
                   </div>
                 )
