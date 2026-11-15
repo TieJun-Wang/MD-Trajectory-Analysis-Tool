@@ -601,7 +601,7 @@ function buildRings(st, data) {
   const posOf = st.posOf
   const CFG = AROMATIC_RING
   const UP = new THREE.Vector3(0, 0, 1)      // TorusGeometry 默认在 XY 平面，法向 +Z
-  const items = []                          // { center, quat, radius }
+  const items = []                          // { center, quat, radius, atoms }
   const c = new THREE.Vector3()
   const q = new THREE.Quaternion()
   for (const ring of rings) {
@@ -628,7 +628,8 @@ function buildRings(st, data) {
     const inradius = side * Math.sqrt(3) / 2
     const radius = Math.max(0.08, inradius * CFG.radiusFrac)
     q.setFromUnitVectors(UP, nrm)
-    items.push({ center: c.clone(), quat: q.clone(), radius })
+    // atoms：这个环由哪些**原子编号**构成 —— 「只显示已选」时要据此决定画不画
+    items.push({ center: c.clone(), quat: q.clone(), radius, atoms: ring.slice() })
   }
   if (!items.length) return
 
@@ -662,8 +663,37 @@ function buildRings(st, data) {
   // 半透明对象在透明队列里画：放在原子/化学键之后（renderOrder 抬后），
   // 且 depthWrite=false 不写深度 —— 不会遮挡原子球和键，也不会和它们 z-fighting。
   mesh.renderOrder = 3
+  //: 供「只显示已选」重算每个环的可见性（见 applyRingState）
+  mesh.userData = { n: items.length, items }
   st.ringGroup = mesh
   st.scene.add(mesh)
+}
+
+/**
+ * 圆环跟着「只显示已选」一起隐现。
+ *
+ * 用户实测的 bug：勾上「只显示已选」后，未选中苯环的原子被缩到不可见，
+ * **但它的圆环还画着**（圆环是独立 InstancedMesh，以前没参与显隐）。
+ * 规则与化学键一致：环里**一个顶点原子被选中**就画（部分选中仍然有意义），
+ * 一个都没选中 → 缩到不可见。
+ */
+export function applyRingState(st, selected, onlySelected = false) {
+  const rg = st.ringGroup
+  if (!rg || !rg.userData || !rg.userData.n) return
+  const items = rg.userData.items || []
+  const m4 = new THREE.Matrix4()
+  const scl = new THREE.Vector3()
+  for (let k = 0; k < items.length; k += 1) {
+    const it = items[k]
+    const atoms = it.atoms || []
+    const visible = !onlySelected
+      || (selected && atoms.some((a) => selected.has(a)))
+    const s = visible ? it.radius : 1e-6
+    scl.set(s, s, s)
+    m4.compose(it.center, it.quat, scl)
+    rg.setMatrixAt(k, m4)
+  }
+  rg.instanceMatrix.needsUpdate = true
 }
 
 /**
@@ -798,6 +828,7 @@ export function applyStateToScene(st, data, selected, onlySelected = false) {
       if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
     }
     applyBondState(st, data, selected, onlySelected)
+    applyRingState(st, selected, onlySelected)
     applyBoxState(st)
     st.kick()
 }
