@@ -698,6 +698,7 @@ def analyze_structural_order(mdt, ag, selection: FrameSelection, *,
                              orient_mode: str = "repeat",
                              orient_pairs=None,
                              stride: int = 1,
+                             orient_weighting: str = "segment",
                              rdf_group=None,
                              rdf_rmax: float = 8.0,
                              rdf_nbins: int = 80,
@@ -740,12 +741,25 @@ def analyze_structural_order(mdt, ag, selection: FrameSelection, *,
     notes: list[str] = []
 
     # ---- 1. 取向（链段默认取化学重复单元；识别不出则回退几何法并标注）
+    # ⚠️ 取向分量必须与「链段取向分析」用**同一套链段定义 + 同一套权重**，
+    #    否则同一份数据两个模块会给出不同的 S（用户实测："链段取向的 S 与
+    #    结构有序度里的取向有序度 S 不是一样的值吗"）。pipeline 会把
+    #    「链段取向分析」的 mode / stride / weighting 同步传进来。
     pairs, sinfo = resolve_segments(ag, mode=orient_mode, custom_pairs=orient_pairs,
                                     stride=stride)
     vecs = _pair_unit_vectors(mdt, ag, pairs, selection, verbose=verbose)
+    # 权重：与 analyze_orientation 的 weighting 口径一致（segment / molecule）
+    _wt = str(orient_weighting or "segment").strip().lower()
+    if _wt not in ("segment", "molecule"):
+        _wt = "segment"
+    _eq_w, _eq_ok, _per_mol = _molecule_equal_weights(
+        _segment_molecule_index(ag, pairs))
+    if _wt == "molecule" and not _eq_ok:
+        _wt = "segment"
+    _seg_w = _eq_w if _wt == "molecule" else None
     s_orient = np.full(n_f, np.nan)
     for k in range(n_f):
-        s_orient[k] = nematic_order_parameter(vecs[k])["S"]
+        s_orient[k] = nematic_order_parameter(vecs[k], weights=_seg_w)["S"]
     try:
         from .conformation import molecule_slices
         _ms = molecule_slices(ag)
@@ -753,7 +767,9 @@ def analyze_structural_order(mdt, ag, selection: FrameSelection, *,
     except Exception:  # noqa: BLE001
         n_mol = 1
     notes.append(f"取向分量：{pairs.shape[0]} 个链段（mode={orient_mode}，"
-                 f"来源={sinfo.get('source')}，来自 {n_mol} 个分子）")
+                 f"stride={int(stride)}，权重={'每条链等权' if _wt == 'molecule' else '链段加权'}，"
+                 f"来源={sinfo.get('source')}，来自 {n_mol} 个分子）"
+                 f"—— 与「链段取向分析」同一套链段定义，S 应当逐点相同。")
     if sinfo.get("fallback"):
         notes.append("⚠️ 取向分量的链段用的是**几何骨架法**（识别不出化学重复单元），"
                      "metadata 标记 segment_fallback=True。")

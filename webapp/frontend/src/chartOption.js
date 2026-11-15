@@ -296,6 +296,9 @@ export function buildOption(result, panelIndex, visible = null) {
   // 键取向序 BOO 的「平均键取向序 q̄6 随时间」：一张图里有 q4 / q6 / q̄4 / q̄6 四条，
   // 量纲相同、互相重叠 —— 默认只展示**第一个图例**，其余手动打开（用户要求）。
   //
+  // 结构有序度的「各有序度分量随时间变化」：取向 / 二面角 / 反式比例 / 局部结构
+  // 四条曲线同量纲（都是 0–1 的有序度），一起画会互相压住 —— 同样只默认第一个图例。
+  //
   // 取向板块**不做这样处理**：1.0.5 起 S 与 P₂ 已拆成两张图，每个面板本身只有
   // 一条曲线；而 P₂ 选「xyz 三者」时那三条是用户**明确要一起看**的，不该被藏掉。
   //
@@ -305,12 +308,15 @@ export function buildOption(result, panelIndex, visible = null) {
     && String(panel?.title || '').includes('各轴分解'))
     || (String(result?.name || '') === 'boo'
         && String(panel?.title || '').includes('平均键取向序'))
+    || (String(result?.name || '') === 'order'
+        && String(panel?.title || '').includes('各有序度分量'))
     || FIRST_ONLY_ANALYSES.has(String(result?.name || ''))
   const defaultSelected = {}
   for (const c of curves) {
     const g = String(c.group || '')
     if (onlyFirstOfPanel) {
-      // 只默认勾**第一条**（MSD 各轴分解 / BOO 的 q̄6 随时间；其余图例手动打开）
+      // 只默认勾**第一条**（MSD 各轴分解 / BOO 的 q̄6 随时间 / 有序度分量；
+      // 其余图例手动打开）
       defaultSelected[c.label] = c.label === curves[0].label
     } else {
       defaultSelected[c.label] = firstGroup ? g === firstGroup : true

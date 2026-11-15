@@ -669,7 +669,8 @@ class Analyzer:
         _cancel_check()
         self.frames = sel
         t0 = time.time()
-        self.run(name, params=params.get(name), verbose=False)
+        # 与 run_all 走同一条参数合并路径（order 要继承链段取向的设置）
+        self.run(name, params=self._shared_params(name, params), verbose=False)
         return time.time() - t0
 
     def estimate_times(self, which: Sequence[str] | None = None, *,
@@ -852,7 +853,29 @@ class Analyzer:
         res.add_notes(note)
         return res
 
-    def run_all(self, which: Sequence[str] | None = None, *,                params: Mapping[str, Mapping] | None = None,
+    def _shared_params(self, name: str, params: Mapping[str, Mapping] | None) -> dict | None:
+        """把**共用**的设置补进某一项的参数里（目前只有「链段定义」这一类）。
+
+        「结构有序度分析」里的**取向有序度 S** 与「链段取向分析」里的 S 是同一个量
+        （取向张量的最大本征值），但两者各有参数表：用户把「链段取向」的 stride
+        改成 2、或把统计权重改成"每条链等权"时，结构有序度那边如果还用写死的
+        ``stride=1 / segment``，同一份数据就会给出两个不同的 S ——
+        用户实测提问："这两个不是一样的值吗"。
+        所以这里把「链段取向分析」的 mode / stride / weighting 同步给 order；
+        单项显式给了的值优先（``params["order"]`` 里写了就不覆盖）。
+        """
+        p = dict((params or {}).get(name) or {})
+        if name != "order":
+            return p or None
+        op = dict((params or {}).get("orientation") or {})
+        for src, dst in (("mode", "orient_mode"), ("stride", "stride"),
+                         ("weighting", "orient_weighting")):
+            if dst not in p and src in op:
+                p[dst] = op[src]
+        return p or None
+
+    def run_all(self, which: Sequence[str] | None = None, *,
+                params: Mapping[str, Mapping] | None = None,
                 outdir: str | None = None, formats: Sequence[str] = ("csv", "png"),
                 excel: bool = True, panel_pngs: bool = False,
                 verbose: bool = True,
@@ -943,7 +966,8 @@ class Analyzer:
             if verbose:
                 print(f"[分析] {title} ...")
             try:
-                res = self.run(name, params=params.get(name), verbose=False)
+                res = self.run(name, params=self._shared_params(name, params),
+                               verbose=False)
             except AnalysisCancelled:
                 # 用户取消：不算失败；已完成的项保留，剩余项不再跑
                 self.cancelled = True
