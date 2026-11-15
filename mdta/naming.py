@@ -47,7 +47,7 @@ PANEL_SLUGS: dict[tuple[str, int], str] = {
     ("interface", 1): "norm",     # 归一化密度与宽度
     ("comdist", 0): "dist",       # 质心距随时间
     ("comdist", 1): "axis",       # 沿轴分量
-    # 取向与结晶
+    # 取向
     ("orientation", 0): "s",      # 取向参数 S
     ("orientation", 1): "p2",     # 二阶序参数 P2
     ("orientation", 2): "angle",  # 链段与参考轴的夹角 θ(t)

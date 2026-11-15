@@ -1,5 +1,5 @@
 /**
- * 分析项按**模块**分组（链构象 / 空间结构 / 取向与结晶 / 动力学与输运）。
+ * 分析项按**模块**分组（链构象 / 空间结构 / 取向 / 动力学与输运）。
  *
  * 权威定义在后端 `mdta.pipeline.ANALYSIS_GROUPS`，通过 `/api/analyses`
  * 的 `groups` 字段下发；这里只保留一份**同内容的兜底**，用于后端暂时拿不到
@@ -16,7 +16,7 @@
 export const FALLBACK_GROUPS = [
   ['链构象', ['rg', 'ree', 'dihedral'], '构象'],
   ['空间结构', ['density', 'rdf', 'rdf2d', 'comdist', 'contact', 'interface'], '结构'],
-  ['取向与结晶', ['orientation', 'order', 'boo'], '取向'],
+  ['取向', ['orientation', 'order', 'boo'], '取向'],
   ['动力学与输运', ['msd'], '输运'],
 ]
 

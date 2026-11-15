@@ -1160,6 +1160,7 @@ export default function App() {
                                          estimates={live?.estimates} />
                           <ParamBlock params={params} setParams={setParams}
                                       which={which}
+                                      order={order}
                                       components={components}
                                       primaryMolecules={primaryMolecules}
                                       nAtoms={Number(sess?.primary_atoms) || 0}

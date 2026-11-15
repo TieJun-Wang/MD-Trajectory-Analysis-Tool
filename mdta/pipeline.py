@@ -116,7 +116,7 @@ ANALYSIS_TITLES = {
 ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("链构象", ("rg", "ree", "dihedral")),
     ("空间结构", ("density", "rdf", "rdf2d", "comdist", "contact", "interface")),
-    ("取向与结晶", ("orientation", "order", "boo")),
+    ("取向", ("orientation", "order", "boo")),
     ("动力学与输运", ("msd", "vacf")),
 ]
 
@@ -129,7 +129,7 @@ ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
 GROUP_SHORT: dict[str, str] = {
     "链构象": "构象",
     "空间结构": "结构",
-    "取向与结晶": "取向",
+    "取向": "取向",
     "动力学与输运": "输运",
 }
 

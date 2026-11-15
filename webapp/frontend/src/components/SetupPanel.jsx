@@ -651,7 +651,8 @@ export function FrameBlock({ frames, setFrames }) {
 
 /** 分析参数：按分析项分组，**只显示已选分析项的参数**（which=null → 全显示）。 */
 export function ParamBlock({ params, setParams, which = null, primaryMolecules = null,
-                            nAtoms = 0, primaryAtomInfo = null, components = [] }) {
+                            nAtoms = 0, primaryAtomInfo = null, components = [],
+                            order = [] }) {
   const p = (key) => ({
     value: params[key] ?? '',
     onChange: (e) => setParams({ ...params, [key]: e.target.value }),
@@ -910,7 +911,21 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
     ]],
   ]
 
-  const visible = GROUPS.filter(([, mods, fields]) => show(mods) && fields.length)
+  // 参数块**按「分析功能」列表的顺序从上到下排**（用户要求）：
+  // 例如勾了「链构象」里的 Rg + 「空间结构」里的 RDF，参数区就先 Rg 后 RDF，
+  // 与上面勾选看到的顺序一致 —— 以前这里是写死的顺序（面内 RDF 排第一），
+  // 找参数得来回跳。判定依据是这一组里**在 order 里出现得最早**的那个分析项。
+  const rankOf = (mods) => {
+    const idx = (Array.isArray(mods) ? mods : [])
+      .map((m) => (Array.isArray(order) ? order.indexOf(m) : -1))
+      .filter((i) => i >= 0)
+    return idx.length ? Math.min(...idx) : Number.POSITIVE_INFINITY
+  }
+  const visible = GROUPS
+    .map((g, i) => ({ g, i, r: rankOf(g[1]) }))
+    .filter(({ g: [, mods, fields] }) => show(mods) && fields.length)
+    .sort((a, b) => (a.r === b.r ? a.i - b.i : a.r - b.r))
+    .map(({ g }) => g)
   return (
     <>
       <div className="sect-title" style={{ marginTop: 10 }}>
