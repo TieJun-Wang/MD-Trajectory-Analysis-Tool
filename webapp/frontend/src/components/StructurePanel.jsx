@@ -528,10 +528,14 @@ function ClassicTree({ st, hier }) {
                 return n
               })}>{openComp.has(c.name) ? '▾' : '▸'}</button>
               <span className="nm"
-                    title={(c.residue_mix || []).map((m) => `${m.resname}×${m.n}`)
-                      .join('、') + (c.n_residue_kinds
-                        ? `（共 ${c.n_residue_kinds} 种残基）` : '')}>
+                    title={(c.molecule?.label
+                      ? `初步识别：${c.molecule.label}（分子式 ${c.molecule.formula || '—'}）`
+                        + (c.molecule.detail ? `\n${c.molecule.detail}` : '') + '\n' : '')
+                      + (c.residue_mix || []).map((m) => `${m.resname}×${m.n}`)
+                        .join('、') + (c.n_residue_kinds
+                          ? `（共 ${c.n_residue_kinds} 种残基）` : '')}>
                 {c.name}
+                {c.molecule?.label ? ` · ${c.molecule.label}` : ''}
                 {c.residue_mix && c.residue_mix.length
                   ? ` · ${c.residue_mix.slice(0, 3).map((m) => m.resname).join('/')}`
                   : ''}

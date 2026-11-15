@@ -427,6 +427,15 @@ class Session:
             "residue_mix": mix,
             "n_residue_kinds": int(n_kinds),
         }
+        # 初步识别"这是什么分子"（水 / 钠离子 / 正构烷烃 / 含氧有机物 …）。
+        # 只做显示，不参与计算：用户实测痛点 —— 界面只写 polymer / water 看不出
+        # 具体是什么分子（例如 5PE20 体系里 polymer 其实是 5 条 PEO 链）。
+        try:
+            from mdta.selection import identify_component
+
+            item["molecule"] = identify_component(ag)
+        except Exception:  # noqa: BLE001 - 识别失败不能影响组分清单本身
+            pass
         if str(name).startswith("set:"):
             item["kind"] = "set"
             item["trace"] = self.az.msd_group_objects.get(name)

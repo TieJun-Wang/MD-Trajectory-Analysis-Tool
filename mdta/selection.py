@@ -103,12 +103,76 @@ def is_sugar_resname(resname: str) -> bool:
 
 _CHARGE_HINTS = ("+", "-")
 
+#: 单原子残基里**元素**属于这些符号时按离子处理（resname 常常是 ``MOL`` / ``1`` /
+#: 空串之类，靠名字认不出来）。用户实测：MS 导出的 Na⁺/Cl⁻ 在拓扑里叫 ``MOL``，
+#: 结果被归成 ``other``，界面上找不到"离子"这一组分。
+ION_ELEMENTS = {
+    "NA", "K", "LI", "RB", "CS", "MG", "CA", "SR", "BA", "ZN", "FE", "MN",
+    "CU", "CO", "NI", "CD", "HG", "PB", "AL", "CL", "BR", "I", "F",
+}
+
 
 class SelectionError(ValueError):
     """选择语句错误。"""
 
 
 # ---------------------------------------------------------------- 组分分类
+def _residue_composition(u) -> list[dict]:
+    """每个 residue 的原子组成 ``[{"O":1,"H":2}, ...]``（元素符号大写）。
+
+    读不到元素属性时退回原子名前缀；再不行记 ``X``。用于"按组成兜底识别"——
+    resname 各式各样（``MOL`` / ``1`` / 空），但水的组成永远是 H₂O。
+    """
+    n_res = u.residues.n_residues
+    out: list[dict] = [{} for _ in range(n_res)]
+    try:
+        resind = np.asarray(u.atoms.resindices, dtype=int)
+    except Exception:                                    # noqa: BLE001
+        return out
+    try:
+        els = [str(x).strip().upper() for x in u.atoms.elements]
+    except Exception:                                    # noqa: BLE001
+        els = []
+        try:
+            for nm in u.atoms.names:
+                s = str(nm).strip().upper()
+                k = 0
+                while k < len(s) and s[k].isalpha():
+                    k += 1
+                els.append(s[:k][:2] or "X")
+        except Exception:                                # noqa: BLE001
+            els = ["X"] * int(u.atoms.n_atoms)
+    for el, ri in zip(els, resind):
+        if 0 <= ri < n_res:
+            d = out[int(ri)]
+            d[el] = d.get(el, 0) + 1
+    return out
+
+
+def is_water_composition(comp: dict) -> bool:
+    """按**元素组成**判水：1 个 O、1–3 个 H、无其它元素（≤5 原子）。
+
+    兼容 TIP4P/TIP5P 的虚拟位点（会多一个 ``M`` 或空元素，故只看"非 H 非 O"的
+    原子数 ≤ 2）。这样 resname 是 ``MOL`` 的 MS 水分子也能认出来。
+    """
+    if not comp:
+        return False
+    n_o = int(comp.get("O", 0))
+    n_h = int(comp.get("H", 0))
+    if n_o != 1 or not (1 <= n_h <= 3):
+        return False
+    other = sum(v for k, v in comp.items() if k not in ("H", "O", "M", "X", ""))
+    return other == 0 and sum(comp.values()) <= 6
+
+
+def is_ion_composition(comp: dict) -> bool:
+    """按组成判离子：**只有一个原子**，且元素属于常见离子元素。"""
+    if not comp or sum(comp.values()) != 1:
+        return False
+    el = next(iter(comp))
+    return str(el).upper() in ION_ELEMENTS
+
+
 def classify_residues(universe) -> "OrderedDict[str, np.ndarray]":
     """把 residue 按组分类型分类，返回 ``{类别: residue 索引数组}``。
 
@@ -117,6 +181,11 @@ def classify_residues(universe) -> "OrderedDict[str, np.ndarray]":
 
     ``polymer`` 是兜底类别，含义是"未被识别为蛋白/核酸/糖/水/离子的待研究组分"
     ——高分子体系里的链、以及不认识的有机小分子都会落到这里。
+
+    识别顺序：**先名字，再组成**。名字（resname）是首选，但 MS/LAMMPS 导出的
+    体系里名字常常没意义（水的 resname 是 ``MOL``、离子的也是 ``MOL``），
+    只靠名字会把水并进 polymer（用户实测："水都被识别成聚合物了"）。
+    因此这里再用元素组成兜底：H₂O 组成 → water，单原子 + 常见离子元素 → ion。
     """
     u = universe
     n_res = u.residues.n_residues
@@ -131,6 +200,16 @@ def classify_residues(universe) -> "OrderedDict[str, np.ndarray]":
     # 带电荷后缀、且原子数很少的也算离子
     is_ion = is_ion | ((res_counts <= 4)
                        & np.array([any(c in rn for c in _CHARGE_HINTS) for rn in resnames]))
+
+    # ---- 按**组成**兜底（名字认不出来时）：水 / 单原子离子
+    comps = _residue_composition(u)
+    for i, c in enumerate(comps):
+        if is_water[i] or is_ion[i] or is_sugar[i]:
+            continue
+        if is_water_composition(c):
+            is_water[i] = True
+        elif is_ion_composition(c):
+            is_ion[i] = True
 
     labels[is_water] = "water"
     labels[is_ion] = "ion"
@@ -193,6 +272,218 @@ def component_groups(universe, min_atoms: int = 1) -> "OrderedDict[str, object]"
                     out[f"{lab}[{s}]"] = sub
         else:
             out[lab] = ag
+    return out
+
+
+# ---------------------------------------------------- 初步识别"这是什么分子"
+#: 常见离子元素 → 中文名（suggested label 用）
+_ION_ZH = {
+    "NA": "钠离子 Na⁺", "K": "钾离子 K⁺", "LI": "锂离子 Li⁺", "RB": "铷离子 Rb⁺",
+    "CS": "铯离子 Cs⁺", "MG": "镁离子 Mg²⁺", "CA": "钙离子 Ca²⁺",
+    "SR": "锶离子 Sr²⁺", "BA": "钡离子 Ba²⁺", "ZN": "锌离子 Zn²⁺",
+    "FE": "铁离子", "MN": "锰离子", "CU": "铜离子", "CO": "钴离子",
+    "NI": "镍离子", "CD": "镉离子", "HG": "汞离子", "PB": "铅离子",
+    "AL": "铝离子", "CL": "氯离子 Cl⁻", "BR": "溴离子 Br⁻", "I": "碘离子 I⁻",
+    "F": "氟离子 F⁻",
+}
+
+
+def _element_array(ag) -> list[str]:
+    """组内每个原子的元素符号（大写）；缺元素属性时用原子名前缀兜底。"""
+    n = int(ag.n_atoms)
+    try:
+        el = [str(x).strip().upper() or "X" for x in ag.elements]
+        if len(el) == n:
+            return el
+    except Exception:                                    # noqa: BLE001
+        pass
+    out: list[str] = []
+    try:
+        names = [str(x).strip().upper() for x in ag.names]
+        for nm in names[:n]:
+            k = 0
+            while k < len(nm) and nm[k].isalpha():
+                k += 1
+            out.append(nm[:k][:2] or "X")
+    except Exception:                                    # noqa: BLE001
+        out = ["X"] * n
+    return out
+
+
+def _hill_formula(counts: dict) -> str:
+    """Hill 式分子式（C、H 在前，其余按字母序）。"""
+    if not counts:
+        return ""
+    order: list[str] = []
+    if "C" in counts:
+        order.append("C")
+        if "H" in counts:
+            order.append("H")
+    for k in sorted(counts):
+        if k not in order:
+            order.append(k)
+    parts = []
+    for k in order:
+        c = int(counts[k])
+        parts.append(k if c == 1 else f"{k}{c}")
+    return "".join(parts)
+
+
+#: 标准氨基酸名（含常见质子化/修饰变体）——只用于"这是不是蛋白"的初步判断
+_AMINO_NAMES = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+    "ACE", "NME", "NH2", "HYP", "SEP", "TPO", "PTR", "MSE", "KCX", "MLZ",
+} | set(PROTEIN_RESNAME_EXTRA)
+#: 20 种标准氨基酸的**三字母核心**：CHARMM 会用 ``CYSH`` / ``HISB`` / ``LYSH``
+#: 这类"核心码 + 质子化状态"的写法，gromacs 也有 ``CYS2`` 之类 → 允许 3+1 位。
+_AMINO_CORE = {
+    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE",
+    "LEU", "LYS", "MET", "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
+}
+
+
+def _is_amino_resname(rn: str) -> bool:
+    """residue 名是不是（可能带质子化状态后缀的）氨基酸。"""
+    rn = str(rn).strip().upper()
+    if not rn:
+        return False
+    if rn in _AMINO_NAMES:
+        return True
+    return len(rn) == 4 and rn[:3] in _AMINO_CORE
+
+
+#: 核酸残基名（DNA/RNA 的碱基与糖-磷酸残基）
+_NUCLEIC_NAMES = {
+    "DA", "DC", "DG", "DT", "DU", "A", "C", "G", "U", "T", "RA", "RC", "RG",
+    "RU", "ADE", "CYT", "GUA", "THY", "URA", "PSU", "5MC", "OMG", "OMC",
+}
+
+
+def _residue_set(ag) -> set[str]:
+    """该组的 residue 名集合（大写）；没有 resnames 属性时返回空集。"""
+    try:
+        return {str(r).strip().upper() for r in ag.residues.resnames if str(r).strip()}
+    except Exception:                                    # noqa: BLE001
+        return set()
+
+
+def _classify_formula(counts: dict) -> tuple[str, str]:
+    """由**单个分子**的元素计数给出 (kind, 中文名)。只做保守推断，宁可说"有机分子"。"""
+    if not counts:
+        return ("unknown", "未知")
+    n_atoms = sum(int(v) for v in counts.values())
+    if is_water_composition(counts):
+        return ("water", "水 H₂O")
+    if is_ion_composition(counts):
+        el = next(iter(counts))
+        return ("ion", _ION_ZH.get(str(el).upper(), f"{el} 离子"))
+    c = int(counts.get("C", 0))
+    h = int(counts.get("H", 0))
+    o = int(counts.get("O", 0))
+    n = int(counts.get("N", 0))
+    s = int(counts.get("S", 0))
+    p = int(counts.get("P", 0))
+    others = {k: int(v) for k, v in counts.items()
+              if k not in ("C", "H", "O", "N", "S", "P")}
+    if c > 0 and h == 0 and o == 0 and n == 0 and s == 0 and p == 0 and not others:
+        if c >= 100:
+            return ("carbon", "碳材料（石墨烯 / 碳片）")
+        return ("carbon", f"碳分子 C{c}")
+    if c > 0 and o == 0 and n == 0 and s == 0 and p == 0 and not others:
+        if h == 2 * c + 2:
+            return ("alkane", f"正构烷烃 C{c}H{h}")
+        if h == 2 * c:
+            return ("alkene", f"烯烃（含一个不饱和键）C{c}H{h}")
+        if h == 2 * c - 2:
+            return ("alkyne", f"炔烃 / 二烯 C{c}H{h}")
+        return ("hydrocarbon", f"烃 C{c}H{h}")
+    if o > 0 and n == 0 and p == 0 and not others:
+        # 聚乙二醇 / 聚氧乙烯：C_nH_(2n+2)O_(n/2)（PEO20 = C40H82O20）
+        if h == 2 * c + 2 and c >= 4 and o * 2 == c:
+            return ("peo", f"聚乙二醇（PEO / PEG）链 {_hill_formula(counts)}")
+        return ("oxygenate", f"含氧有机物 {_hill_formula(counts)}")
+    if n > 0 and p == 0 and not others:
+        return ("nitrogenous", f"含氮有机物 C{c}H{h}" + (f"N{n}" if n > 1 else "N"))
+    if p > 0:
+        return ("phosphorous", "含磷有机物")
+    if s > 0:
+        return ("sulfur", "含硫有机物")
+    if any(k in ("NA", "CL", "K", "CA", "MG") for k in others) and n_atoms <= 2:
+        return ("ion", "离子 / 离子对")
+    return ("organic", f"有机分子（{_hill_formula(counts)}）")
+
+
+def identify_component(ag) -> dict:
+    """**初步识别这个组分是什么分子**：按分子式给中文名 + 分子式 + 分子数。
+
+    这是"看得懂"的辅助信息，不参与任何计算：
+    用户实测痛点 —— 界面上只写 ``polymer[ETH]`` / ``water`` 这种标签，
+    体系里有水、烃链、离子混在一起时看不出"这到底是些什么分子"。
+
+    返回::
+
+        {"label": "水 H₂O", "kind": "water", "formula": "H2O",
+         "n_molecules": 2000, "atoms_per_molecule": 3,
+         "n_kinds": 1, "detail": "2000 个分子 · 每个 3 原子"}
+
+    多分散（同一组分里有多种分子式）时 ``n_kinds > 1``，``label`` 会带「N 种」。
+    """
+    out = {"label": "未知", "kind": "unknown", "formula": "",
+           "n_molecules": 0, "atoms_per_molecule": 0, "n_kinds": 0, "detail": ""}
+    if ag is None or int(getattr(ag, "n_atoms", 0)) <= 0:
+        return out
+
+    # 分子划分：优先用分子编号（与其它分析同一口径），拿不到就当整组一个分子
+    try:
+        from .analysis.interface import _atom_molnums
+
+        m = _atom_molnums(ag)
+    except Exception:                                    # noqa: BLE001
+        m = None
+    els = _element_array(ag)
+    if m is None or len(m) != len(els):
+        m = np.zeros(len(els), dtype=np.int64)
+    m = np.asarray(m, dtype=np.int64)
+
+    uniq, inv = np.unique(m, return_inverse=True)
+    n_mol = int(uniq.size)
+    per_mol: list[dict] = [{} for _ in range(n_mol)]
+    for el, k in zip(els, inv.tolist()):
+        d = per_mol[int(k)]
+        d[el] = d.get(el, 0) + 1
+
+    # 按分子式归并（同式子 = 同种分子）。虚拟位点（TIP4P 的 ``M``、无元素的 ``X``）
+    # 不进分子式 —— 否则水会显示成 ``H2OX``（用户看起来像坏掉了）。
+    groups: "OrderedDict[str, int]" = OrderedDict()
+    sample: dict[str, dict] = {}
+    for d in per_mol:
+        clean = {k: v for k, v in d.items() if k not in ("X", "M", "", "UNK")}
+        f = _hill_formula(clean) or "?"
+        groups[f] = groups.get(f, 0) + 1
+        sample.setdefault(f, clean)
+    n_kinds = len(groups)
+
+    main_f, main_cnt = max(groups.items(), key=lambda kv: kv[1])
+    kind, zh = _classify_formula(sample.get(main_f, {}))
+    # 生物大分子先按**残基名**判（分子式看不出"这是蛋白"）
+    rns = _residue_set(ag)
+    if rns and all(_is_amino_resname(r) for r in rns):
+        kind, zh = "protein", f"蛋白质 / 多肽（{len(rns)} 种氨基酸残基）"
+    elif rns and all(r in _NUCLEIC_NAMES for r in rns):
+        kind, zh = "nucleic", f"核酸链（{len(rns)} 种核苷酸残基）"
+    elif rns and all(is_sugar_resname(r) for r in rns):
+        kind, zh = "sugar", f"糖 / 糖链（{len(rns)} 种糖残基）"
+    atoms_each = sum(int(v) for v in sample.get(main_f, {}).values())
+    label = zh if n_kinds <= 1 else f"{zh} 等 {n_kinds} 种"
+    detail = f"{n_mol:,} 个分子"
+    if atoms_each:
+        detail += f" · 每个 {atoms_each} 原子"
+    if n_kinds > 1:
+        detail += f" · 分子式共 {n_kinds} 种（最多的是 {main_f}，{main_cnt} 个）"
+    out.update(label=label, kind=kind, formula=main_f, n_molecules=n_mol,
+               atoms_per_molecule=int(atoms_each), n_kinds=int(n_kinds),
+               detail=detail)
     return out
 
 

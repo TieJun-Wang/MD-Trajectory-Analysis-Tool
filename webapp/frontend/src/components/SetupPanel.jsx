@@ -283,7 +283,10 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
                            title={(on ? '点此不再展示给「分析设置」' : '点此展示给「分析设置」')
                              + `\n${Number(c.n_atoms || 0).toLocaleString()} 原子`
                              + (c.n_residues != null ? ` / ${c.n_residues} 残基` : '')
-                             + (c.n_molecules != null ? ` / ${c.n_molecules} 个分子` : '')}
+                             + (c.n_molecules != null ? ` / ${c.n_molecules} 个分子` : '')
+                             + (c.molecule?.label
+                               ? `\n初步识别：${c.molecule.label}`
+                                 + `（分子式 ${c.molecule.formula || '—'}）` : '')}
                       >
                       <input type="checkbox" checked={on}
                              onChange={() => onToggleShown?.(c.name)} />
@@ -292,6 +295,7 @@ export function SetsBlock({ sess, sets = [], setsInfo = [], onSetsChange = null,
                     <span className="set-desc">
                       {Number(c.n_atoms || 0).toLocaleString()} 原子
                       {c.n_molecules != null ? ` · ${c.n_molecules} 分子` : ''}
+                      {c.molecule?.label ? ` · ${c.molecule.label}` : ''}
                     </span>
                   </div>
                 )
@@ -519,7 +523,12 @@ export function SelectionBlock({ sess, primary, setPrimary, components, setCompo
                       + (c.n_residues != null ? ` / ${c.n_residues} 残基` : '')
                       + (c.n_molecules != null
                         ? ` / ${c.n_molecules} 个分子${c.n_molecules === 1
-                          ? '（单分子）' : ''}` : '')}>
+                          ? '（单分子）' : ''}` : '')
+                      + (c.molecule?.label
+                        ? `\n初步识别：${c.molecule.label}`
+                          + `（分子式 ${c.molecule.formula || '—'}）`
+                          + (c.molecule.detail ? `\n${c.molecule.detail}` : '')
+                        : '')}>
               {c.name}
             </button>
           ))}

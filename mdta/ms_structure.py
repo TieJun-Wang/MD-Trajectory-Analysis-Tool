@@ -279,21 +279,35 @@ def _molecule_index(n_atoms: int, bonds) -> np.ndarray:
 
 
 def _molecule_kinds(mol: np.ndarray, elements: list[str], types: list[str]) -> list[str]:
-    """给每个分子一个 3 字标签（当 resname / segid 用），让界面能按组分区分。
+    """给每个分子一个短标签（当 resname / segid 用），让界面能按**分子**分组。
 
     实测用户体系：122 条十二烷（C+H）与 1 片石墨烯（纯 C，960 原子）混在一个
     文件里；若所有分子同名，界面的"组分"会把它们并成一组，用户就选不出聚合物。
-    判据（保守）：纯碳且 ≥100 原子 → ``GRA``；含 H → ``ETH``；其余 → ``MOL``。
+
+    1.0.9 起按**组成**判，不再"含 H 就当烃链"：
+    · 水（1 个 O + 1–3 个 H，≤6 原子）→ ``H2O``
+      —— 以前水分子被标成 ``ETH``，于是 2000 个水跟烃链并成一个 ``polymer``
+      （用户实测："水都被识别成聚合物了"）；
+    · 单原子 → 元素符号（``NA`` / ``CL`` …），这样才认得出离子；
+    · 纯碳：≥100 原子 → ``GRA``（石墨烯/碳片），否则 ``C``；
+    · 其余含 H → ``ETH``（烃链 / 聚合物，保持既有命名）；
+    · 其它 → ``MOL``。
     """
     n_mol = int(mol.max()) + 1 if mol.size else 0
     kinds: list[str] = []
     for m in range(n_mol):
         idx = np.flatnonzero(mol == m)
-        el = {str(elements[i]).upper() for i in idx}
+        el = [str(elements[i]).upper() for i in idx]
+        elset = set(el)
+        n = int(idx.size)
         ff = {str(types[i]).lower()[:2] for i in idx}
-        if el <= {"C"} and idx.size >= 100:
-            kinds.append("GRA")
-        elif "H" in el:
+        if n == 1:
+            kinds.append((el[0] or "X")[:3])
+        elif elset <= {"O", "H"} and el.count("O") == 1 and 1 <= el.count("H") <= 3:
+            kinds.append("H2O")
+        elif elset <= {"C"}:
+            kinds.append("GRA" if n >= 100 else "C")
+        elif "H" in elset:
             kinds.append("ETH")
         elif {"C4"} <= ff:
             kinds.append("GRA")

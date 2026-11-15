@@ -51,6 +51,10 @@ class SystemInfo:
     elements: Counter = field(default_factory=Counter)
     categories: "OrderedDict[str, int]" = field(default_factory=OrderedDict)
     chain_types: list[ChainType] = field(default_factory=list)
+    #: 初步识别：每个组分是什么分子（``{name, label, formula, kind, n_molecules,
+    #: atoms_per_molecule, n_kinds, detail, n_atoms}``），见
+    #: :func:`mdta.selection.identify_component`
+    molecule_components: list[dict] = field(default_factory=list)
 
     # -------------------------------------------------------------- 尺寸
     @property
@@ -225,6 +229,21 @@ def describe_system(mdt_or_universe) -> SystemInfo:
     except Exception:  # noqa: BLE001
         info.chain_types = []
 
+    # ---- 初步识别"每个组分是什么分子"（水 / 离子 / 正构烷烃 / 有机分子 …）
+    # 用户实测痛点：界面只写 polymer / water / ion 太笼统，看不出具体是什么分子。
+    try:
+        from .selection import component_groups, identify_component
+
+        comps = []
+        for name, ag in component_groups(u).items():
+            if int(ag.n_atoms) <= 0:
+                continue
+            ident = identify_component(ag)
+            comps.append({"name": str(name), "n_atoms": int(ag.n_atoms), **ident})
+        info.molecule_components = comps
+    except Exception:  # noqa: BLE001
+        info.molecule_components = []
+
     return info
 
 
@@ -336,6 +355,25 @@ def info_tables(info: SystemInfo, max_chain_types: int = 20) -> list[dict]:
                      for cat, n in info.categories.items()],
             "note": "组分按 residue 名与元素自动识别（protein / nucleic / sugar / "
                     "polymer / water / ion / other）。",
+        })
+
+    # ------------------------------------------------------ 分子识别（初步）
+    # 用户实测痛点：只写 polymer / water / ion 看不出"到底是什么分子"。
+    # 这一节按**分子式**给出初步判断（水 / 钠离子 / 正构烷烃 / 含氧有机物 …），
+    # 只用于辅助判断，不参与任何计算。
+    if info.molecule_components:
+        sections.append({
+            "title": "分子识别（初步）",
+            "columns": ["组分", "原子数", "初步识别", "分子式", "分子数", "每个分子原子数"],
+            "rows": [[str(c.get("name") or ""),
+                      f"{int(c.get('n_atoms') or 0):,}",
+                      str(c.get("label") or ""),
+                      str(c.get("formula") or ""),
+                      f"{int(c.get('n_molecules') or 0):,}",
+                      str(int(c.get("atoms_per_molecule") or 0))]
+                     for c in info.molecule_components],
+            "note": "按分子式做的初步判断（水 / 单价离子 / 正构烷烃 / 含氧·含氮有机物 "
+                    "/ 碳材料 …），不参与计算；同组分含多种分子式时标注「N 种」。",
         })
 
     # ------------------------------------------------- 计数器类（元素/名字）
