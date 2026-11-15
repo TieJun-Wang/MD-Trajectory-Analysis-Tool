@@ -36,6 +36,16 @@
 | `contact.py` | **接触分析 + 接触矩阵**（与引擎逐位一致）+ **独立复现 & 与引擎逐帧对拍**（原 `examples/contact_reproduce.py` 的包内版本：`reproduce_contacts` / `compare_engine` / `test_contact_reproduce`） |
 | `orientation.py` | **链段取向**（`allfast-3-2.py` 口径：键中点矢量 → ⟨cos²θ⟩ / 取向参数 / ⟨θ⟩(t)）；同时给**逐链等权**与**链段加权**（= 程序引擎）两套数，自动跳过石墨/环/支化碎片 |
 | `interface.py` | **界面宽度 10–90 + erf**：参考实现（教科书剖面 + 局部 10–90 + erf 拟合）、**合成已知宽度界面**（真实 10–90 = 2.5631σ）、与引擎逐位对拍、`LinearDensity` 剖面交叉验证 |
+| `dihedral.py` | **二面角分布**：独立 BFS 最长路径取四元组 → **`MDAnalysis.analysis.dihedrals.Dihedral`** 算角度 → 概率密度分布 / trans 比例，与引擎逐 bin 对拍 |
+| `nematic.py` | **取向参数 S**：键中点矢量 → **`freud.order.Nematic`** 求 S(t)，与引擎「链段取向」的 S 逐点对拍（差 ~1e-7） |
+| `boo.py` | **键取向序 BOO**：**`freud.order.Steinhardt(l=4)` / `(l=6)`** 求逐原子 q_l 与平均版 q̄_l，与引擎 `compute_ql` 逐原子对拍（差 ~1e-6） |
+
+> **第三方校验覆盖**：`rdf.py`/`rdf_mdat.py`（MDAnalysis `InterRDF` + util_rdf）、
+> `msd.py`/`msd_mdat.py`（`EinsteinMSD` + util_msd）、`density.py`（`LinearDensity`）、
+> `dihedral.py`（`Dihedral`）、`nematic.py`（freud `Nematic`）、`boo.py`（freud
+> `Steinhardt`）。后两个需要 `freud-analysis`：
+> `python -m pip install -i https://pypi.org/simple --only-binary=:all: freud-analysis`
+> （不装的话这两个脚本会明确提示需要它，而不是静默降级）。
 
 > 与第三方程序（**MDTransport**：`util_rdf.py` / `util_msd.py` + `util_diffusion.py`）
 > 能逐值互证的就是 **RDF** 与 **MSD/扩散系数** 两项，都已并入（`rdf_mdat.py` /

@@ -151,7 +151,7 @@ python -m pip install -r requirements.txt
 | 核心分析引擎 | `MDAnalysis` `numpy` `scipy` `pandas` `matplotlib` `openpyxl` | 读轨迹、算各项分析、导出 CSV/PNG/Excel |
 | Web 后端 | `fastapi` `uvicorn` `pydantic` `starlette` | `python -m webapp.backend.run` |
 | 测试自检 | `pytest` `httpx` `tidynamics` | `test/selftest.py`、`test/webapp/_api_check.py` |
-| 可选加速 | `freud-analysis`（默认注释掉） | BOO 的交叉校验通道，不装也能跑 |
+| 可选加速 | `freud-analysis`（默认注释掉） | `test/mda_test/{nematic,boo}.py` 用它做**第三方校验**（`Nematic` / `Steinhardt`），不装也能跑主程序 |
 
 离线/SSL 不通时的备用安装（仓库里带了两个 wheel）：
 
