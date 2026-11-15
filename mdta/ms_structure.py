@@ -148,6 +148,24 @@ def read_ms_document(path: str) -> dict:
     ids = [a.get("ID") for a in atoms]
     id2idx = {aid: i for i, aid in enumerate(ids)}
 
+    # ---- 原子电荷：``<Atom3d Charge="0.054">``（Forcite/DFT 算过电荷的文件才有）
+    # 以前完全没读这个属性 → 界面「体系信息 / 数据能力检测」里明明有电荷却报
+    # "没有电荷"（用户实测：5PE20-2000H20-24Na-24Cl 体系）。MS 只在算过电荷的
+    # 文件里写这个属性；个别原子缺失时按 0 补，并记下缺了多少个。
+    charges: list[float] = []
+    n_charge_missing = 0
+    for a in atoms:
+        raw = a.get("Charge")
+        if raw is None or str(raw).strip() == "":
+            charges.append(0.0)
+            n_charge_missing += 1
+            continue
+        try:
+            charges.append(float(raw))
+        except (TypeError, ValueError):
+            charges.append(0.0)
+            n_charge_missing += 1
+
     frac = np.array([_vec(a.get("XYZ")) if a.get("XYZ") else np.zeros(3)
                      for a in atoms], dtype=float)
     if cell_vecs is not None and frac.size:
@@ -196,6 +214,10 @@ def read_ms_document(path: str) -> dict:
         "types": [a.get("ForcefieldType", "") for a in atoms],
         "resids": None,
         "xyz": cart,
+        # 全部原子都没有 Charge 属性时给 None（= 这份文件本来就没有电荷）
+        "charges": (None if (not charges or n_charge_missing == len(charges))
+                    else charges),
+        "n_charge_missing": int(n_charge_missing),
         "cell": cell,
         "bonds": pairs or None,
         "n_bonds_image_skipped": n_bond_images,
@@ -338,6 +360,12 @@ def build_universe(doc: dict, *, time_ps: float = 0.0):
     u.add_TopologyAttr("resnames", kinds)
     u.add_TopologyAttr("resids", np.arange(1, max(n_mol, 1) + 1))
     u.add_TopologyAttr("segids", seg_names)
+    # 电荷：只有文件里写了 ``<Atom3d Charge="...">`` 才有（Forcite/DFT 算过电荷）。
+    # 有了它，界面「体系信息」会显示净电荷，数据能力检测里 `charges` 才是"有"，
+    # 依赖电荷的功能（例如 RDF 的选定归一化 / 净电荷核对）才可用。
+    q = doc.get("charges")
+    if q is not None and len(q) == n:
+        u.add_TopologyAttr("charges", np.asarray(q, dtype=float))
     if bonds:
         u.add_TopologyAttr("bonds", [tuple(int(x) for x in p) for p in bonds])
     u.trajectory = MemoryReader(coords, order="fac", dimensions=dims)

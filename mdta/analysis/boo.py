@@ -1,40 +1,31 @@
 # -*- coding: utf-8 -*-
-"""键取向序参数（BOO）与晶体/非晶区域识别。
+"""键取向序参数（BOO，Steinhardt）。
 
 设计要点
 --------
-1. **BOO（Steinhardt）**：对每个原子的邻居方向做球谐展开
+对每个原子的邻居方向做球谐展开
 
-       q_lm(i) = (1/N_i) Σ_j Y_lm(r̂_ij)
-       q_l(i)  = sqrt( 4π/(2l+1) Σ_m |q_lm(i)|² )
+    q_lm(i) = (1/N_i) Σ_j Y_lm(r̂_ij)
+    q_l(i)  = sqrt( 4π/(2l+1) Σ_m |q_lm(i)|² )
 
-   ``l=6`` 对**局部晶序**最敏感（fcc/hcp/bcc 各不相同），``l=4`` 用来区分 fcc 与其它
-   密堆结构。本模块同时给出 **Lechner–Dellago 平均版** ``q̄_l``（先用邻居的 q_lm 平均
-   再求模），它才是识别固-液最稳的判据：单原子 q_l 在液相里也会有涨落，而 q̄_l 在
-   液相里被邻居平均压低。
+``l=6`` 对**局部晶序**最敏感（fcc/hcp/bcc 各不相同），``l=4`` 用来区分 fcc 与其它
+密堆结构。本模块同时给出 **Lechner–Dellago 平均版** ``q̄_l``（先用邻居的 q_lm 平均
+再求模），它对固-液差别比单原子 q_l 更敏感：单原子 q_l 在液相里也会有涨落，而
+q̄_l 在液相里被邻居平均压低。
 
-   解析参考值（本模块的测试就是拿它钉死实现，见 ``test/selftest.py``）：
+解析参考值（本模块的测试就是拿它钉死实现，见 ``test/selftest.py``）：
 
-   ============  ========  ========
-   结构            q4        q6
-   ============  ========  ========
-   fcc            0.19094   0.57452
-   hcp            0.09722   0.48476
-   bcc            0.03637   0.51069
-   sc             0.76376   0.35355
-   ============  ========  ========
+============  ========  ========
+结构            q4        q6
+============  ========  ========
+fcc            0.19094   0.57452
+hcp            0.09722   0.48476
+bcc            0.03637   0.51069
+sc             0.76376   0.35355
+============  ========  ========
 
-2. **晶体/非晶区域识别**：``q̄6 > q6_solid`` 的原子判为"固相原子"，再用**空间连通性**
-   （键长 cutoff 内的邻居关系）做并查集聚类 → 逐个晶簇；在线统计**结晶分数 φ_c(t)**、
-   最大晶簇尺寸、晶簇个数。这套做法不依赖序参量的绝对刻度，只看"局部有序 + 空间成片"。
-
-3. **Avrami**：φ_c(t) 归一化为结晶度 X(t) 后拟合
-
-       ln(-ln(1-X)) = n·ln t + n·ln k
-
-   斜率给 Avrami 指数 n（成核/生长机制），截距给速率常数 k。**只在满足条件时才给**：
-   X 的覆盖范围足够、且随时间单调增长；否则明确拒绝（体系没结晶、或已结晶完毕），
-   绝不给一个"能算但没意义"的 n。
+> 1.0.8：原来附带的「晶体/非晶区域识别」（φ_c、晶簇尺寸、Avrami）已按用户要求
+> **删除**。需要晶区占比时请从 q̄6 的分布自行判断，或用「结构有序度」里的分量。
 """
 
 from __future__ import annotations
@@ -372,89 +363,6 @@ def compute_ql(positions: np.ndarray, box, cutoff: float,
     return out
 
 
-# --------------------------------------------------------------- 连通聚类
-def _clusters(pairs: np.ndarray, mask: np.ndarray, n: int) -> list[np.ndarray]:
-    """在 ``mask`` 为真的原子上，用并查集按邻居关系求连通分量。
-
-    实现：**先删点再求连通分量**——把 ``mask`` 为真的原子重编号成 ``0..k-1``，
-    只保留两端都 "固相" 的邻居对，构一个稀疏邻接矩阵，交给
-    ``scipy.sparse.csgraph.connected_components``（C 实现）。
-    以前是纯 Python 的并查集 + ``zip(a.tolist(), b.tolist())`` 逐对循环：
-    几十万邻居对时单帧就要几百毫秒，而且只用到 mask 内的原子（大部分对是白算的）。
-    """
-    sel = np.flatnonzero(mask)
-    if sel.size == 0:
-        return []
-    remap = np.full(n, -1, dtype=np.int64)
-    remap[sel] = np.arange(sel.size, dtype=np.int64)
-    if pairs.size == 0:
-        return [np.asarray([i], dtype=int) for i in sel.tolist()]
-    m = mask[pairs[:, 0]] & mask[pairs[:, 1]]
-    if not m.any():
-        return [np.asarray([i], dtype=int) for i in sel.tolist()]
-    a = remap[pairs[m, 0]]
-    b = remap[pairs[m, 1]]
-    try:
-        from scipy.sparse import coo_matrix
-        from scipy.sparse.csgraph import connected_components
-
-        k = int(sel.size)
-        g = coo_matrix((np.ones(a.size, dtype=np.int8), (a, b)), shape=(k, k))
-        _n_comp, labels = connected_components(g, directed=False)
-    except Exception:                                    # noqa: BLE001 - 无 scipy 时退回并查集
-        parent = np.arange(int(sel.size))
-
-        def find(x: int) -> int:
-            while parent[x] != x:
-                parent[x] = parent[parent[x]]
-                x = parent[x]
-            return x
-
-        for x, y in zip(a.tolist(), b.tolist()):
-            rx, ry = find(int(x)), find(int(y))
-            if rx != ry:
-                parent[rx] = ry
-        labels = np.asarray([find(i) for i in range(int(sel.size))], dtype=np.int64)
-    groups: dict[int, list[int]] = {}
-    for local, lab in enumerate(labels.tolist()):
-        groups.setdefault(int(lab), []).append(int(sel[local]))
-    return [np.asarray(v, dtype=int) for v in groups.values()]
-
-
-def _avrami(times_ps: np.ndarray, phi: np.ndarray) -> dict:
-    """对结晶分数曲线做 Avrami 拟合；条件不满足时明确拒绝。"""
-    ok = np.isfinite(phi)
-    if ok.sum() < 10:
-        return {"可拟合": False, "说明": "有效数据点不足 10 个"}
-    t = np.asarray(times_ps, dtype=float)[ok] / 1000.0        # ns
-    x = np.asarray(phi, dtype=float)[ok]
-    phi0, phi1 = float(x[0]), float(x[-1])
-    span = phi1 - phi0
-    if span < 0.05:
-        return {"可拟合": False, "起始": phi0, "结束": phi1,
-                "说明": f"结晶分数变化只有 {span:.3f}（< 0.05），体系没有明显结晶"}
-    xs = (x - phi0) / span if span > 0 else x * 0
-    xs = np.clip(xs, 1e-6, 1 - 1e-6)
-    y = np.log(-np.log(1.0 - xs))
-    m = np.isfinite(y) & (t > 0)
-    if m.sum() < 5:
-        return {"可拟合": False, "说明": "可用于拟合的点不足 5 个"}
-    A = np.vstack([np.log(t[m]), np.ones(m.sum())]).T
-    coef, *_ = np.linalg.lstsq(A, y[m], rcond=None)
-    n_av, b = float(coef[0]), float(coef[1])
-    yhat = A @ coef
-    ss_res = float(np.sum((y[m] - yhat) ** 2))
-    ss_tot = float(np.sum((y[m] - np.mean(y[m])) ** 2)) or 1.0
-    if not (0.1 < n_av < 10):
-        return {"可拟合": False, "Avrami 指数 n": n_av,
-                "说明": f"拟合出的 n={n_av:.2f} 超出合理范围（0.1–10），判定不可靠"}
-    return {"可拟合": True, "Avrami 指数 n": round(n_av, 3),
-            "速率常数 k (1/ns^n)": float(np.exp(b / n_av)),
-            "R²": round(1.0 - ss_res / ss_tot, 4),
-            "归一化区间": [round(phi0, 4), round(phi1, 4)],
-            "说明": "X(t) 已按 (φ-φ0)/(φ1-φ0) 归一化；n 为成核/生长机制指数"}
-
-
 def _mode_common(kw: Mapping | None) -> dict:
     p = dict(kw or {})
     return p
@@ -551,113 +459,4 @@ def analyze_boo(mdt, ag, selection: FrameSelection, *,
         "参考相解析值：" + "；".join(f"{k} q4={v[0]:.5f} q6={v[1]:.5f}"
                                      for k, v in REFERENCE_QL.items())
         + "。液相的单原子 q6 也会有涨落，**平均版 q̄6 才是识别固-液的稳定判据**（用邻居的 q_lm 平均后再求模）。")
-    return res
-
-
-@register("crystal", "晶体/非晶区域识别")
-def analyze_crystal_regions(mdt, ag, selection: FrameSelection, *,
-                            cutoff: float | None = None, q6_solid: float = 0.5,
-                            min_cluster: int = 10, averaged: bool = True,
-                            backend: str = "numpy",
-                            avrami: bool = True, max_group_atoms: int = 20000,
-                            verbose: bool = False, label: str = "链") -> AnalysisResult:
-    """判"固相原子"→ 空间连通聚类 → 结晶分数 φ_c(t) 与 Avrami 动力学。
-
-    判据：``q̄6 > q6_solid``（默认 0.5：fcc/hcp 的 q̄6 约 0.5–0.6，液相约 0.2–0.35）。
-    聚类：固相原子之间若在 ``cutoff`` 内互为邻居则连边，并查集求连通分量；
-    **只有规模 ≥ min_cluster 的连通分量算作晶区**（滤掉热涨落造成的零星固相原子）。
-
-    φ_c(t) = 属于晶区的原子数 / 总原子数；再对 φ_c(t) 做 Avrami 拟合（条件不满足则拒绝）。
-    """
-    times = np.asarray(selection.times_ps, dtype=float)
-    n_f = times.size
-    u = mdt.universe
-    sub = ag
-    note_sub = ""
-    if ag.n_atoms > max_group_atoms:
-        from .interface import _subsample_group
-
-        sub, n0, n1, how = _subsample_group(ag, int(max_group_atoms))
-        note_sub = (f"分析对象 {n0:,} 个原子超过上限 {max_group_atoms:,}，"
-                    f"已抽稀到 {n1:,} 个（{how}）；φ_c 是分数，抽稀不改其期望值。")
-    n = sub.n_atoms
-
-    phi = np.full(n_f, np.nan)          # 晶区原子占比
-    n_solid = np.full(n_f, np.nan)      # 固相原子占比（含零星）
-    n_clu = np.full(n_f, np.nan)
-    big = np.full(n_f, np.nan)          # 最大晶簇原子数
-    for k, (_frame, _t) in enumerate(frame_iterator(mdt, selection, verbose=verbose)):
-        pos = np.asarray(sub.positions, dtype=float)
-        cut = cutoff if cutoff is not None else _estimate_cutoff(pos, u.dimensions)
-        q = compute_ql(pos, u.dimensions, float(cut), l_list=(4, 6),
-                       averaged=averaged, backend=backend)
-        backend_used = q.get("backend", backend)
-        key = "q6bar" if averaged else "q6"
-        mask = np.isfinite(q[key]) & (q[key] > float(q6_solid))
-        n_solid[k] = mask.mean()
-        pairs = _neighbor_lists(pos, u.dimensions, float(cut))
-        cl = _clusters(pairs, mask, n)
-        sizes = np.array([c.size for c in cl]) if cl else np.zeros(0, dtype=int)
-        keep = sizes >= int(min_cluster)
-        n_clu[k] = int(keep.sum())
-        n_in = int(sizes[keep].sum()) if keep.any() else 0
-        phi[k] = n_in / max(n, 1)
-        big[k] = float(sizes[keep].max()) if keep.any() else 0.0
-
-    tx, tlabel = time_axis(times)
-    res = AnalysisResult(
-        name="crystal",
-        title=f"晶体/非晶区域识别 —— {label}",
-        meta={"selection": label, "n_atoms": int(n), "q6_solid": float(q6_solid),
-              "min_cluster": int(min_cluster), "averaged": bool(averaged),
-              "cutoff_Å": round(float(cut), 3), "n_frames": n_f},
-    )
-    res.panels = [Panel(xlabel=tlabel, ylabel="结晶分数 φ_c", title="晶区原子占比随时间"),
-                  Panel(xlabel=tlabel, ylabel="最大晶簇原子数", title="最大晶簇尺寸随时间")]
-    if note_sub:
-        res.add_notes(note_sub)
-    res.add_curve("结晶分数 φ_c", tx, phi, kind="line", panel=0)
-    res.add_curve("固相原子占比（含零星）", tx, n_solid, kind="line", panel=0)
-    res.add_curve("最大晶簇原子数", tx, big, kind="line", panel=1)
-    res.add_curve("晶簇个数", tx, n_clu, kind="line", panel=1)
-
-    fin = phi[np.isfinite(phi)]
-    if fin.size:
-        res.summary["结晶分数 平均"] = float(np.mean(fin))
-        res.summary["结晶分数 首帧"] = float(fin[0])
-        res.summary["结晶分数 末帧"] = float(fin[-1])
-        res.summary["结晶分数 最大"] = float(np.max(fin))
-        res.summary["固相原子占比 平均"] = float(np.nanmean(n_solid))
-        res.summary["晶簇个数 平均"] = float(np.nanmean(n_clu))
-        res.summary["最大晶簇原子数 平均"] = float(np.nanmean(big))
-        res.summary["统计帧数"] = int(fin.size)
-    res.summary["固相判据"] = f"{'q̄6' if averaged else 'q6'} > {q6_solid:g}"
-    res.summary["晶簇最小规模"] = int(min_cluster)
-    res.summary["计算后端"] = backend_used
-    res.summary["邻域半径 (Å)"] = round(float(cut), 3)
-    if avrami and fin.size:
-        av = _avrami(times, phi)
-        for k2, v2 in av.items():
-            res.summary[f"Avrami {k2}" if k2 != "可拟合" else "Avrami 是否可拟合"] = v2
-        if av.get("可拟合"):
-            # 「Avrami 图」（ln t vs ln(−ln(1−X))）**已删**（用户要求，1.0.4）：
-            # 这张线性化图只有当体系真的处在结晶生长期、且 X 覆盖足够区间时才有意义，
-            # 其余情况是一堆散点，属于冷门图。n / k / R² 仍进摘要与说明。
-            res.add_notes(
-                f"Avrami 拟合：n = {av['Avrami 指数 n']}，k = "
-                f"{av['速率常数 k (1/ns^n)']:.3g} 1/ns^n，R² = {av['R²']}"
-                f"（X(t) 按 (φ−φ0)/(φ1−φ0) 归一化，φ0={av['归一化区间'][0]}，"
-                f"φ1={av['归一化区间'][1]}）。")
-        else:
-            res.add_notes(f"**未给出 Avrami 参数**：{av.get('说明')}。"
-                          f"（体系没有明显结晶、或已结晶完毕时，n 与 k 没有物理意义。）")
-    res.add_notes(
-        f"固相判据：{'平均版 q̄6' if averaged else '单原子 q6'} > {q6_solid:g}"
-        f"（fcc/hcp 的 q̄6 约 0.5–0.6，液相约 0.2–0.35，故 0.5 是常用分界）。")
-    res.add_notes(
-        f"晶区定义：固相原子中规模 ≥ {min_cluster} 的**空间连通簇**（邻居半径 "
-        f"{float(cut):.2f} Å）；零星固相原子（热涨落）不计入 φ_c。")
-    res.add_notes(
-        "φ_c 是**结构判据给出的有序原子占比**，与量热/密度法的结晶度口径不同；"
-        "跨体系比较前请确认判据一致。")
     return res

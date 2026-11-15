@@ -293,20 +293,24 @@ export function buildOption(result, panelIndex, visible = null) {
   // MSD 的「各轴分解与各向异性」：同一个对象有 5 条曲线（x/y/z/∥/⊥），
   // 一起画会互相压住 —— 默认只画第一条，其余由图例手动打开（用户要求）。
   //
-  // 结晶板块：每个面板有两条"同量纲不同口径"的曲线（φ_c 与固相占比、晶簇尺寸与
-  // 个数），一起画会互相压住 —— 默认只勾第一条（用户要求）。
+  // 键取向序 BOO 的「平均键取向序 q̄6 随时间」：一张图里有 q4 / q6 / q̄4 / q̄6 四条，
+  // 量纲相同、互相重叠 —— 默认只展示**第一个图例**，其余手动打开（用户要求）。
   //
-  // 取向板块**不在这个集合里**：1.0.5 起 S 与 P₂ 已拆成两张图，每个面板本身只有
+  // 取向板块**不做这样处理**：1.0.5 起 S 与 P₂ 已拆成两张图，每个面板本身只有
   // 一条曲线；而 P₂ 选「xyz 三者」时那三条是用户**明确要一起看**的，不该被藏掉。
-  const FIRST_ONLY_ANALYSES = new Set(['crystal'])
+  //
+  // （1.0.8 起「晶体/非晶区域识别」已下线，原来的 `crystal` 整项不再出现在这里。）
+  const FIRST_ONLY_ANALYSES = new Set()
   const onlyFirstOfPanel = (String(result?.name || '') === 'msd'
     && String(panel?.title || '').includes('各轴分解'))
+    || (String(result?.name || '') === 'boo'
+        && String(panel?.title || '').includes('平均键取向序'))
     || FIRST_ONLY_ANALYSES.has(String(result?.name || ''))
   const defaultSelected = {}
   for (const c of curves) {
     const g = String(c.group || '')
     if (onlyFirstOfPanel) {
-      // 只默认勾**第一条**（MSD 各轴分解 / 取向 / 结晶；其余图例手动打开）
+      // 只默认勾**第一条**（MSD 各轴分解 / BOO 的 q̄6 随时间；其余图例手动打开）
       defaultSelected[c.label] = c.label === curves[0].label
     } else {
       defaultSelected[c.label] = firstGroup ? g === firstGroup : true

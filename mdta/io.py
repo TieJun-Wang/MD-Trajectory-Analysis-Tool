@@ -548,6 +548,12 @@ class MDTrajectory:
             "n_bonds": len(doc.get("bonds") or []),
             "n_images_skipped": int(doc.get("n_images_skipped") or 0),
             "trajectory_hint": doc.get("trajectory_hint"),
+            # 电荷来自 `.xsd` 里每个原子的 Charge 属性（Forcite/DFT 算过的文件才有）
+            "n_charges": (0 if doc.get("charges") is None
+                          else int(len(doc.get("charges") or []))),
+            "net_charge": (None if doc.get("charges") is None
+                           else float(sum(float(x) for x in doc["charges"]))),
+            "n_charge_missing": int(doc.get("n_charge_missing") or 0),
             "cell": (None if doc.get("cell") is None
                      else [float(x) for x in doc["cell"]]),
         }

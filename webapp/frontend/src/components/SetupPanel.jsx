@@ -742,17 +742,12 @@ export function ParamBlock({ params, setParams, which = null, primaryMolecules =
           '默认勾上：两个质心常分处盒边界两侧，直接相减会得到 ~L 的假跳变；'
           + '取消勾选才退回"包裹坐标直接相减"（复现作者 COM.py 时用）'), '用最小镜像', 6),
     ]],
-    ['键取向序 BOO / 晶体识别', ['boo', 'crystal'], [
+    ['键取向序 BOO', ['boo'], [
       F('boo_cutoff', '邻域半径 (Å)', 'input',
         numInput('自动', { step: 0.1, min: 0, ...p('boo_cutoff') }), '自动'),
       F('boo_averaged', '用平均版 q̄_l', 'check',
         chk('boo_averaged', '是（推荐）',
           '推荐勾上：先用邻居平均再求模，区分固相/液相更稳'), '是（推荐）'),
-      F('q6_solid', '固相判据 q̄6 >', 'input',
-        numInput('0.5', { step: 0.05, min: 0, max: 1, ...p('q6_solid') }),
-        '0.5'),
-      F('min_cluster', '晶簇最小规模', 'input',
-        numInput('10', { step: 1, min: 1, ...p('min_cluster') }), '10'),
     ]],
     ['回转半径 Rg', ['rg'], [
       // 「分析对象」是**互斥**的两档：选哪个就只算哪个（后端 object=...）。

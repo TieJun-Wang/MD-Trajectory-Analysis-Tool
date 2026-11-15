@@ -57,8 +57,6 @@ PANEL_SLUGS: dict[tuple[str, int], str] = {
     ("boo", 0): "qbar6",          # q̄6 随时间
     ("boo", 1): "qbar6_dist",     # q̄6 分布
     ("boo", 2): "q4q6",           # q̄4–q̄6 平面
-    ("crystal", 0): "frac",       # 晶区原子占比
-    ("crystal", 1): "cluster",    # 最大晶簇
     # 动力学与输运
     ("msd", 0): "tau",            # MSD(τ)
     ("msd", 1): "fit",            # 线性区拟合

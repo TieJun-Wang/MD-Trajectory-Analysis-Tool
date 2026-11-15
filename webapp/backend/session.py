@@ -74,8 +74,8 @@ class OpenProgress:
             "topology": self.topology,
             "trajectory": self.trajectory,
         }
-from mdta.pipeline import (ANALYSIS_TITLES, DEFAULT_ORDER, Analyzer,
-                           sort_by_estimate)
+from mdta.pipeline import (ANALYSIS_TITLES, DEFAULT_ORDER, RETIRED_ANALYSES,
+                           Analyzer, sort_by_estimate)
 from mdta.selection import chains as _chains
 from mdta.selection import list_chains, select
 from mdta.systeminfo import info_tables
@@ -2000,6 +2000,17 @@ class Session:
         # 校验要针对**全部已注册分析项**，而不是 DEFAULT_ORDER（后者只是"默认
         # 勾选的那批"）。否则界面里能勾上、提交却报"未知分析项"的分析（如
         # rdf2d / comdist 这类可选项）在前端就完全用不了。
+        # 已下线的分析项（1.0.8：晶体/非晶区域识别）**跳过并说明**，不报错 ——
+        # 老配置 / 老脚本 / 浏览器缓存里可能还留着它。
+        retired = [w for w in which if w in RETIRED_ANALYSES]
+        if retired:
+            which = [w for w in which if w not in RETIRED_ANALYSES]
+            for w in retired:
+                print(f"  -- 跳过下线的分析项 {w}：{RETIRED_ANALYSES[w]}")
+            if not which:
+                raise SessionError("勾选的分析项都已下线："
+                                   + "；".join(RETIRED_ANALYSES[w] for w in retired)
+                                   + "。请改选其它分析项")
         known = set(ANALYSIS_TITLES)
         bad = [w for w in which if w not in known]
         if bad:

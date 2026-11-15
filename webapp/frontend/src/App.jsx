@@ -124,8 +124,8 @@ export default function App() {
     // 选中的那种，不再同时算整组与逐分子两套。`per_molecule` 现在只归 R_ee 用。
     mass_weighted: true, rg_object: 'molecule', per_molecule: true,
     ree_ends: 'bond_graph', ree_atoms: '',
-    // BOO / 晶体识别：邻域半径留空 = 自动（按最近邻距离中位数推定）
-    boo_cutoff: '', boo_averaged: true, q6_solid: 0.5, min_cluster: 10,
+    // BOO：邻域半径留空 = 自动（按最近邻距离中位数推定）
+    boo_cutoff: '', boo_averaged: true,
     // 面内 RDF (2D) / 两组分质心距
     // 质心距默认**用最小镜像**（PBC），见 groups 里的「质心距 PBC」勾选框
     rdf2d_rmax: 70, rdf2d_nbins: 140, slab_lo: '', slab_hi: '', comdist_pbc: true,
@@ -695,11 +695,8 @@ export default function App() {
                per_molecule: params.per_molecule !== false,
                // 手工指定两个成键原子作为链端（留空 = None，按 ends 自动判定）
                atom_indices: reeAtoms },
-        // 键取向序 BOO / 晶体-非晶识别：邻域半径留空 → null（后端自动推定）
+        // 键取向序 BOO：邻域半径留空 → null（后端自动推定）
         boo: { cutoff: optNum(params.boo_cutoff), averaged: params.boo_averaged !== false },
-        crystal: { cutoff: optNum(params.boo_cutoff),
-                   q6_solid: Number(params.q6_solid) || 0.5,
-                   min_cluster: Number(params.min_cluster) || 10 },
         // 面内 RDF (2D)：slab 留空 = 全盒
         // 两组分质心距：**默认用最小镜像**（PBC），取消勾选才退回"包裹坐标相减"
         rdf2d: { plane_axis: (params.axis === 'all' ? 2 : Number(params.axis)) ?? 2,

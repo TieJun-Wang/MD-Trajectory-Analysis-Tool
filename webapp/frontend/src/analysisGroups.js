@@ -16,7 +16,7 @@
 export const FALLBACK_GROUPS = [
   ['链构象', ['rg', 'ree', 'dihedral'], '构象'],
   ['空间结构', ['density', 'rdf', 'rdf2d', 'comdist', 'contact', 'interface'], '结构'],
-  ['取向与结晶', ['orientation', 'order', 'boo', 'crystal'], '取向'],
+  ['取向与结晶', ['orientation', 'order', 'boo'], '取向'],
   ['动力学与输运', ['msd'], '输运'],
 ]
 

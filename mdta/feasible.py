@@ -19,9 +19,9 @@ _MIN_CHAIN_ATOMS = 8
 _MIN_DIHEDRAL_ATOMS = 4
 #: **图全是"随时间变化"**的分析项（没有静态面板）：单帧下整项没有可看内容。
 #: 逐项核对过实现：comdist（质心距随时间 + 沿 z 的符号距离随时间）、
-#: order（各有序度分量随时间）、crystal（晶区占比 / 最大晶簇随时间）、
+#: order（各有序度分量随时间）、boo（q̄6 随时间那类曲线）、
 #: msd（MSD 随时间 / MSD(τ)）。其余分析都至少有一张静态分布图。
-_ALL_TIME_PANELS = ("msd", "vacf", "comdist", "order", "crystal")
+_ALL_TIME_PANELS = ("msd", "vacf", "comdist", "order")
 
 _OK = {"ok": True, "level": "ok", "reason": ""}
 
@@ -158,7 +158,6 @@ def preflight(az, *, n_frames: int | None = None,
             out["comdist"] = _OK
             out["interface"] = _OK if box else _blocked(box_need)
     out["boo"] = _OK if box else _blocked(box_need)
-    out["crystal"] = _OK if box else _blocked(box_need)
 
     # ---- 动力学：要组分，且至少 2 帧
     if n_comp < 1:
@@ -203,6 +202,6 @@ def preflight(az, *, n_frames: int | None = None,
     # 补齐没有单独判定的项（默认放行）
     for name in ("rg", "ree", "dihedral", "density", "rdf", "rdf2d", "comdist",
                  "contact", "interface", "orientation", "order", "boo",
-                 "crystal", "msd"):
+                 "msd"):
         out.setdefault(name, _OK)
     return out

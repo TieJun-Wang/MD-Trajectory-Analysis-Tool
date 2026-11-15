@@ -76,16 +76,21 @@ DEFAULT_PARAMS: dict = {
     # VACF：max_lag 留空 = 用满整条轨迹（与 Forcite 一样逐 lag 全给）
     "vacf": {"max_lag": None},
     # τ 轴默认**用满整条轨迹**；想收缩就传 {"tau_intervals": 5}（= 总时长/5）
-    # 键取向序参数 / 晶体-非晶识别（1.0.2）：默认用 Lechner–Dellago 平均版 q̄6，
+    # 键取向序参数（1.0.2）：默认用 Lechner–Dellago 平均版 q̄6，
     # 邻域半径留空 = 自动按最近邻距离中位数推定
     "boo": {"cutoff": None, "averaged": True},
-    "crystal": {"cutoff": None, "q6_solid": 0.5, "min_cluster": 10},
 }
 
 #: 默认执行顺序（按设计大纲第 25–27 章）
 DEFAULT_ORDER = ["rg", "ree", "dihedral", "density", "rdf", "contact",
-                 "interface", "orientation", "order", "boo", "crystal", "msd",
+                 "interface", "orientation", "order", "boo", "msd",
                  "vacf"]
+
+#: 已**下线**的分析项：老配置 / 老脚本里可能还留着，直接跳过并说明，
+#: 不报"未知分析项"（1.0.8 起「晶体/非晶区域识别」下线，改用键取向序 BOO）
+RETIRED_ANALYSES: dict[str, str] = {
+    "crystal": "「晶体/非晶区域识别」已下线（请改用键取向序 BOO）",
+}
 
 #: 中文标题
 ANALYSIS_TITLES = {
@@ -101,7 +106,6 @@ ANALYSIS_TITLES = {
     "orientation": "链段取向分析",
     "order": "结构有序度分析",
     "boo": "键取向序参数 BOO",
-    "crystal": "晶体/非晶区域识别",
     "msd": "均方位移 MSD",
     "vacf": "速度自相关函数 VACF",
 }
@@ -112,7 +116,7 @@ ANALYSIS_TITLES = {
 ANALYSIS_GROUPS: list[tuple[str, tuple[str, ...]]] = [
     ("链构象", ("rg", "ree", "dihedral")),
     ("空间结构", ("density", "rdf", "rdf2d", "comdist", "contact", "interface")),
-    ("取向与结晶", ("orientation", "order", "boo", "crystal")),
+    ("取向与结晶", ("orientation", "order", "boo")),
     ("动力学与输运", ("msd", "vacf")),
 ]
 
@@ -575,11 +579,10 @@ class Analyzer:
             return boo_mod.analyze_boo(self.trajectory, ag, sel,
                                        label=lab, verbose=verbose, **p)
         if name == "crystal":
-            from .analysis import boo as boo_mod
-
-            ag, lab = self._orientation_target()
-            return boo_mod.analyze_crystal_regions(self.trajectory, ag, sel,
-                                                   label=lab, verbose=verbose, **p)
+            # 晶体/非晶区域识别已按用户要求**下线**（1.0.8）。老配置里若还留着
+            # 这一项，就跳过并说明，而不是抛"未知分析项"让整轮失败。
+            self.skip_reason = "「晶体/非晶区域识别」已下线（请改用键取向序 BOO）"
+            return None
         if name == "msd":
             groups = self._msd_groups()
             if not groups:
