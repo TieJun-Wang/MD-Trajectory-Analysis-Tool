@@ -83,12 +83,21 @@ def segment_pairs(ag, mode: str = "backbone", *, custom_pairs=None,
         return segment_pairs(ag, mode="backbone", stride=stride, heavy_only=heavy_only)
 
     if mode == "bonds":
-        rows = []
-        idx = set(int(a) for a in ag.indices)
-        for b in ag.bonds:
-            i, j = int(b[0].index), int(b[1].index)
-            if i in idx and j in idx:
-                rows.append((i, j))
+        order = np.asarray(ag.indices, dtype=np.int64)
+        n_loc = int(order.size)
+        try:
+            bi = np.asarray(ag.bonds.indices, dtype=np.int64).reshape(-1, 2)
+        except Exception:                                    # noqa: BLE001
+            bi = np.zeros((0, 2), dtype=np.int64)
+        if bi.size == 0 or n_loc == 0:
+            return np.zeros((0, 2), dtype=int)
+        li = np.searchsorted(order, bi[:, 0])
+        lj = np.searchsorted(order, bi[:, 1])
+        li_c = np.clip(li, 0, n_loc - 1)
+        lj_c = np.clip(lj, 0, n_loc - 1)
+        good = (order[li_c] == bi[:, 0]) & (order[lj_c] == bi[:, 1])
+        rows = np.stack([order[li_c[good]], order[lj_c[good]]], axis=1) \
+            if good.any() else np.zeros((0, 2), dtype=np.int64)
         return np.asarray(rows, dtype=int).reshape(-1, 2)
 
     if mode != "backbone":
@@ -99,21 +108,110 @@ def segment_pairs(ag, mode: str = "backbone", *, custom_pairs=None,
     #    进去。实测「石墨烯 + 100 条 C12」体系：整个烷烃组分只得到 **10 个**链段
     #    （应为 1000 个），取向参数因此完全错误（P2 从 0.0044 变成 −0.396）。
     #    现在按连通碎片逐分子取路径，单分子选择的配对与旧实现逐位相同。
-    try:
-        frags = list(ag.fragments)
-    except Exception:                                        # noqa: BLE001
-        frags = [ag]
+    #
+    # 性能：旧实现按碎片调 ``MDAnalysis`` 的 ``ag.fragments`` 再逐分子建键表
+    #      （每个碎片一次 `ag.bonds`，实测 ~3 ms）+ 逐键 `b[0].index`；现在
+    #      一次读出整组键表、自己用并查集分连通分量（20PE30 实测 0.21 s → ~5 ms）。
     s = max(1, int(stride))
+    order = np.asarray(ag.indices, dtype=np.int64)
+    n_loc = int(order.size)
+    if n_loc == 0:
+        return np.zeros((0, 2), dtype=int)
+    try:
+        bi = np.asarray(ag.bonds.indices, dtype=np.int64).reshape(-1, 2)
+    except Exception:                                        # noqa: BLE001
+        bi = np.zeros((0, 2), dtype=np.int64)
+    if bi.size == 0:
+        return np.zeros((0, 2), dtype=int)
+    li = np.searchsorted(order, bi[:, 0])
+    lj = np.searchsorted(order, bi[:, 1])
+    li_c = np.clip(li, 0, n_loc - 1)
+    lj_c = np.clip(lj, 0, n_loc - 1)
+    good = (order[li_c] == bi[:, 0]) & (order[lj_c] == bi[:, 1])
+    if not good.any():
+        return np.zeros((0, 2), dtype=int)
+    ii = li_c[good]
+    jj = lj_c[good]
+
+    # 重原子掩码：只保留两端都是重原子的键（H 会把骨架拐进侧基）
+    if heavy_only:
+        try:
+            el = np.asarray([str(x) for x in ag.elements], dtype=str)
+            if el.size == n_loc:
+                is_h = np.char.startswith(np.char.upper(el), "H") | (el == "")
+                keep = ~(is_h[ii] | is_h[jj])
+                ii, jj = ii[keep], jj[keep]
+        except Exception:  # noqa: BLE001
+            pass
+    if ii.size == 0:
+        return np.zeros((0, 2), dtype=int)
+
+    # 连通分量（并查集，纯 numpy/列表，不碰 MDAnalysis 对象）
+    from ..topology import bond_components
+
+    comp = bond_components(n_loc, np.stack([ii, jj], axis=1))
+    # 整组邻接表（无向）
+    adj: list[list[int]] = [[] for _ in range(n_loc)]
+    for a, b2 in zip(ii.tolist(), jj.tolist()):
+        adj[a].append(b2)
+        adj[b2].append(a)
+
     rows: list[tuple[int, int]] = []
-    for f in frags:
-        if f.n_atoms < s + 1:
+    for cid in np.unique(comp).tolist():
+        nodes = np.flatnonzero(comp == cid)
+        if nodes.size < s + 1:
             continue
-        path = backbone_path(f, heavy_only=heavy_only)
+        path = _longest_path(adj, nodes)
         if path.size < s + 1:
             continue
-        for i in range(path.size - s):
-            rows.append((int(path[i]), int(path[i + s])))
+        for k in range(path.size - s):
+            rows.append((int(order[path[k]]), int(order[path[k + s]])))
     return np.asarray(rows, dtype=int).reshape(-1, 2)
+
+
+def _longest_path(adj, nodes) -> np.ndarray:
+    """在**一个连通分量**上两遍 BFS 求最长路径（返回组内下标数组）。
+
+    等价于 :func:`mdta.analysis.conformation.backbone_path` 的算法，但只吃
+    预建好的邻接表（不反复访问 MDAnalysis 的 ``ag.bonds``）。
+    """
+    from collections import deque
+
+    nodes = np.asarray(nodes, dtype=np.int64)
+    if nodes.size == 0:
+        return np.zeros(0, dtype=np.int64)
+    start = int(nodes[0])
+    for v in nodes.tolist():                      # 从"有邻居的节点"起步更稳
+        if adj[v]:
+            start = v
+            break
+
+    def bfs(src: int):
+        dist = {src: 0}
+        prev = {src: -1}
+        q = deque([src])
+        far = src
+        while q:
+            u = q.popleft()
+            du = dist[u]
+            for v in adj[u]:
+                if v not in dist:
+                    dist[v] = du + 1
+                    prev[v] = u
+                    q.append(v)
+                    if dist[v] > dist[far]:
+                        far = v
+        return far, prev
+
+    u, _ = bfs(start)
+    v, prev = bfs(u)
+    path: list[int] = []
+    cur = v
+    while cur >= 0:
+        path.append(cur)
+        cur = int(prev.get(cur, -1))
+    path.reverse()
+    return np.asarray(path, dtype=np.int64)
 
 
 def repeat_unit_pairs(ag, heavy_only: bool = True):
@@ -139,27 +237,53 @@ def repeat_unit_pairs(ag, heavy_only: bool = True):
         info["reason"] = "拓扑没有键连接信息，无法识别化学重复单元"
         return np.zeros((0, 2), dtype=int), info
 
-    in_group = set(int(a) for a in ag.indices)
+    # ⚠️ 全程用**数组**做。旧实现逐键 `int(b[0].index)`，MDAnalysis 的 Bond 对象
+    #    每次访问都要现建（20PE30 / 3640 原子实测 0.34 s，占整个取向分析的 ~90%）。
+    order = np.asarray(ag.indices, dtype=np.int64)
+    n_loc = int(order.size)
     try:
-        res_of = {int(a.index): int(a.resindex) for a in ag}
+        bi = np.asarray(bonds.indices, dtype=np.int64).reshape(-1, 2)
+    except Exception:  # noqa: BLE001
+        bi = np.zeros((0, 2), dtype=np.int64)
+    if bi.size == 0 or n_loc == 0:
+        info["reason"] = "键表为空"
+        return np.zeros((0, 2), dtype=int), info
+    li = np.searchsorted(order, bi[:, 0])
+    lj = np.searchsorted(order, bi[:, 1])
+    li_c = np.clip(li, 0, n_loc - 1)
+    lj_c = np.clip(lj, 0, n_loc - 1)
+    good = (order[li_c] == bi[:, 0]) & (order[lj_c] == bi[:, 1])
+    if not good.any():
+        info["reason"] = "键两端的原子不在所选组内"
+        return np.zeros((0, 2), dtype=int), info
+    gi = order[li_c[good]]                 # 全体系原子下标（库外调用者按它取坐标）
+    gj = order[lj_c[good]]
+    try:
+        res_of_atom = np.asarray(ag.resindices, dtype=np.int64)
     except Exception:  # noqa: BLE001
         info["reason"] = "无法读取残基归属"
         return np.zeros((0, 2), dtype=int), info
+    res_i = res_of_atom[li_c[good]]
+    res_j = res_of_atom[lj_c[good]]
+    is_cross = res_i != res_j                # 只保留**跨残基**的连接键
+    if not is_cross.any():
+        info["reason"] = "没有跨残基的连接键（每个分子就是一个残基）"
+        return np.zeros((0, 2), dtype=int), info
+    gi, gj = gi[is_cross], gj[is_cross]
+    res_i, res_j = res_i[is_cross], res_j[is_cross]
 
     junctions: dict[int, list[int]] = {}
-    for b in bonds:
-        i, j = int(b[0].index), int(b[1].index)
-        if i not in in_group or j not in in_group:
-            continue
-        if res_of[i] == res_of[j]:
-            continue                       # 残基内部的键不算连接键
-        junctions.setdefault(res_of[i], []).append(i)
-        junctions.setdefault(res_of[j], []).append(j)
+    for ri, ai, rj, aj in zip(res_i.tolist(), gi.tolist(),
+                              res_j.tolist(), gj.tolist()):
+        junctions.setdefault(int(ri), []).append(int(ai))
+        junctions.setdefault(int(rj), []).append(int(aj))
 
     heavy: dict[int, str] | None = None
     if heavy_only:
         try:
-            heavy = {int(a.index): str(a.element) for a in ag}
+            el = [str(x) for x in ag.elements]
+            if len(el) == n_loc:
+                heavy = {int(a): el[i] for i, a in enumerate(order.tolist())}
         except Exception:  # noqa: BLE001
             heavy = None
 

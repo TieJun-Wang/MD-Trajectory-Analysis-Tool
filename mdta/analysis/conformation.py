@@ -1379,8 +1379,6 @@ def _finish_ends(ag, info: dict) -> dict:
     return info
 
 
-@register("ree", "端到端距离 R_ee")
-
 def _bond_graph_ends_prefer_heavy(ag) -> dict:
     """优先用**重原子键图**定链端，重原子图给不出端点时回退到全图。
 
@@ -1396,6 +1394,7 @@ def _bond_graph_ends_prefer_heavy(ag) -> dict:
     return _finish_ends(ag, bond_graph_ends(ag, heavy_only=False))
 
 
+@register("ree", "端到端距离 R_ee")
 def analyze_end_to_end(mdt, ag, selection: FrameSelection, *,
                        atom_indices: Sequence[int] | None = None,
                        ends: str = "bond_graph",
