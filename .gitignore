@@ -76,6 +76,13 @@ yarn-error.log*
 /test/mda_test/_tmp_*
 /test/mda_test/_ssr_build/
 /test/mda_test/__pycache__/
+# my_test/：用**本工具自己的引擎**把每一项功能跑一遍的功能脚本（与 mda_test 分工不同）
+!/test/my_test/
+!/test/my_test/*.py
+!/test/my_test/README.md
+# my_test 跑出来的 CSV/PNG/Excel 是运行产物，不进仓库
+/test/my_test/_out/
+/test/my_test/__pycache__/
 
 # 散落在别处的前端测试脚本（node 测试必须留在 webapp/frontend 才能解析 node_modules，
 # 所以不能挪进 test/，这里按 `_` 前缀整体排除，只把**构建脚本**放回来）

@@ -2,10 +2,12 @@
 
 本目录放**测试与第三方对拍**：`selftest.py`（数值主回归）、`test_convert.py`
 （格式转换）、`webapp/_api_check.py`（后端 API 冒烟）、`mda_test/`（用 MDAnalysis /
-freud / MDTransport 独立复现每一类分析并逐值对拍）。
+freud / MDTransport 独立复现每一类分析并逐值对拍）、`my_test/`（**用本工具自己的
+引擎**把每一项功能跑一遍的功能脚本）。
 
-> **源码已入库**（`.gitignore` 对这几个入口与 `mda_test/*.py` 做了例外）。
-> 跑出来的产物（`*.csv` / `*.png`、`_tmp_*`、缓存目录）仍然不进仓库。
+> **源码已入库**（`.gitignore` 对这几个入口与 `mda_test/*.py`、`my_test/*.py`
+> 做了例外）。
+> 跑出来的产物（`*.csv` / `*.png`、`_tmp_*`、`_out/`、缓存目录）仍然不进仓库。
 > 其余历史诊断/探针脚本已按用户要求清理（旧脚本归档在仓库外层的
 > `_test_archive/`，不入库、需要时可翻）。
 
@@ -18,10 +20,41 @@ freud / MDTransport 独立复现每一类分析并逐值对拍）。
 | `python test/selftest.py` | **数值正确性主回归**：Rg / RDF / MSD / 二面角 / 界面 / 取向（含两种统计权重）/ 接触 / BOO / 组分识别 / QC / 格式后缀表 / `.trj` 转换 / MS 文档 / LAMMPS 后缀 / 取消响应 … | **107 项**，约 1–2 min |
 | `python test/test_convert.py` | **格式转换链路**（`.xsd/.xtd/.car/.trj/…` 的识别、转换与缓存） | 秒级 |
 | `python test/webapp/_api_check.py` | **后端 API 全流程**：健康检查 → 列目录 → 开会话 → 选对象 → 跑分析 → 导出 → **刷新恢复/增量追加/清空** → 错误处理 → 关闭 | 全通过，约 2–3 min（用 `TestClient`，**不用起服务**） |
+| `cd test; python -m my_test` | `my_test/` 全套**功能脚本**（16 项），逐项打印输出并导出 CSV | 约 20 s（20PE30 / 20 帧） |
 | `cd test; python -m mda_test` | `mda_test/` 全套第三方对拍（18 步） | 分钟级，大轨迹先设 `MDTA_MDA_FRAMES=20` |
 
 都不需要浏览器；前端渲染类自检在 `webapp/frontend/_ui_render.mjs`
 （在 `webapp/frontend` 目录执行 `node _ui_render.mjs`，766 项）。
+
+---
+
+## 一·二、`test/my_test/` —— 用**本工具自己的引擎**跑每一项功能
+
+和 `mda_test/` 分工相反：那边拿第三方实现核对"**算得对不对**"，这里直接调
+`mdta.analysis.*`，演示"**这个功能怎么用、输出长什么样、导出的文件叫什么名**"。
+一个分析一个文件，都能单独跑（不带参数 = 交互菜单，带参数 = 命令行），
+`run_all.py` 一次跑完 16 项并打印 ✅/⏭/✗：
+
+```powershell
+python test/my_test/run_all.py                       # 默认 20PE30，20 帧，约 20 s
+python test/my_test/run_all.py --system mix --frames 10   # 多组分体系
+python test/my_test/contact.py --frames 50 --cutoff 4.5 -y
+```
+
+| 脚本 | 对应的工具功能 |
+|---|---|
+| `system.py` | 体系信息 / 组分识别 / 能力检测 / 14 项分析的**可行性预判**（界面置灰的依据） |
+| `frames.py` | 帧选择：时间窗 / 抽帧间隔 / 平衡段 / 帧数上限 |
+| `rg.py` `ree.py` `dihedral.py` | Rg、R_ee、二面角（含 trans/gauche 比例） |
+| `density.py` `rdf.py` `rdf2d.py` `comdist.py` `contact.py` `interface.py` | 密度 ρ(z)、g(r)、g₂(r)、质心距、接触、界面宽度 |
+| `orientation.py` `order.py` `boo.py` | 链段取向 S/P₂、结构有序度、键取向序 q̄₄/q̄₆ |
+| `msd.py` `vacf.py` | MSD + 扩散系数、速度自相关函数 |
+| `pipeline.py` | **一键分析**：`Analyzer.run_all` + 导出 CSV/PNG/`summary.xlsx` |
+| `_common.py` `_menu.py` `run_all.py` | 公共 `Engine` / 菜单（复用 mda_test 的）/ 一次跑完 |
+
+> 单组分体系（20PE30）里「界面宽度」「两组分质心距」会**跳过并说明原因**
+> ——它们要两组分；预期 14 ✅ / 2 ⏭ / 0 ✗。用 `--system mix` 可看它们出结果。
+> 详见 `my_test/README.md`。
 
 ---
 

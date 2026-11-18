@@ -180,6 +180,7 @@ cd ../..
 ```powershell
 python test/selftest.py            # 70 项数值自检（约 2–4 min）
 python test/webapp/_api_check.py   # 后端全流程（约 30 s，不用起服务）
+python test/my_test/run_all.py     # 16 个功能脚本跑一遍（约 20 s，看每项输出与导出的 CSV 名）
 ```
 
 `selftest` 默认用仓库根的 `adk_oplsaa.tpr` + `adk_oplsaa.xtc`（若没拷这两个数据文件，
@@ -208,7 +209,7 @@ python mdta_cli.py run -t adk_oplsaa.tpr -x adk_oplsaa.xtc --interval 100 -o ana
 | **写权限** | 工具会在仓库目录写 `_offsets_cache/`、`_convert_cache/`、`webapp/outputs/`；数据目录可以是只读的（偏移文件会重定向到 `_offsets_cache/`，可用 `MDTA_OFFSETS_INPLACE=1` 关掉） |
 | **端口** | 默认 8000；被占用就换 `--port`。前端构建产物由后端托管，**不需要**另起前端服务 |
 | **Materials Studio `.trj`** | 见下面「第 6 步：`.trj` 要额外准备什么」 |
-| **测试脚本** | `test/selftest.py`（数值）、`test/test_convert.py`（格式转换）、`test/webapp/_api_check.py`（后端 API 冒烟）、`test/mda_test/`（MDAnalysis / freud / MDTransport 第三方对拍），都**不用起服务**；**源码已入库**，跑出来的 CSV/PNG 等产物不入库。说明见 `test/README.md` |
+| **测试脚本** | `test/selftest.py`（数值）、`test/test_convert.py`（格式转换）、`test/webapp/_api_check.py`（后端 API 冒烟）、`test/mda_test/`（MDAnalysis / freud / MDTransport 第三方对拍）、`test/my_test/`（**用本工具的引擎**把每项功能跑一遍的功能脚本，看输出与导出文件名用它），都**不用起服务**；**源码已入库**，跑出来的 CSV/PNG 等产物不入库。说明见 `test/README.md` 与 `test/my_test/README.md` |
 
 #### 第 6 步：`.trj` 要额外准备什么
 
@@ -405,12 +406,18 @@ MDT/
 │   ├── selftest.py                数值正确性自检（100+ 项）
 │   ├── test_convert.py            格式转换自检（.xsd/.xtd/.trj/…）
 │   ├── webapp/_api_check.py       后端 API 全流程自检
-│   └── mda_test/                  用 MDAnalysis / freud / MDTransport 独立复现并逐值对拍
+│   ├── mda_test/                  用 MDAnalysis / freud / MDTransport 独立复现并逐值对拍
 │       ├── rg.py ree.py msd.py rdf.py comdis.py contact.py        基础量
 │       ├── density.py interface.py orientation.py order/boo       结构与取向
 │       ├── dihedral.py nematic.py boo.py                          Dihedral / Nematic / Steinhardt
 │       ├── rdf_mdat.py msd_mdat.py                                MDTransport 口径
 │       └── _common.py _menu.py run_all.py                         公共 / 菜单 / 一次跑完
+│   └── my_test/                   用**本工具的引擎**把每项功能跑一遍（看输出 / 导出文件名）
+│       ├── rg.py ree.py dihedral.py density.py rdf.py rdf2d.py    链构象 + 空间结构
+│       ├── comdist.py contact.py interface.py                     接触 / 界面 / 质心距
+│       ├── orientation.py order.py boo.py                         取向与结晶
+│       ├── msd.py vacf.py system.py frames.py                     输运 / 体系 / 帧选择
+│       └── pipeline.py _common.py _menu.py run_all.py             一键分析 / 公共 / 一次跑完
 ├── examples/
 │   ├── quickstart.py              最小示例
 │   └── run_full_pipeline.py       完整流程示例（10 项分析 + 导出）
