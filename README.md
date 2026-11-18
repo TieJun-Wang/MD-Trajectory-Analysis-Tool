@@ -1,6 +1,10 @@
 # MD Trajectory Analysis Tool —— 使用说明
 
 > 面向高分子材料研究的分子动力学轨迹分析工具
+>
+> **第一次用请看 [`使用手册.md`](使用手册.md)**：逐步操作（文件读取 → 体系信息 →
+> 结构选择 → 分析设置 → 看结果 → 导出）+ 14 项分析逐个讲清「是什么 / 公式 /
+> 参数含义 / 图表怎么看」+ 常见问题。本 README 偏"安装、设计、验证"。
 
 核心流程：**Trajectory → Selection → Analysis → Visualization → Export**
 
