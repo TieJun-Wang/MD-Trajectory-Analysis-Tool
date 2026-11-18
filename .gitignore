@@ -58,10 +58,24 @@ yarn-error.log*
 .env.*.local
 !/.env.example
 
-# ---------------------------------------------------------------- 测试脚本（全部不进仓库）
-# 目录整体排除：selftest / 回归 / 诊断 / 探针 / 夹具 / 报告都在 test/ 下（只留说明文档）
+# ---------------------------------------------------------------- 测试脚本
+# `test/` 下**这些**要进仓库：数值自检、格式转换自检、后端 API 冒烟、
+# 以及 mda_test/（用 MDAnalysis / freud / MDTransport 做第三方对拍的脚本集）。
+# 其余（探针 / 夹具 / 运行产物 / 缓存）仍然排除。
 /test/*
 !/test/README.md
+!/test/selftest.py
+!/test/test_convert.py
+!/test/webapp/
+!/test/webapp/*.py
+!/test/mda_test/
+!/test/mda_test/*.py
+# mda_test 跑出来的 CSV/PNG 是运行产物，不进仓库
+/test/mda_test/*.csv
+/test/mda_test/*.png
+/test/mda_test/_tmp_*
+/test/mda_test/_ssr_build/
+/test/mda_test/__pycache__/
 
 # 散落在别处的前端测试脚本（node 测试必须留在 webapp/frontend 才能解析 node_modules，
 # 所以不能挪进 test/，这里按 `_` 前缀整体排除，只把**构建脚本**放回来）

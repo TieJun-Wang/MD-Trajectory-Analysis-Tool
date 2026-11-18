@@ -1,22 +1,27 @@
 # test —— 测试与自检
 
-本目录只保留**两个**入口脚本（其余历史诊断/探针脚本已按用户要求清理，
-旧脚本归档在仓库外层的 `_test_archive/`，不入库、需要时可翻）。
+本目录放**测试与第三方对拍**：`selftest.py`（数值主回归）、`test_convert.py`
+（格式转换）、`webapp/_api_check.py`（后端 API 冒烟）、`mda_test/`（用 MDAnalysis /
+freud / MDTransport 独立复现每一类分析并逐值对拍）。
 
-> 目录整体被 `.gitignore` 排除，**不会**随 `git add .` 上传；这里只有
-> `README.md` 本身入库，方便别人知道"测试怎么跑"。
+> **源码已入库**（`.gitignore` 对这几个入口与 `mda_test/*.py` 做了例外）。
+> 跑出来的产物（`*.csv` / `*.png`、`_tmp_*`、缓存目录）仍然不进仓库。
+> 其余历史诊断/探针脚本已按用户要求清理（旧脚本归档在仓库外层的
+> `_test_archive/`，不入库、需要时可翻）。
 
 ---
 
-## 一、两个入口
+## 一、入口
 
 | 命令（在**仓库根目录**执行） | 检查什么 | 规模 / 用时 |
 |---|---|---|
-| `python test/selftest.py` | **数值正确性主回归**：Rg / RDF / MSD / 二面角 / 界面 / 取向 / 接触 / BOO / 晶体 / QC / 格式后缀表 / `.trj` 转换 / MS 文档 / LAMMPS 后缀 / 取消响应 … | **97 项**，约 2–4 min |
-| `python test/webapp/_api_check.py` | **后端 API 全流程**：健康检查 → 列目录 → 开会话 → 选对象 → 跑分析 → 导出 → **刷新恢复/增量追加/清空** → 错误处理 → 关闭 | 全通过，约 30 s（用 `TestClient`，**不用起服务**） |
+| `python test/selftest.py` | **数值正确性主回归**：Rg / RDF / MSD / 二面角 / 界面 / 取向（含两种统计权重）/ 接触 / BOO / 组分识别 / QC / 格式后缀表 / `.trj` 转换 / MS 文档 / LAMMPS 后缀 / 取消响应 … | **107 项**，约 1–2 min |
+| `python test/test_convert.py` | **格式转换链路**（`.xsd/.xtd/.car/.trj/…` 的识别、转换与缓存） | 秒级 |
+| `python test/webapp/_api_check.py` | **后端 API 全流程**：健康检查 → 列目录 → 开会话 → 选对象 → 跑分析 → 导出 → **刷新恢复/增量追加/清空** → 错误处理 → 关闭 | 全通过，约 2–3 min（用 `TestClient`，**不用起服务**） |
+| `cd test; python -m mda_test` | `mda_test/` 全套第三方对拍（18 步） | 分钟级，大轨迹先设 `MDTA_MDA_FRAMES=20` |
 
-两者都不需要浏览器；前端渲染类自检在 `webapp/frontend/_ui_render.mjs`
-（需在 `webapp/frontend` 目录执行 `node _ui_render.mjs`，754 项）。
+都不需要浏览器；前端渲染类自检在 `webapp/frontend/_ui_render.mjs`
+（在 `webapp/frontend` 目录执行 `node _ui_render.mjs`，766 项）。
 
 ---
 
